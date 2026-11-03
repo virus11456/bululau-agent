@@ -1,0 +1,2 @@
+# 執行層只用 Python 標準庫，不必安裝第三方套件。
+# 需要 Python 3.9 或以上。實盤檔案鎖使用 fcntl，請在 Linux 或 macOS 上跑。

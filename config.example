@@ -1,0 +1,18 @@
+# 複製成專案根目錄的 .env，再執行：chmod 600 .env
+# .env 已在 .gitignore，不要提交，也不要貼到聊天或工單。
+
+# 幣安 USDT-M 合約金鑰。只開「讀取」和「合約交易」，不要開提現，建議綁定 IP。
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+
+# 金鑰若放在另一個檔案，填絕對路徑。該檔同樣是 KEY=VALUE，不要提交。
+# 根目錄 .env 若已經寫了上面兩把金鑰，程式就不會再採用這個檔案裡的金鑰。
+# BINANCE_ENV_FILE=/絕對路徑/binance.env
+
+# 日誌、state.json、事件表、鎖、停機旗標放這裡。不填則用專案下的 data/
+# 排程請寫絕對路徑，不要依賴當下工作目錄。
+# QUANTBOY_DATA_DIR=/絕對路徑/bululau-agent/data
+
+# 重大事件表。不填則用 <資料目錄>/events.json
+# 可先複製 config/events.example.json
+# QUANTBOY_EVENTS_FILE=/絕對路徑/bululau-agent/data/events.json

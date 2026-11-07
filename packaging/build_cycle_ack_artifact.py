@@ -46,6 +46,7 @@ FILES = (
     "tests/test_timeparse.py",
     "tests/test_mac_cycle.py",
     "tests/test_box_loopback.py",
+    "tests/test_delivery_binding.py",
     "docs/mac_box_wiring.md",
     "tests/test_cycle.py",
     "tests/test_wake_gate.py",

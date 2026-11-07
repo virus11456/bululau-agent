@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 
-from .production_transport import WAKE_FIELDS, _canonical, _secret_in, verify_context, wake_document
+from .production_transport import WAKE_FIELDS, _canonical, _secret_in, verify_context
 from .timeparse import parse_instant
 
 
@@ -38,19 +38,49 @@ def _read(path):
         return handle.read()
 
 
+def _require_channels(envelope):
+    test_channel = envelope.get("test_channel")
+    position_channel = envelope.get("position_channel")
+    if not isinstance(test_channel, bool) or not isinstance(position_channel, bool):
+        raise ValueError("rejected_channel")
+    return test_channel, position_channel
+
+
+def assert_wake_bound(wake, context):
+    """八欄逐一對上 context 與 envelope。缺欄或不一致就拒絕，不把未知改成 false。"""
+    if not isinstance(wake, dict) or set(wake) != set(WAKE_FIELDS):
+        raise ValueError("rejected_wake_fields")
+    if not isinstance(context, dict):
+        raise ValueError("rejected_context")
+    envelope = context.get("envelope")
+    if not isinstance(envelope, dict):
+        raise ValueError("rejected_context")
+    if wake.get("schema_version") != 1 or context.get("schema_version") != 1 or envelope.get("schema_version") != 1:
+        raise ValueError("binding_mismatch")
+    if wake.get("event_type") != "evaluation_wake" or context.get("event_type") != "immutable_context" or envelope.get("event_type") != "evaluation_envelope":
+        raise ValueError("binding_mismatch")
+    for key in ("event_id", "evaluation_id", "sent_at"):
+        if wake.get(key) != context.get(key) or wake.get(key) != envelope.get(key):
+            raise ValueError("binding_mismatch")
+    if wake.get("reason") != envelope.get("reason"):
+        raise ValueError("binding_mismatch")
+    test_channel, position_channel = _require_channels(envelope)
+    if wake.get("test_channel") is not test_channel or wake.get("position_channel") is not position_channel:
+        raise ValueError("binding_mismatch")
+    if envelope.get("orders_allowed") is not False:
+        raise ValueError("orders_not_allowed")
+
+
 def accept_delivery(document, now, inbox):
-    """接收 {wake, context}。wake 必須剛好八欄，而且和 envelope 導出的相同。"""
+    """接收 {wake, context}。wake 必須剛好八欄，而且和 envelope 逐欄相同。"""
     if not isinstance(document, dict) or set(document) != {"schema_version", "event_type", "wake", "context"}:
         raise ValueError("rejected_context")
     if document.get("schema_version") != 1 or document.get("event_type") != "evaluation_delivery":
         raise ValueError("rejected_context")
     wake = document.get("wake")
     context = document.get("context")
-    if not isinstance(wake, dict) or set(wake) != set(WAKE_FIELDS):
-        raise ValueError("rejected_wake_fields")
     verified = verify_context(context, now)
-    if wake != wake_document(context.get("envelope")):
-        raise ValueError("binding_mismatch")
+    assert_wake_bound(wake, context)
     directory = os.path.join(inbox, "inbox")
     path = os.path.join(directory, verified["event_id"] + ".json")
     raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -132,6 +132,10 @@ class HttpsTransport:
 def wake_document(envelope):
     if not isinstance(envelope, dict) or envelope.get("reason") not in ALLOWED_WAKE_REASONS:
         raise ValueError("rejected_reason")
+    test_channel = envelope.get("test_channel")
+    position_channel = envelope.get("position_channel")
+    if not isinstance(test_channel, bool) or not isinstance(position_channel, bool):
+        raise ValueError("rejected_channel")
     document = {
         "schema_version": 1,
         "event_type": "evaluation_wake",
@@ -139,8 +143,8 @@ def wake_document(envelope):
         "evaluation_id": envelope.get("evaluation_id"),
         "sent_at": envelope.get("sent_at"),
         "reason": envelope.get("reason"),
-        "test_channel": False,
-        "position_channel": False,
+        "test_channel": test_channel,
+        "position_channel": position_channel,
     }
     cycle_key(document["event_id"])
     cycle_key(document["evaluation_id"])

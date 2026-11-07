@@ -19,7 +19,7 @@
 
 ## 受監督回流
 
-官方已核到的送法是外層 `{wake, context}`。`wake` 維持既有八欄，不加第九欄。`context` 是完整 export。全文太大就拒絕，不截斷。沒有找到官方的同步判斷回應、結果下載或 Mac 自動 pull，所以這裡不猜。CopyToBox / CopyFromBox 是逐檔搬運，要 Mac 在線並經本機批准，因此這條是受監督，不是無人值守。
+官方已核到的送法是外層 `{wake, context}`。`wake` 維持既有八欄，不加第九欄。八欄的 `test_channel` 與 `position_channel` 必須和 envelope 裡的布林值相同；缺值不改成 false。`context` 是完整 export。全文太大就拒絕，不截斷。`c-15a60b2092e54c0a92e7fc28423b8559` 這筆舊合成事件維持 pending，不改它的時間。沒有找到官方的同步判斷回應、結果下載或 Mac 自動 pull，所以這裡不猜。CopyToBox / CopyFromBox 是逐檔搬運，要 Mac 在線並經本機批准，因此這條是受監督，不是無人值守。
 
 這輪 POST 預算是 0。`dispatch-hold` 不送。`send-delivery` 只有 `post_approved: true` 才會 POST，Mac 週期不會自己叫它，這包也不建立正式 webhook。
 

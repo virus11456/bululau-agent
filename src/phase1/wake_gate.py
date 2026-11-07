@@ -50,7 +50,14 @@ def _enqueue_cycle(store, evaluation_id, completed_at, reason):
     return item
 
 
-def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_verified=False):
+def _pending_event(store):
+    for item in (store.state.get("outbox") or {}).values():
+        if isinstance(item, dict) and item.get("status") == "pending":
+            return True
+    return False
+
+
+def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_verified=False, mac_gate=False):
     notifier = notifier or UnconfiguredWebhook()
     completed = snapshot.get("as_of")
     fresh = freshness(completed, now) if completed else {"valid": False, "status": "missing"}
@@ -66,21 +73,44 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
         candidates.append(ident)
     positions = snapshot.get("positions")
     orders = snapshot.get("orders")
+    queries = snapshot.get("queries") if isinstance(snapshot.get("queries"), dict) else {}
+    query_names = ("account", "open_orders", "open_algo_orders")
+    classes_zero = snapshot.get("open_orders") == 0 and snapshot.get("algo_orders") == 0 and orders == 0
+    queries_ready = snapshot.get("queries_ok") is True and classes_zero and all(queries.get(name) is True for name in query_names)
     known = (
         snapshot.get("status") == "ok"
+        and snapshot.get("status_trusted") is not False
         and fresh["valid"]
         and not snapshot.get("manage_error")
         and not scan_error
         and positions == 0
-        and orders == 0
+        and (queries_ready if mac_gate else orders == 0)
     )
-    quiet = known and not candidates
+    pending = _pending_event(store) if mac_gate else False
+    quiet = known and not candidates and not pending
     try:
         cycle_key(scan_id)
         evaluation_id = scan_id
     except ValueError:
         evaluation_id = None
-    reason = "quiet_flat_book" if quiet else _reason(snapshot, fresh, scan_error, positions, orders, candidates)
+    if quiet:
+        reason = "quiet_flat_book"
+    elif mac_gate and pending and known and not candidates:
+        reason = "pending_return"
+    elif (
+        mac_gate
+        and not known
+        and snapshot.get("status") == "ok"
+        and fresh["valid"]
+        and not snapshot.get("manage_error")
+        and not scan_error
+        and positions in (0, None)
+        and orders in (0, None)
+        and not candidates
+    ):
+        reason = "snapshot_unknown"
+    else:
+        reason = _reason(snapshot, fresh, scan_error, positions, orders, candidates)
     registered = None
     if not quiet and evaluation_id is not None:
         registered = _enqueue_cycle(store, evaluation_id, completed or now, reason)
@@ -92,6 +122,20 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
         sender = {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "rejected_id"}
     else:
         sender = {"status": "not_attempted", "delivered": False, "http_sent": False, "reason": "quiet_flat_book"}
+        if mac_gate:
+            seen = store.state.setdefault("suppressed_quiet", [])
+            if not any(isinstance(row, dict) and row.get("evaluation_id") == evaluation_id for row in seen):
+                seen.append({
+                    "evaluation_id": evaluation_id,
+                    "reason": "quiet_flat_book",
+                    "as_of": completed,
+                    "queries": {name: True for name in query_names},
+                    "positions": 0,
+                    "open_orders": 0,
+                    "algo_orders": 0,
+                    "candidates": 0,
+                })
+                store.save()
     acked = bool(sender.get("processing_ack")) and bool(sender.get("delivered")) and not sender.get("http_sent") is None
     old_ai = "keep"
     return {

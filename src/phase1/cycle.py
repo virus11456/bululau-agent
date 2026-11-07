@@ -72,7 +72,7 @@ def ack_cycle(store, evaluation_id, *, processing_ack=None, document=None, expec
     return result.get("reason") == "processed"
 
 
-def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier=None):
+def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier=None, mac_gate=False):
     manage_argv = build_manage_argv()
     manage_complete = (
         manage_exit == 0
@@ -96,6 +96,7 @@ def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier
         prefilter_for_gate = {"candidates": []}
     decision = decide(
         store, gate_snapshot, prefilter_for_gate, now=now, scan_id=scan_id, notifier=notifier,
+        mac_gate=mac_gate,
     )
     sender = dict(decision["sender"])
     http_status = sender.get("http_status")

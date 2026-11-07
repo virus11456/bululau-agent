@@ -104,4 +104,12 @@ def parse_status_json(text, code, stderr=""):
     as_of = body.get("as_of")
     if positions is None or regular is None or algo is None or not isinstance(as_of, str) or not as_of:
         return untrusted
-    return {"trusted": True, "positions": positions, "orders": regular + algo, "as_of": as_of}
+    return {
+        "trusted": True,
+        "positions": positions,
+        "open_orders": regular,
+        "algo_orders": algo,
+        "orders": regular + algo,
+        "queries": {name: True for name in QUERIES},
+        "as_of": as_of,
+    }

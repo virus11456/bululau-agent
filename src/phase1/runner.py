@@ -248,16 +248,21 @@ def adapt_status_json(text, stderr, code, fault, manage_code, manage_fault):
             "status": "unknown", "as_of": None, "positions": None, "orders": None,
             "manage_error": True, "manage_complete": False, "limit_older_than_2h": False,
             "status_trusted": False,
+            "queries_ok": False,
         }
     return {
         "status": "ok",
         "as_of": parsed["as_of"],
         "positions": parsed["positions"],
+        "open_orders": parsed["open_orders"],
+        "algo_orders": parsed["algo_orders"],
         "orders": parsed["orders"],
+        "queries": parsed["queries"],
         "manage_error": manage_failed,
         "manage_complete": not manage_failed,
         "limit_older_than_2h": False,
         "status_trusted": True,
+        "queries_ok": True,
     }
 
 
@@ -385,7 +390,10 @@ def run_configured(store, config, *, now, scan_id):
         bind_envelope(store, envelope)
 
     notifier = CommandNotifier(config.get("notifier"), timeout, now, publisher=_publisher) if config.get("notifier") else None
-    decision = run_cycle(store, snapshot, prefilter, now=now, scan_id=scan_id, manage_exit=manage_exit, notifier=notifier)
+    decision = run_cycle(
+        store, snapshot, prefilter, now=now, scan_id=scan_id, manage_exit=manage_exit, notifier=notifier,
+        mac_gate=config.get("role") == "mac",
+    )
     decision["mode"] = mode
     decision["ready"] = False
     decision["switch_allowed"] = False

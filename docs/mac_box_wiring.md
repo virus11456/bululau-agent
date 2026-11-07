@@ -62,9 +62,15 @@ context 裡的持倉與掛單是筆數，沒有幣種、方向、數量、停損
 
 回送繼續用 CopyToBox／CopyFromBox，再 `import-staged`。這要人在線批准。不是無人值守。
 
+## 離線準備的回傳 adapter
+
+`src/phase1/return_adapter.py` 可以用假的 HTTP 與先寫完再 `link` 的儲存跑完 publisher、只讀 pending 的下載、以及原目錄 import／commit／apply。它沒有建立 Vercel 專案、Blob、Function 或 OIDC，也沒有 Blob 客戶端。`VERCEL_BLOB_ATOMIC_CREATE_PROVEN` 是 false：官方 `allowOverwrite=false` 的並行建立還沒有在這裡證明，所以不用先 GET 再 PUT 假裝原子。401／403 停止並只告警一次。404 不是 processed。429、5xx、逾時和斷線在單事件 10 分鐘內按 5、10、20、40、60 秒加 jitter 退避，並尊重 `Retry-After`。redirect 與 TLS 失敗不跟隨。階段 `downloaded`／`imported`／`committed`／`applied` 寫在原 producer 目錄；重啟從該目錄繼續，第二次 apply 是 duplicate，`process_count` 仍是 1。這不證明模型只跑了一次，`ai_execution_proven` 仍是 false。
+
+真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
+
 ## 還沒有的無人值守通道
 
-公開的 artifact 自動傳送規格已向 GM 要，尚未拿到。沒有這份非秘密規格之前，不開服務、不複製 token、也不把 webhook 說成已接通。外部依賴就是這份規格，以及之後另批的 POST。目前預算仍是 0。
+公開的 artifact 自動傳送規格已向 GM 要，尚未拿到。沒有這份非秘密規格之前，不開服務、不複製 token、也不把 webhook 說成已接通。外部依賴就是這份規格，以及上面那張尚未批准的 Vercel 範圍。目前不能說已經省下喚醒。
 
 ## 回退
 

@@ -1,7 +1,7 @@
-"""判斷回傳的離線 adapter。不建立服務、不連 Vercel、不讀交易金鑰。
+"""判斷回傳的離線模組。沒有 CLI、沒有真 HTTP、沒有服務。
 
 私人 Blob 的 allowOverwrite=false 是否能在並行建立時原子拒絕，官方行為尚未在這裡證明。
-因此沒有 Blob 客戶端。測試儲存先寫完暫存檔，再用 link 掛上最終名，不用先 GET 再 PUT。
+因此沒有 Blob 客戶端，production 模式直接拒絕。測試儲存先寫完暫存檔，再用 link 掛上最終名，不用先 GET 再 PUT。
 """
 import hashlib
 import hmac
@@ -9,10 +9,13 @@ import json
 import os
 import secrets
 import time
+from datetime import timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from .ack_contract import apply_processed_ack, cycle_key, load_ack
 from .production_transport import commit_judgment, import_staged
 from .session import Store
+from .timeparse import parse_instant
 
 MAX_BYTES = 64 * 1024
 VERCEL_BLOB_ATOMIC_CREATE_PROVEN = False
@@ -46,6 +49,13 @@ def judgment_put(installation_id, event_id, evaluation_id, envelope_sha256, judg
         "judgment_sha256": judgment_sha,
         "judgment": judgment,
     }
+
+
+def require_offline(mode):
+    """假傳輸只能以 offline 跑。production 不寫、不連；原子建立未證明時也不能改成正式。"""
+    if mode == "offline":
+        return
+    raise ValueError("production_return_blocked")
 
 
 def exclusive_create(path, raw):
@@ -97,7 +107,8 @@ class InstallationStore:
         os.makedirs(directory, mode=0o700, exist_ok=True)
         return os.path.join(directory, event_id + ".json")
 
-    def create(self, installation_id, event_id, document):
+    def create(self, installation_id, event_id, document, mode="offline"):
+        require_offline(mode)
         raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(raw) > MAX_BYTES:
             raise ValueError("too_large")
@@ -126,7 +137,8 @@ def _scope_ok(credential, installation_id, role):
     return hmac.compare_digest(actual, expected)
 
 
-def publish(store, credential, installation_id, document):
+def publish(store, credential, installation_id, document, mode="offline"):
+    require_offline(mode)
     if not _scope_ok(credential, installation_id, "publisher"):
         return {"status": 403, "reason": "scope_rejected", "written": False}
     if not isinstance(document, dict) or set(document) != set(PUT_FIELDS) or document.get("installation_id") != installation_id:
@@ -134,7 +146,7 @@ def publish(store, credential, installation_id, document):
     if "pathname" in document or "callback_url" in document:
         return {"status": 400, "reason": "client_path_rejected", "written": False}
     try:
-        result = store.create(installation_id, document["event_id"], document)
+        result = store.create(installation_id, document["event_id"], document, mode=mode)
     except ValueError as exc:
         code = 409 if str(exc) == "conflict" else 400
         return {"status": code, "reason": str(exc), "written": False}
@@ -184,6 +196,7 @@ class FakeReturnHttp:
         self.fail = None
         self.failures = []
         self.omit_cache = False
+        self.retry_after = None
 
     def request(self, method, path, headers, body, credential):
         self.calls.append(method)
@@ -202,7 +215,7 @@ class FakeReturnHttp:
         if kind == "disconnect":
             raise ConnectionError("disconnect")
         if kind == "backoff":
-            return 429, {"Retry-After": "5"}, b""
+            return 429, {"Retry-After": self.retry_after or "5"}, b""
         if kind == "unavailable":
             return 503, {}, b""
         if kind == "unauthorized":
@@ -265,9 +278,57 @@ def _kept(reason, **extra):
         "old_ai_poll": "keep",
         "ai_execution_proven": False,
         "vercel_blob_atomic_create_proven": False,
+        "production_allowed": False,
     }
     body.update(extra)
     return body
+
+
+def _auth_stop_path(state_dir, installation_id):
+    cycle_key(installation_id)
+    return os.path.join(str(state_dir), "return-recovery", "auth-stop-" + installation_id + ".json")
+
+
+def _load_auth_stop(state_dir, installation_id):
+    path = _auth_stop_path(state_dir, installation_id)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict) or document.get("installation_id") != installation_id:
+        return None
+    if document.get("stopped") is not True or document.get("alerted") is not True:
+        return None
+    return document
+
+
+def _save_auth_stop(state_dir, installation_id, status):
+    path = _auth_stop_path(state_dir, installation_id)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    raw = json.dumps({
+        "installation_id": installation_id,
+        "stopped": True,
+        "alerted": True,
+        "status": status,
+        "reason": "auth_stopped",
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
+    _replace_file(path, raw)
+
+
+def _acked_readback(state_dir, event_id, evaluation_id):
+    store = Store(state_dir)
+    item = (store.state.get("outbox") or {}).get(cycle_key(evaluation_id))
+    row = (store.state.get("test_events") or {}).get(event_id) or {}
+    verified = (
+        isinstance(item, dict)
+        and item.get("status") == "acked"
+        and item.get("processing_ack") is True
+        and item.get("event_id") == event_id
+        and item.get("evaluation_id") == evaluation_id
+        and row.get("status") == "processed"
+        and row.get("process_count") == 1
+    )
+    return verified, row.get("process_count") if verified else None
 
 
 def _validate_put(document, state_dir, installation_id, event_id, evaluation_id):
@@ -297,8 +358,12 @@ def _scratch(state_dir, event_id, judgment):
     return path
 
 
-def download_one(state_dir, http, credential, installation_id, event_id, evaluation_id, now, sent_at):
+def download_one(state_dir, http, credential, installation_id, event_id, evaluation_id, now, sent_at, mode="offline"):
     """只讀這個 pending id。200 先驗證，再走原 producer 的 import、commit、apply。"""
+    try:
+        require_offline(mode)
+    except ValueError as exc:
+        return _kept(str(exc), polled=False)
     try:
         cycle_key(installation_id)
         cycle_key(event_id)
@@ -307,10 +372,13 @@ def download_one(state_dir, http, credential, installation_id, event_id, evaluat
         return _kept("rejected_id", polled=False)
     stage = _load_stage(state_dir, event_id)
     if stage.get("phase") == "applied":
-        count = Store(state_dir).state.get("test_events", {}).get(event_id, {}).get("process_count")
+        verified, count = _acked_readback(state_dir, event_id, evaluation_id)
+        if not verified:
+            return _kept("readback_failed", polled=False)
         return {
             "polled": False, "reason": "duplicate", "processed": True, "process_count": count,
             "old_ai_poll": "keep", "ai_execution_proven": False, "vercel_blob_atomic_create_proven": False,
+            "production_allowed": False, "readback": True,
         }
     recoverable = stage.get("phase") in ("downloaded", "imported", "committed") and isinstance(stage.get("body"), dict)
     if event_id not in pending_event_ids(state_dir) and not recoverable:
@@ -319,6 +387,8 @@ def download_one(state_dir, http, credential, installation_id, event_id, evaluat
     if recoverable:
         document = stage["body"]
     else:
+        if _load_auth_stop(state_dir, installation_id):
+            return _kept("auth_stopped", polled=False, alert_once=False, stopped=True)
         try:
             status, headers, body = http.request("GET", path, {}, None, credential)
         except TimeoutError:
@@ -328,7 +398,8 @@ def download_one(state_dir, http, credential, installation_id, event_id, evaluat
         except OSError as exc:
             return _kept("tls_rejected" if "tls" in str(exc) else "disconnect")
         if status in (401, 403):
-            return _kept("auth_stopped", alert_once=True)
+            _save_auth_stop(state_dir, installation_id, status)
+            return _kept("auth_stopped", alert_once=True, stopped=True)
         if status in (302, 303, 307, 308):
             return _kept("redirect_blocked")
         if status == 429 or 500 <= status <= 599:
@@ -361,9 +432,11 @@ def download_one(state_dir, http, credential, installation_id, event_id, evaluat
         return _kept(str(exc) or "store_failed")
     if result.get("reason") not in ("processed", "duplicate"):
         return _kept(result.get("reason") or "ack_rejected")
-    item = Store(state_dir).state.get("outbox", {}).get(cycle_key(evaluation_id))
-    if not isinstance(item, dict) or item.get("status") != "acked":
+    verified, count = _acked_readback(state_dir, event_id, evaluation_id)
+    if not verified:
         return _kept("readback_failed")
+    result = dict(result)
+    result["process_count"] = count
     stage["phase"] = "applied"
     _save_stage(state_dir, event_id, stage)
     return {
@@ -374,35 +447,86 @@ def download_one(state_dir, http, credential, installation_id, event_id, evaluat
         "old_ai_poll": "keep",
         "ai_execution_proven": False,
         "vercel_blob_atomic_create_proven": False,
+        "production_allowed": False,
+        "readback": True,
     }
 
 
-def backoff_seconds(attempt, retry_after=None, jitter=0):
+def _stamp(moment):
+    if moment.tzinfo is None:
+        raise ValueError("rejected_ack_time")
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def advanced_now(origin, elapsed_seconds):
+    """退避之後的判斷時效用推進後的時鐘，不沿用呼叫當下的固定 now。"""
+    return _stamp(parse_instant(origin) + timedelta(seconds=elapsed_seconds))
+
+
+def retry_after_seconds(value, now):
+    """秒數或 HTTP-date。無法解讀就交給既定退避，不把它當成 0。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)) and value >= 0:
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return float(text)
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    current = parse_instant(now)
+    if current.tzinfo is None:
+        return None
+    return max(0.0, (when - current.astimezone(timezone.utc)).total_seconds())
+
+
+def backoff_seconds(attempt, retry_after=None, jitter=0, now=None):
     base = BACKOFF_SECONDS[min(max(int(attempt), 0), len(BACKOFF_SECONDS) - 1)]
-    extra = retry_after if isinstance(retry_after, (int, float)) and retry_after >= 0 else 0
-    if isinstance(retry_after, str) and retry_after.isdigit():
-        extra = int(retry_after)
+    extra = retry_after_seconds(retry_after, now) if now is not None else None
+    if extra is None and isinstance(retry_after, str) and retry_after.isdigit():
+        extra = float(retry_after)
+    if extra is None:
+        extra = 0
     return max(base, extra) + jitter
 
 
-def poll_pending(state_dir, http, credential, installation_id, event_id, evaluation_id, now, sent_at, sleep=None, clock=None, jitter=None, deadline_seconds=POLL_DEADLINE_SECONDS):
-    """只在已有 pending 時 GET。退避不送 wake，也不增加 POST。"""
+def poll_pending(state_dir, http, credential, installation_id, event_id, evaluation_id, now, sent_at, sleep=None, clock=None, jitter=None, deadline_seconds=POLL_DEADLINE_SECONDS, now_clock=None, mode="offline"):
+    """只在已有 pending 時 GET。退避不送 wake，也不增加 POST。每次重試都用當時的 now。"""
+    try:
+        require_offline(mode)
+    except ValueError as exc:
+        return _kept(str(exc), polled=False)
     sleep = time.sleep if sleep is None else sleep
     clock = time.monotonic if clock is None else clock
     jitter = (lambda _attempt: secrets.randbelow(1000) / 1000.0) if jitter is None else jitter
     started = clock()
     attempt = 0
     while True:
-        result = download_one(state_dir, http, credential, installation_id, event_id, evaluation_id, now, sent_at)
+        elapsed = clock() - started
+        current_now = now_clock() if now_clock is not None else advanced_now(now, elapsed)
+        result = download_one(
+            state_dir, http, credential, installation_id, event_id, evaluation_id, current_now, sent_at, mode=mode,
+        )
         if result.get("reason") not in RETRY_REASONS:
+            result = dict(result)
+            result["checked_at"] = current_now
             return result
-        wait = backoff_seconds(attempt, result.get("retry_after"), jitter(attempt))
+        wait = backoff_seconds(attempt, result.get("retry_after"), jitter(attempt), now=current_now)
         remaining = deadline_seconds - (clock() - started)
         if wait > remaining:
             result = dict(result)
             result["reason"] = "deadline"
             result["processed"] = False
             result["old_ai_poll"] = "keep"
+            result["checked_at"] = current_now
             return result
         sleep(wait)
         attempt += 1

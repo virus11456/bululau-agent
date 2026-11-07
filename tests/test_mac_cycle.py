@@ -42,7 +42,7 @@ class MacCycleTest(unittest.TestCase):
             marker = os.path.join(tmp, "manage-ran")
             scanner = os.path.join(tmp, "scan.py")
             status = os.path.join(tmp, "status.py")
-            _script(scanner, "import json,sys\njson.dump({'call_ai':False,'candidates':[]}, sys.stdout)\n")
+            _script(scanner, "import json,sys\njson.dump({'call_ai':False,'n_candidates':0,'candidates':[],'btc':{'last':100000.0}}, sys.stdout)\n")
             _script(status, (
                 "import json,sys\n"
                 "json.dump({'schema_version':1,'command':'status-json','ok':True,"
@@ -60,7 +60,7 @@ class MacCycleTest(unittest.TestCase):
             self.assertFalse(os.path.exists(marker))
             _script(scanner, (
                 "import json,sys\n"
-                "json.dump({'call_ai':True,'candidates':[{'symbol':'ETHUSDT','setup':'布鹿流',"
+                "json.dump({'call_ai':True,'n_candidates':1,'btc':{'last':100000.0},'candidates':[{'symbol':'ETHUSDT','setup':'布鹿流',"
                 "'bar_open_ms':1762484400000,'ladder':['1']}]}, sys.stdout)\n"
                 "sys.exit(10)\n"
             ))
@@ -74,7 +74,7 @@ class MacCycleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             scanner = os.path.join(tmp, "scan.py")
             status = os.path.join(tmp, "status.py")
-            _script(scanner, "import json,sys\njson.dump({'call_ai':False,'candidates':[]}, sys.stdout)\n")
+            _script(scanner, "import json,sys\njson.dump({'call_ai':False,'n_candidates':0,'candidates':[],'btc':{'last':100000.0}}, sys.stdout)\n")
             _script(status, "import json,sys\njson.dump({'schema_version':1,'command':'status-json','ok':False,'error':'query_failed','queries':{'account':False,'open_orders':False,'open_algo_orders':False}}, sys.stdout)\nsys.exit(2)\n")
             decision = run_configured(Store(os.path.join(tmp, "state")), self._config(tmp, scanner, status), now=NOW, scan_id="bad1")
             self.assertTrue(decision["cycle_needs_ai"])

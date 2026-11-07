@@ -88,11 +88,13 @@ def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier
     new_fingerprints = [item for item in fingerprints if item not in seen]
     flat = (
         gate_snapshot.get("status") == "ok"
+        and type(gate_snapshot.get("positions")) is int
         and gate_snapshot.get("positions") == 0
+        and type(gate_snapshot.get("orders")) is int
         and gate_snapshot.get("orders") == 0
         and not gate_snapshot.get("manage_error")
     )
-    if not scan_blocked and flat and not new_fingerprints:
+    if not mac_gate and not scan_blocked and flat and not new_fingerprints:
         prefilter_for_gate = {"candidates": []}
     decision = decide(
         store, gate_snapshot, prefilter_for_gate, now=now, scan_id=scan_id, notifier=notifier,

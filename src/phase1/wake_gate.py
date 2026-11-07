@@ -57,34 +57,64 @@ def _pending_event(store):
     return False
 
 
+def _exact_zero(value):
+    """只有非整數布林的 0。False 與 0 相等，但不能當空倉或空單。"""
+    return type(value) is int and value == 0
+
+
+def _market_ready(prefilter):
+    """空 dict 不是成功掃描。quiet 輸出要有 call_ai、筆數、候選清單與 btc 價格。"""
+    if not isinstance(prefilter, dict) or "candidates" not in prefilter or not isinstance(prefilter.get("candidates"), list):
+        return False
+    if "error" in prefilter and prefilter.get("error") not in (None, False):
+        return False
+    count = prefilter.get("n_candidates")
+    call = prefilter.get("call_ai")
+    btc = prefilter.get("btc")
+    last = btc.get("last") if isinstance(btc, dict) else None
+    if type(count) is not int or count != len(prefilter["candidates"]):
+        return False
+    if count == 0:
+        if call is not False:
+            return False
+    elif call is not True:
+        return False
+    return type(last) in (int, float)
+
+
 def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_verified=False, mac_gate=False):
     notifier = notifier or UnconfiguredWebhook()
     completed = snapshot.get("as_of")
     fresh = freshness(completed, now) if completed else {"valid": False, "status": "missing"}
     candidates = []
-    scan_error = bool(prefilter.get("error"))
-    for item in prefilter.get("candidates") or []:
-        ident = _identity(item)
-        if ident is None:
-            if isinstance(item, dict) and (item.get("fail") or item.get("blocked_by_btc_guard")):
+    listed = prefilter.get("candidates") if isinstance(prefilter, dict) else None
+    scan_error = not isinstance(prefilter, dict) or not isinstance(listed, list) or ("error" in prefilter and prefilter.get("error") not in (None, False))
+    if isinstance(listed, list):
+        for item in listed:
+            ident = _identity(item)
+            if ident is None:
+                if isinstance(item, dict) and (item.get("fail") or item.get("blocked_by_btc_guard")):
+                    continue
+                scan_error = True
                 continue
-            scan_error = True
-            continue
-        candidates.append(ident)
+            candidates.append(ident)
+    if mac_gate and not _market_ready(prefilter):
+        scan_error = True
     positions = snapshot.get("positions")
     orders = snapshot.get("orders")
     queries = snapshot.get("queries") if isinstance(snapshot.get("queries"), dict) else {}
     query_names = ("account", "open_orders", "open_algo_orders")
-    classes_zero = snapshot.get("open_orders") == 0 and snapshot.get("algo_orders") == 0 and orders == 0
+    classes_zero = _exact_zero(snapshot.get("open_orders")) and _exact_zero(snapshot.get("algo_orders")) and _exact_zero(orders)
     queries_ready = snapshot.get("queries_ok") is True and classes_zero and all(queries.get(name) is True for name in query_names)
+    trusted = snapshot.get("status_trusted") is True if mac_gate else snapshot.get("status_trusted") is not False
     known = (
         snapshot.get("status") == "ok"
-        and snapshot.get("status_trusted") is not False
+        and trusted
         and fresh["valid"]
-        and not snapshot.get("manage_error")
+        and snapshot.get("manage_error") is False
         and not scan_error
-        and positions == 0
-        and (queries_ready if mac_gate else orders == 0)
+        and _exact_zero(positions)
+        and (queries_ready if mac_gate else _exact_zero(orders))
     )
     pending = _pending_event(store) if mac_gate else False
     quiet = known and not candidates and not pending
@@ -104,8 +134,8 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
         and fresh["valid"]
         and not snapshot.get("manage_error")
         and not scan_error
-        and positions in (0, None)
-        and orders in (0, None)
+        and (positions is None or _exact_zero(positions) or type(positions) is not int)
+        and (orders is None or _exact_zero(orders) or type(orders) is not int)
         and not candidates
     ):
         reason = "snapshot_unknown"

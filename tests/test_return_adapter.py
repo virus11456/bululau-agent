@@ -139,11 +139,16 @@ class ReturnAdapterTest(unittest.TestCase):
             self.assertEqual(backoff["retry_after"], "5")
             self.assertFalse(backoff["processed"])
             http.fail = "unauthorized"
-            self.assertEqual(download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT)["reason"], "auth_stopped")
-            http.secrets_by_role = {"publisher": "pub-local", "reader": "nope"}
             stopped = download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT)
             self.assertEqual(stopped["reason"], "auth_stopped")
             self.assertTrue(stopped["alert_once"])
+            http.secrets_by_role = {"publisher": "pub-local", "reader": "nope"}
+            before = len(http.calls)
+            held = download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT)
+            self.assertEqual(held["reason"], "auth_stopped")
+            self.assertFalse(held["alert_once"])
+            self.assertEqual(len(http.calls), before)
+            os.remove(os.path.join(mac, "return-recovery", "auth-stop-" + INSTALL + ".json"))
             http.secrets_by_role = secrets
             missing = FakeReturnHttp(InstallationStore(os.path.join(tmp, "empty")), secrets, INSTALL)
             self.assertEqual(download_one(mac, missing, reader, INSTALL, EVENT, "s1", NOW, SENT)["reason"], "not_ready")
@@ -171,33 +176,34 @@ class ReturnAdapterTest(unittest.TestCase):
                 calls.append(event)
                 return {"status": "blocked", "delivered": False, "http_sent": False}
 
+        book = {"call_ai": False, "n_candidates": 0, "candidates": [], "btc": {"last": 100000.0}}
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp))
-            quiet = decide(store, snap, {"candidates": []}, now="2026-11-07T12:20:00+08:00", scan_id="q1", notifier=Spy(), mac_gate=True)
+            quiet = decide(store, snap, book, now="2026-11-07T12:20:00+08:00", scan_id="q1", notifier=Spy(), mac_gate=True)
             self.assertEqual(quiet["reason"], "quiet_flat_book")
             self.assertEqual(calls, [])
             self.assertEqual(len(store.state["suppressed_quiet"]), 1)
             self.assertNotIn("totalWalletBalance", json.dumps(store.state["suppressed_quiet"]))
-            again = decide(store, snap, {"candidates": []}, now="2026-11-07T12:20:00+08:00", scan_id="q1", notifier=Spy(), mac_gate=True)
+            again = decide(store, snap, book, now="2026-11-07T12:20:00+08:00", scan_id="q1", notifier=Spy(), mac_gate=True)
             self.assertEqual(again["reason"], "quiet_flat_book")
             self.assertEqual(len(store.state["suppressed_quiet"]), 1)
             store.state["outbox"]["cycle:old"] = {"event_id": EVENT, "evaluation_id": "old", "status": "pending"}
             store.save()
-            pending = decide(store, snap, {"candidates": []}, now="2026-11-07T12:20:00+08:00", scan_id="q2", notifier=Spy(), mac_gate=True)
+            pending = decide(store, snap, book, now="2026-11-07T12:20:00+08:00", scan_id="q2", notifier=Spy(), mac_gate=True)
             self.assertEqual(pending["reason"], "pending_return")
             self.assertTrue(pending["cycle_needs_ai"])
             self.assertEqual(pending["old_ai_poll"], "keep")
-            unknown = decide(store, dict(snap, queries_ok=False), {"candidates": []}, now="2026-11-07T12:20:00+08:00", scan_id="q3", notifier=Spy(), mac_gate=True)
+            unknown = decide(store, dict(snap, queries_ok=False), book, now="2026-11-07T12:20:00+08:00", scan_id="q3", notifier=Spy(), mac_gate=True)
             self.assertEqual(unknown["reason"], "snapshot_unknown")
             self.assertEqual(unknown["old_ai_poll"], "keep")
             missing_algo = dict(snap)
             missing_algo.pop("algo_orders")
-            hidden = decide(store, missing_algo, {"candidates": []}, now="2026-11-07T12:20:00+08:00", scan_id="q4", notifier=Spy(), mac_gate=True)
+            hidden = decide(store, missing_algo, book, now="2026-11-07T12:20:00+08:00", scan_id="q4", notifier=Spy(), mac_gate=True)
             self.assertEqual(hidden["reason"], "snapshot_unknown")
-            skewed = decide(store, snap, {"candidates": []}, now="2026-11-07T12:00:00+08:00", scan_id="q5", notifier=Spy(), mac_gate=True)
+            skewed = decide(store, snap, book, now="2026-11-07T12:00:00+08:00", scan_id="q5", notifier=Spy(), mac_gate=True)
             self.assertEqual(skewed["reason"], "snapshot_blocked_clock_skew")
             candidate = {"symbol": "ETHUSDT", "setup": "break", "bar_time": "2026-11-07T12:00:00+08:00"}
-            woken = decide(store, snap, {"candidates": [candidate]}, now="2026-11-07T12:20:00+08:00", scan_id="q6", notifier=Spy(), mac_gate=True)
+            woken = decide(store, snap, dict(book, call_ai=True, n_candidates=1, candidates=[candidate]), now="2026-11-07T12:20:00+08:00", scan_id="q6", notifier=Spy(), mac_gate=True)
             self.assertEqual(woken["reason"], "candidates_present")
             self.assertTrue(woken["new_entry_ai"] if "new_entry_ai" in woken else woken["cycle_needs_ai"])
             self.assertTrue(calls)
@@ -280,6 +286,133 @@ class ReturnAdapterTest(unittest.TestCase):
             with open(os.path.join(resumed, "judgments", EVENT + ".json"), encoding="utf-8") as handle:
                 saved_judgment = json.load(handle)
             self.assertEqual(saved_judgment["completed_at"], NOW)
+
+    def test_false_counts_and_incomplete_scan_keep_ai(self):
+        from pathlib import Path
+        snap = {
+            "status": "ok", "as_of": "2026-11-07T12:19:30+08:00", "positions": False,
+            "open_orders": False, "algo_orders": False, "orders": False, "manage_error": False,
+            "status_trusted": True, "queries_ok": True,
+            "queries": {"account": True, "open_orders": True, "open_algo_orders": True},
+        }
+        book = {"call_ai": False, "n_candidates": 0, "candidates": [], "btc": {"last": 100000.0}}
+        calls = []
+
+        class Spy:
+            def notify(self, event):
+                calls.append(event)
+                return {"status": "blocked", "delivered": False, "http_sent": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp))
+            false_counts = decide(store, snap, book, now="2026-11-07T12:20:00+08:00", scan_id="bad-bool", notifier=Spy(), mac_gate=True)
+            self.assertNotEqual(false_counts["reason"], "quiet_flat_book")
+            self.assertTrue(false_counts["cycle_needs_ai"])
+            self.assertEqual(false_counts["old_ai_poll"], "keep")
+            untrusted = decide(store, dict(snap, positions=0, open_orders=0, algo_orders=0, orders=0, status_trusted=None), book, now="2026-11-07T12:20:00+08:00", scan_id="bad-trust", notifier=Spy(), mac_gate=True)
+            self.assertEqual(untrusted["reason"], "snapshot_unknown")
+            self.assertTrue(untrusted["cycle_needs_ai"])
+            empty = decide(store, dict(snap, positions=0, open_orders=0, algo_orders=0, orders=0, status_trusted=True), {}, now="2026-11-07T12:20:00+08:00", scan_id="bad-scan", notifier=Spy(), mac_gate=True)
+            self.assertNotEqual(empty["reason"], "quiet_flat_book")
+            self.assertTrue(empty["cycle_needs_ai"])
+            self.assertGreaterEqual(len(calls), 3)
+            self.assertEqual(store.state.get("suppressed_quiet", []), [])
+
+    def test_auth_stop_survives_restart_and_production_is_blocked(self):
+        from email.utils import format_datetime
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as tmp:
+            mac = os.path.join(tmp, "mac")
+            envelope = _envelope()
+            _seed(mac, envelope)
+            secrets = {"publisher": "pub-local", "reader": "read-local"}
+            http = FakeReturnHttp(InstallationStore(os.path.join(tmp, "blob")), secrets, INSTALL)
+            reader = {"installation_id": INSTALL, "role": "reader", "secret": "read-local", "key_id": "k2"}
+            http.fail = "unauthorized"
+            first = download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT)
+            self.assertEqual(first["reason"], "auth_stopped")
+            self.assertTrue(first["alert_once"])
+            self.assertTrue(first["stopped"])
+            with open(os.path.join(mac, "return-recovery", "auth-stop-" + INSTALL + ".json"), encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertTrue(saved["stopped"])
+            self.assertTrue(saved["alerted"])
+            self.assertNotIn("secret", json.dumps(saved))
+            before = len(http.calls)
+            second = download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT)
+            self.assertEqual(second["reason"], "auth_stopped")
+            self.assertFalse(second["alert_once"])
+            self.assertEqual(len(http.calls), before)
+            self.assertEqual(Store(mac).state["outbox"]["cycle:s1"]["status"], "pending")
+            blocked = download_one(mac, http, reader, INSTALL, EVENT, "s1", NOW, SENT, mode="production")
+            self.assertEqual(blocked["reason"], "production_return_blocked")
+            self.assertFalse(blocked["production_allowed"])
+            blob = InstallationStore(os.path.join(tmp, "blocked"))
+            body = judgment_put(INSTALL, EVENT, "s1", _judgment(envelope)["envelope_sha256"], _judgment(envelope))
+            with self.assertRaises(ValueError):
+                blob.create(INSTALL, EVENT, body, mode="production")
+            self.assertFalse(os.path.exists(blob._path(INSTALL, EVENT)))
+
+            fresh = os.path.join(tmp, "clock")
+            _seed(fresh, envelope)
+            publisher = {"installation_id": INSTALL, "role": "publisher", "secret": "pub-local", "key_id": "k1"}
+            live = FakeReturnHttp(InstallationStore(os.path.join(tmp, "live")), secrets, INSTALL)
+            raw = json.dumps(body).encode("utf-8")
+            status, _headers, _payload = live.request("PUT", "/v1/installations/{0}/judgments/{1}".format(INSTALL, EVENT), {}, raw, publisher)
+            self.assertEqual(status, 201)
+            when = datetime(2026, 11, 7, 4, 22, 30, tzinfo=timezone.utc)
+            live.retry_after = format_datetime(when, usegmt=True)
+            live.failures = ["backoff"]
+            clock = {"now": 0.0}
+            waits = []
+
+            def sleep(seconds):
+                waits.append(seconds)
+                clock["now"] += seconds
+
+            dated = poll_pending(
+                fresh, live, reader, INSTALL, EVENT, "s1", NOW, SENT,
+                sleep=sleep, clock=lambda: clock["now"], jitter=lambda _attempt: 0,
+            )
+            self.assertEqual(waits, [30])
+            self.assertEqual(dated["reason"], "processed")
+
+            late = os.path.join(tmp, "late")
+            _seed(late, envelope)
+            shifting = FakeReturnHttp(live.store, secrets, INSTALL)
+            shifting.failures = ["backoff"]
+            seen = {"n": 0}
+
+            def now_clock():
+                seen["n"] += 1
+                if seen["n"] == 1:
+                    return NOW
+                return "2026-11-07T04:40:00Z"
+
+            clock["now"] = 0.0
+            expired = poll_pending(
+                late, shifting, reader, INSTALL, EVENT, "s1", NOW, SENT,
+                sleep=sleep, clock=lambda: clock["now"], jitter=lambda _attempt: 0, now_clock=now_clock,
+            )
+            self.assertEqual(expired["reason"], "expired")
+            self.assertEqual(expired["checked_at"], "2026-11-07T04:40:00Z")
+            self.assertEqual(Store(late).state["outbox"]["cycle:s1"]["status"], "pending")
+            self.assertFalse(os.path.exists(os.path.join(late, "judgments", EVENT + ".json")))
+            self.assertFalse(expired["processed"])
+
+            applied = os.path.join(tmp, "applied")
+            _seed(applied, envelope)
+            done = download_one(applied, live, reader, INSTALL, EVENT, "s1", NOW, SENT)
+            self.assertEqual(done["reason"], "processed")
+            self.assertTrue(done["readback"])
+            store = Store(applied)
+            store.state["outbox"]["cycle:s1"]["status"] = "pending"
+            store.state["outbox"]["cycle:s1"]["processing_ack"] = False
+            store.save()
+            mismatch = download_one(applied, live, reader, INSTALL, EVENT, "s1", NOW, SENT)
+            self.assertEqual(mismatch["reason"], "readback_failed")
+            self.assertFalse(mismatch["processed"])
+            self.assertEqual(Store(applied).state["outbox"]["cycle:s1"]["status"], "pending")
 
 
 if __name__ == "__main__":

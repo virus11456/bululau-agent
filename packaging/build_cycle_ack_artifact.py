@@ -71,6 +71,7 @@ FILES = (
     "tests/test_run41_orchestrator.py",
     "tests/test_run42_routes.py",
     "tests/test_run43_persist.py",
+    "tests/test_run44_submit.py",
     "gateway/client.example.json",
     "gateway/package.json",
     "gateway/package-lock.json",

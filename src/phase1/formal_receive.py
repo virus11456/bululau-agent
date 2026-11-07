@@ -9,12 +9,11 @@
 import fcntl
 import json
 import os
-import secrets
 
 from .ack_contract import cycle_key
 from .box_receiver import assert_wake_bound
 from .production_transport import CONTEXT_MAX_BYTES, _outside_window, _moment
-from .review_context import _recomputed_context, parent_package_ready
+from .review_context import _recomputed_context
 from .sender_setup import validate_event
 
 LEGACY_TEST_ROUTINE = {
@@ -156,12 +155,12 @@ def read_formal(store, event_id):
     return row if isinstance(row, dict) else None
 
 
-def _row_verdict(row, *, duplicate, parent_called, claim_held=False):
+def _row_verdict(row, *, duplicate, parent_called, claim_held=False, accepted=True):
     status = row.get("status") if isinstance(row, dict) else "pending"
     verdict = _base("publish_ready" if status == "publish_ready" else "parent_pending")
     verdict.update({
         "class": "evaluation_delivery",
-        "accepted": True,
+        "accepted": accepted and not claim_held,
         "duplicate": duplicate,
         "claim_held": claim_held,
         "status": status,
@@ -178,6 +177,59 @@ def _row_verdict(row, *, duplicate, parent_called, claim_held=False):
     return verdict
 
 
+def _formal_dir(root, event_id):
+    cycle_key(event_id)
+    return os.path.join(str(root), "formal-files", event_id)
+
+
+def _formal_paths(root, event_id):
+    directory = _formal_dir(root, event_id)
+    return {
+        "context": os.path.join(directory, "context.json"),
+        "judgment": os.path.join(directory, "judgment.json"),
+        "trace": os.path.join(directory, "trace.json"),
+    }
+
+
+def _write_json(path, document):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    raw = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+        handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _read_json(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def read_parent_files(store, event_id):
+    paths = _formal_paths(store.root, event_id)
+    if not all(os.path.isfile(path) for path in paths.values()):
+        return None
+    return {name: _read_json(path) for name, path in paths.items()}
+
+
+def _offline_publisher_config():
+    return {"installation_id": "local-offline", "enabled": False, "live_send": False}
+
+
+def _publish_files(store, event_id):
+    """讀已寫入的檔，走既有 publisher_document。不發 HTTP。"""
+    from .gateway_client import publisher_document
+    paths = _formal_paths(store.root, event_id)
+    return publisher_document(
+        _offline_publisher_config(), event_id, paths["judgment"], paths["trace"], paths["context"],
+    )
+
+
 def receive_delivery(store, document, now, parent=None):
     """寫進 Store。沒有父 callback 不假 ACK。程式不生成 judgment。"""
     checked, legacy = _checked_delivery(document, now)
@@ -185,19 +237,15 @@ def receive_delivery(store, document, now, parent=None):
         return legacy
     fd = _inbox_lock(store.root, checked["event_id"])
     if fd is None:
-        row = read_formal(store, checked["event_id"]) or {
-            "status": "pending", "event_id": checked["event_id"],
-            "evaluation_id": checked["evaluation_id"], "digest": checked["envelope_sha256"],
-        }
-        verdict = _row_verdict(row, duplicate=False, parent_called=False, claim_held=True)
-        verdict["ack"] = False
-        return verdict
+        return _busy_delivery(store, checked)
     try:
         with store.exclusive():
             store.reload()
             inbox = store.state.setdefault("formal_inbox", {})
             prior = inbox.get(checked["event_id"])
-            if isinstance(prior, dict) and prior.get("digest") != checked["envelope_sha256"]:
+            if isinstance(prior, dict) and (
+                prior.get("digest") != checked["envelope_sha256"] or prior.get("evaluation_id") != checked["evaluation_id"]
+            ):
                 raise ValueError("immutable_conflict")
             if not isinstance(prior, dict):
                 inbox[checked["event_id"]] = {
@@ -208,6 +256,7 @@ def receive_delivery(store, document, now, parent=None):
                     "parent_invoked": False,
                 }
                 store.save()
+                _write_json(_formal_paths(store.root, checked["event_id"])["context"], document["context"])
                 prior = inbox[checked["event_id"]]
                 duplicate = False
             else:
@@ -223,18 +272,76 @@ def receive_delivery(store, document, now, parent=None):
                 return _row_verdict(row, duplicate=True, parent_called=False)
             row["parent_invoked"] = True
             store.save()
-        returned = parent(document)
-        ready = False
-        if isinstance(returned, dict):
-            package = parent_package_ready(returned.get("judgment"), returned.get("trace"), document.get("context"))
-            ready = package.get("ready") is True
-        if ready:
-            with store.exclusive():
-                store.reload()
-                row = store.state["formal_inbox"][checked["event_id"]]
-                if row.get("digest") == checked["envelope_sha256"] and row.get("status") == "pending":
-                    row["status"] = "publish_ready"
-                    store.save()
+        returned = parent(document) if callable(parent) else None
+        if isinstance(returned, dict) and isinstance(returned.get("judgment"), dict) and isinstance(returned.get("trace"), dict):
+            _install_parent_files(store, checked["event_id"], returned["judgment"], returned["trace"])
         return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
+    finally:
+        _unlock(fd)
+
+
+def _busy_delivery(store, checked):
+    """claim 還在時也要核對已記住的 evaluation／digest。衝突不能接受。"""
+    row = read_formal(store, checked["event_id"])
+    if isinstance(row, dict) and (
+        row.get("digest") != checked["envelope_sha256"] or row.get("evaluation_id") != checked["evaluation_id"]
+    ):
+        raise ValueError("immutable_conflict")
+    held = row or {
+        "status": "pending",
+        "event_id": checked["event_id"],
+        "evaluation_id": None,
+        "digest": None,
+    }
+    verdict = _row_verdict(held, duplicate=False, parent_called=False, claim_held=True, accepted=False)
+    verdict["ack"] = False
+    return verdict
+
+
+def _install_parent_files(store, event_id, judgment, trace):
+    """呼叫端已持有 claim。不生成 judgment，只驗證並保存父層交來的檔。"""
+    paths = _formal_paths(store.root, event_id)
+    with store.exclusive():
+        store.reload()
+        row = (store.state.get("formal_inbox") or {}).get(event_id)
+        if not isinstance(row, dict) or row.get("status") != "pending":
+            return _row_verdict(row or {"status": "pending", "event_id": event_id}, duplicate=True, parent_called=False)
+    if not os.path.isfile(paths["context"]):
+        raise ValueError("rejected_context")
+    _write_json(paths["judgment"], judgment)
+    _write_json(paths["trace"], trace)
+    try:
+        _publish_files(store, event_id)
+    except ValueError:
+        for name in ("judgment", "trace"):
+            if os.path.isfile(paths[name]):
+                os.remove(paths[name])
+        verdict = _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
+        verdict["ack"] = False
+        verdict["reason"] = "parent_package_not_ready"
+        return verdict
+    with store.exclusive():
+        store.reload()
+        row = store.state["formal_inbox"][event_id]
+        if row.get("status") == "pending":
+            row["status"] = "publish_ready"
+            row["judgment_path"] = paths["judgment"]
+            row["trace_path"] = paths["trace"]
+            row["context_path"] = paths["context"]
+            store.save()
+    return _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
+
+
+def submit_parent_files(store, event_id, judgment, trace, now):
+    """pending 補交父層已經寫好的 judgment／trace。不重新呼叫父 AI，也不假完成。"""
+    del now
+    cycle_key(event_id)
+    if not isinstance(judgment, dict) or not isinstance(trace, dict):
+        raise ValueError("parent_package_not_ready")
+    fd = _inbox_lock(store.root, event_id)
+    if fd is None:
+        raise ValueError("claim_held")
+    try:
+        return _install_parent_files(store, event_id, judgment, trace)
     finally:
         _unlock(fd)

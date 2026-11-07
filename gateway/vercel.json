@@ -1,0 +1,32 @@
+{
+  "framework": null,
+  "installCommand": "npm ci",
+  "functions": {
+    "api/v1/installations/[installationId]/judgments/[eventId].js": {
+      "maxDuration": 15,
+      "includeFiles": "lib/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/v1/installations/:installationId/judgments/:eventId",
+      "destination": "/api/v1/installations/:installationId/judgments/:eventId"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/v1/installations/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "private, no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    },
+    {
+      "source": "/api/v1/installations/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "private, no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
+  ]
+}

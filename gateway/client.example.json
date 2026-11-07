@@ -1,0 +1,20 @@
+{
+  "enabled": false,
+  "live_send": false,
+  "base_url": "https://bululau-return-isolated-8qi96wkvs-virus11456s-projects.vercel.app",
+  "installation_id": "",
+  "key_id": "",
+  "role": "publisher",
+  "ledger_path": "",
+  "trial": {
+    "approved": false,
+    "dry_run_only": true,
+    "event_id": "",
+    "approved_at": 0,
+    "new_ids": 1,
+    "max_wake_posts": 2,
+    "max_judgment_puts": 1,
+    "max_gets": 6,
+    "deadline_seconds": 600
+  }
+}

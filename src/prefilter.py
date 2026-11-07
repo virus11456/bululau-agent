@@ -6,6 +6,10 @@ stdout：一個 JSON。結束碼：10＝有候選、要交給代理判斷；0＝
 """
 import sys, json, time, datetime, argparse, os
 from common import *
+try:
+    from phase1.timeparse import parse_instant
+except ImportError:
+    from src.phase1.timeparse import parse_instant
 
 AVOID = {"INITUSDT", "EWZUSDT"}                 # hacked / manual avoid list (edit filters below)
 MIN_QV = 5e6                         # 24h quote volume floor (liquidity)
@@ -48,7 +52,7 @@ def kuai_shidi(k15, rs):
             avg = (ladder[0] * 2 + ladder[1] * 3 + ladder[2] * 5) / 10
             stop = ladder[2] * (0.985 if big else 0.97)
             risk = avg - stop
-            return dict(setup="瘸師弟", tf="15m", bar=ts(b["t"]), vol_x=round(b["v"] / av, 1), black_pct=round(body, 2),
+            return dict(setup="瘸師弟", tf="15m", bar=ts(b["t"]), bar_open_ms=b["t"], vol_x=round(b["v"] / av, 1), black_pct=round(body, 2),
                         ladder=ladder, sizing="2:3:5", stop=round(stop, 8), target=round(avg + 1.5 * risk, 8), rr=1.5,
                         plan="ladder limit buys (paper); exit 1-1.5R or any bounce; max 2h")
     return None
@@ -72,7 +76,7 @@ def xiao_shidi(k15):
     stop = L * 0.999; risk = c - stop
     target = min(H, c + 2 * risk); rr = (target - c) / risk
     if rr < RR_MIN: return None, f"rr {rr:.2f}"
-    return dict(setup="小師弟", tf="15m", entry=c, stop=round(stop, 2), target=round(target, 2), rr=round(rr, 2),
+    return dict(setup="小師弟", tf="15m", bar_open_ms=last["t"], entry=c, stop=round(stop, 2), target=round(target, 2), rr=round(rr, 2),
                 drop_pt=round(drop, 1), bounce_pct=round(bounce * 100), plan="exit 1-1.5R / fading bounce / reversal K"), None
 
 def maset(k):
@@ -117,7 +121,7 @@ def buluuliu(k1h, kd):
     rr = (H - c) / risk
     if rr < RR_MIN: return None, f"rr {rr:.2f} to prior high"
     target = c + min(rr, 2.0) * risk
-    return dict(setup="布鹿流", tf="1H", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(min(rr, 2), 2),
+    return dict(setup="布鹿流", tf="1H", bar_open_ms=last["t"], entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(min(rr, 2), 2),
                 prior_high=H, plan="1.5-2R; exit on lower-high / MA death cross; BE at +1R"), None
 
 def funding(k1h, fr):
@@ -133,7 +137,7 @@ def funding(k1h, fr):
     if risk <= 0: return None, "bad risk"
     target = c * 1.10; rr = (target - c) / risk
     if rr < RR_MIN: return None, f"rr {rr:.2f}"
-    return dict(setup="funding_rate", tf="1H", entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
+    return dict(setup="funding_rate", tf="1H", bar_open_ms=last["t"], entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
                 rr=round(rr, 2), funding_pct=round(fr * 100, 3), sizing="2:3:5 (MA30 then MA45)"), None
 
 def kuai_today():
@@ -148,7 +152,7 @@ def run(args):
     t0 = time.time()
     end = None
     if args.asof:
-        end = int(datetime.datetime.fromisoformat(args.asof).replace(tzinfo=TZ).timestamp() * 1000)
+        end = int(parse_instant(args.asof).replace(tzinfo=TZ).timestamp() * 1000)
     info = get("/fapi/v1/exchangeInfo")
     perps = {s["symbol"]: s for s in info["symbols"] if s.get("contractType") == "PERPETUAL" and s["quoteAsset"] == "USDT" and s["status"] == "TRADING"}
     tick = {t["symbol"]: t for t in get("/fapi/v1/ticker/24hr")}

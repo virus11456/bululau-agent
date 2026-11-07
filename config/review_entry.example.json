@@ -1,0 +1,29 @@
+{
+  "enabled": false,
+  "replaces_scan_entry": false,
+  "live_fetch": false,
+  "outbound": false,
+  "gateway_base_url": "",
+  "private_client": {
+    "module": "src.phase1.account_status",
+    "function": "_signed_get",
+    "signature": "_signed_get(path) -> object",
+    "paths": ["/fapi/v2/account", "/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"]
+  },
+  "public_client": {
+    "module": "src.common",
+    "function": "get",
+    "signature": "get(path, params=None, retries=2) -> object",
+    "kline": {"path": "/fapi/v1/klines", "interval": "15m", "limit": 20}
+  },
+  "mac_flat": {
+    "path": "/Users/frank/quantboy-live/live_trader.py",
+    "sha256": "65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b",
+    "ast_verified": true,
+    "req": "req(method, path, params=None, signed=False, retries=5)",
+    "open_algo_used": false,
+    "klines_function": false,
+    "error_may_write_log": true,
+    "wired": false
+  }
+}

@@ -84,6 +84,18 @@ python3 src/live_trader.py --help
 
 只做多。BTC 帶量破關鍵價後兩根 15m 不開多。重大事件前後 30 分鐘不開新倉。當日虧 7% 停開新倉，30% 全停並回報。單筆預估虧損不超過淨值的 1%，停損先掛在交易所。最多 5 個持倉，單幣一個倉。連 3 敗當天停手。風報比不到 1.5 不進。金鑰不進倉庫、不開提現。
 
+## 離線第一期
+
+`src/phase1` 是尚未上線的出場監控與掃描契約，只在 mock 裡跑。它沒有排程，不讀交易金鑰，也不會把單送到幣安。Webhook 沒有配置時會 blocked，不自造 HTTP header。測試：
+
+```bash
+python3 -m unittest tests.test_phase1
+```
+
+`tests/evidence/` 是這次合成情境的請求與成交軌跡，不是績效。日 K 均線等未定項目仍然沒有預設值。
+
+省 token 的最小切換在 [docs/token_switch.md](docs/token_switch.md)。它只決定這輪要不要叫 AI，不取代 `watch` 和 `manage`。固定風控對照在 [docs/manage_nofai.md](docs/manage_nofai.md)。逾 2 小時撤單和移動停損仍留在原 AI。本機 sender 設定在 [docs/sender_setup.md](docs/sender_setup.md)，尚未配置，也不會自動發送。一輪閘門在 [docs/cycle_gate.md](docs/cycle_gate.md)。
+
 ## 風險聲明
 
 - 重啟實盤之後，真實委託的虧損由使用者承擔。現在還沒有重啟。

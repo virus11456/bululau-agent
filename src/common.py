@@ -6,7 +6,11 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def _data_dir():
-    from config import data_dir
+    """repo 根有 config/ 目錄時，裸 import config 不是 src/config.py。"""
+    try:
+        from src.config import data_dir
+    except ImportError:
+        from config import data_dir
     return data_dir()
 
 DATA_DIR = _data_dir()

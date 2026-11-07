@@ -1,0 +1,20 @@
+{
+  "name": "bululau-judgment-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vercel/blob": "2.8.2"
+  },
+  "overrides": {
+    "@vercel/oidc": "4.0.7",
+    "@vercel/cli-config": "0.3.7",
+    "zod": "4.6.7"
+  }
+}

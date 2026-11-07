@@ -1,5 +1,27 @@
 # 變更紀錄
 
+## 2026-11-07
+
+離線第一期：`src/phase1` 用紙上 mock 做持倉出場監控、保護單輪替、成交摘要，以及掃描 outbox／inbox。沒有改策略定稿，沒有排進實盤，沒有交易金鑰，也沒有宣稱 webhook 已接通。
+
+同日另加省 token 閘門：沿用 `prefilter.py` 的輸出，同一候選只喚醒一次。沒有新候選結束碼 0。不取代 `watch`／`manage`，也不送尚未配置的 webhook。
+
+manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小時限價只標記要喚醒原 AI，不撤單。結構轉弱與移動停損沒有非 AI 等效，舊輪詢不能停。
+
+狀態感知喚醒：只有新鮮的 0 倉、0 掛單、0 候選且無錯誤才免 AI。有倉的定期複查用週期身份，不用同一根 K 的指紋取消。sender 未配置時舊輪詢維持 blocked。
+
+本機 sender 設定只寫 `~/.config/bululau-sender-test/sender.json`。單筆測試契約五欄，重送保留同一事件。HTTP 成功仍是 pending。沒有真實發送。
+
+一輪閘門：manage 不受候選限制。只有新鮮 0 倉 0 單且沒有新候選才免 AI。HTTP 2xx 不當作處理 ACK。故障時事件留在 outbox。未配置的送達路徑會 blocked。
+
+處理 ACK 與收件分開。`accepted` 不會變成 `processed`。錯的、過早、未來、超過 15 分鐘、錯 evaluation、路徑字元或儲存失敗都維持 pending，舊 AI 不能停。崩潰留下的 `ack_state.json.tmp` 不刪，也不會讓之後的保存失敗。可搬包含 store 與 discover 測試。
+
+cycle 的 processed 回條寫回同一個 `phase1_state.json`。`python3 -m src.phase1.cycle apply` 才落地。布林值不會當成 processed。舊 pending 鍵不自動刪除。這個結果仍不停舊 routine。
+
+掃描錯誤不再被空倉蓋成 quiet。`python3 -m src.phase1.runner run --shadow` 用子程序串 scanner、manage、status 與同一個 store。預設不執行實盤指令，排程檔是 Disabled。`switch_allowed` 不是 true。
+
+production 設定只接受操作者給的 quantboy 路徑，並組固定的 prefilter、manage --live、status-json。10 只沿 prefilter 的 call_ai 契約。status 文字的零倉零單不能當查詢成功。正式傳輸用獨立 transport.json。每筆 wake 的 envelope 分開保存，不被下一筆覆蓋。八欄只是通知。判斷要帶 envelope 摘要與依據，布林不能證明 AI 已執行。delivered 不是 processed。沒有 verified 就 blocked。
+
 ## 2026-11-06
 
 使用者於 22:23（台北時間）確認策略定稿。這一版只更新文件，沒有改下單程式，沒有部署，也沒有讀取帳戶。實盤維持停止，紙上為現階段。重啟實盤還要等固定監控部署、測試完成，以及使用者確認資金可用。

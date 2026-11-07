@@ -5,6 +5,10 @@ import os, sys, json, time, hmac, hashlib, argparse, fcntl, urllib.request, urll
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from config import data_dir, events_path, load_api_keys
+try:
+    from phase1.timeparse import parse_instant
+except ImportError:
+    from src.phase1.timeparse import parse_instant
 
 BASE = "https://fapi.binance.com"
 HOME = data_dir()
@@ -184,12 +188,35 @@ def upcoming_event():
     if not os.path.exists(EVENTS): return None
     n = now_tpe(); w = timedelta(minutes=CFG["event_window_min"])
     for ev in json.load(open(EVENTS)):
-        t = datetime.fromisoformat(ev["time_tpe"])
+        t = parse_instant(ev["time_tpe"])
         if t.tzinfo is None: t = t.replace(tzinfo=TPE)
         if t - w <= n <= t + w: return ev
     return None
 
 # ---------- 指令 ----------
+STATUS_JSON_REVISION = "status-json-2"
+
+def cmd_status_json(a):
+    """只讀帳戶查詢結果。原始回傳不是規定的容器就結束碼 2。不印餘額，不改策略。"""
+    try:
+        from phase1.status_contract import failure_document, require_account, require_order_list, success_document
+    except Exception:
+        print('{"schema_version":1,"command":"status-json","ok":false,"error":"contract_unavailable"}')
+        raise SystemExit(2)
+    queries = {"account": False, "open_orders": False, "open_algo_orders": False}
+    try:
+        acc = require_account(account())
+        queries["account"] = True
+        pos = positions(acc)
+        oo = require_order_list(open_orders())
+        queries["open_orders"] = True
+        algo = require_order_list(req("GET", "/fapi/v1/openAlgoOrders", {}, signed=True))
+        queries["open_algo_orders"] = True
+    except (BinanceError, ValueError, TypeError, KeyError):
+        print(json.dumps(failure_document(queries), ensure_ascii=False))
+        raise SystemExit(2)
+    print(json.dumps(success_document(len(pos), len(oo), len(algo), now_tpe().isoformat(timespec="seconds")), ensure_ascii=False))
+
 def cmd_status(a):
     acc = account(); s = day_state(acc); eq = equity_of(acc)
     pos = positions(acc)
@@ -399,6 +426,7 @@ def cmd_flatten(a):
 def main():
     ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
+    sub.add_parser("status-json")
     o = sub.add_parser("open"); o.add_argument("--symbol", required=True); o.add_argument("--side", required=True, choices=["BUY", "SELL", "buy", "sell", "long", "short"])
     o.add_argument("--entry-type", default="market", choices=["market", "limit"]); o.add_argument("--price")
     o.add_argument("--stop", required=True); o.add_argument("--target", required=True); o.add_argument("--setup", required=True)
@@ -408,7 +436,7 @@ def main():
     a = ap.parse_args()
     if a.cmd == "open": a.side = {"long": "BUY", "short": "SELL"}.get(a.side.lower(), a.side.upper())
     with Lock():
-        try: {"status": cmd_status, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch, "flatten": cmd_flatten}[a.cmd](a)
+        try: {"status": cmd_status, "status-json": cmd_status_json, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch, "flatten": cmd_flatten}[a.cmd](a)
         except BinanceError as e: log("error", cmd=a.cmd, err=str(e)); raise SystemExit(f"幣安錯誤: {e}")
 
 if __name__ == "__main__": main()

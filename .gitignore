@@ -1,5 +1,7 @@
 .env
 *.env
+sender.json
+trade_candidate_test.json
 !config.example.env
 binance.env
 **/.env
@@ -8,6 +10,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+node_modules/
 
 data/
 **/live_log.jsonl

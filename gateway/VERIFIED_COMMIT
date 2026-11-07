@@ -1,0 +1,3 @@
+套件內這個檔在打包時寫成與 COMMIT 相同的 git HEAD。
+不要把只改這個檔的 commit 當成另一版已測程式。
+部署核對套件 COMMIT。branch head 若只多 dist 壓縮檔，差異只有 dist/bululau-cycle-ack.tar.gz 與 .sha256。

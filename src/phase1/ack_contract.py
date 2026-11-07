@@ -71,10 +71,10 @@ def note_accepted(store, document):
     event_id = document["event_id"]
     events = store.state.setdefault("test_events", {})
     row = events.setdefault(event_id, {"status": "pending", "process_count": 0, "receipt": None})
+    before = json.dumps(store.state)
     if row["process_count"] == 0:
         row["receipt"] = "accepted"
         row["status"] = "pending"
-    before = json.dumps(store.state)
     try:
         store.save()
     except Exception:
@@ -172,7 +172,7 @@ def main(argv):
     store = open_store(directory)
     result = apply_processed_ack(store, load_ack(path), expected_event_id=expect, sent_at=sent_at, now=now)
     print(json.dumps({key: result.get(key) for key in ("applied", "reason", "pending", "old_ai_poll", "process_count")}, ensure_ascii=False))
-    return 0 if result.get("reason") in ("processed", "duplicate", "accepted_is_not_processed") else 1
+    return 0 if result.get("reason") in ("processed", "duplicate") else 1
 
 
 if __name__ == "__main__":

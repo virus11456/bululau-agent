@@ -3,10 +3,13 @@ import json
 import os
 import tempfile
 import unittest
-from pathlib import Path
 
-from src.phase1.ack_contract import KNOWN_TEST_EVENT, apply_processed_ack, load_ack, note_accepted, open_store, write_processed_file
-from src.phase1.ack_store import AckStore
+try:
+    from src.phase1.ack_contract import KNOWN_TEST_EVENT, apply_processed_ack, load_ack, note_accepted, open_store, write_processed_file
+    from src.phase1.ack_store import AckStore
+except ImportError:
+    from ack_contract import KNOWN_TEST_EVENT, apply_processed_ack, load_ack, note_accepted, open_store, write_processed_file
+    from ack_store import AckStore
 
 SENT = "2026-11-07T05:08:13Z"
 NOW = "2026-11-07T05:16:00Z"
@@ -59,6 +62,9 @@ class AckContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = _store(tmp)
             store._fail = True
+            accepted = note_accepted(store, {"kind": "accepted", "event_id": KNOWN_TEST_EVENT, "schema_valid": True, "status": "accepted"})
+            self.assertEqual(accepted["reason"], "store_failed")
+            self.assertNotIn(KNOWN_TEST_EVENT, AckStore(tmp).state["test_events"])
             failed = apply_processed_ack(store, _processed(), expected_event_id=KNOWN_TEST_EVENT, sent_at=SENT, now=NOW)
             self.assertEqual(failed["reason"], "store_failed")
             self.assertEqual(AckStore(tmp).state["outbox"]["cycle:" + EVAL]["status"], "pending")

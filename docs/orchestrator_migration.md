@@ -6,7 +6,11 @@
 
 ## 呼叫順序
 
-注入的函式才會被呼叫：`manage` → `status` → `prefilter`。三者都成功、可信、新鮮、0 倉、0 一般單、0 條件單、0 候選，才 quiet，不叫 AI。有倉或任一類單先叫保護 callback。有已知候選且 context 足夠，再叫新倉 callback。同一 `event_id` 可同時帶這兩個需求，`orders_placed` 維持 false。未知 setup、失敗或超時改叫 fallback callback。同一個 `scan_id` 再進一次不重複呼叫。
+注入的函式才會被呼叫：`manage` → `status` → `prefilter`。quiet 之前，`positions`、`open_orders`、`algo_orders` 都要在，而且是非布林的 int、大於等於 0，三個都是 0，候選是空清單，`halted` 必須剛好是 false。缺欄、None、False 或負數都是未知，改叫 fallback，不開新倉。任何一個明寫的 count 大於 0 就先保護，再 fallback；不因為別的欄未知，或 status 整體失敗，就把那個數字丟掉。`halted` 是 true 時不開新倉，有倉或有單仍先保護。
+
+同一個 `scan_id` 先記 `running`。執行中的第二個 worker 拿不到 claim，不另叫 AI。行程在 manage callback 中途退出後，新的行程看到 `running` 只做 fallback，不重跑 manage，也不把它當成已經成功。做完才記 `completed` 或 `recovered`。
+
+`TimeoutError` 只在同步 callback 自己丟出時算超時。沒有執行器層的超時。`gateway_enabled` 或 `notifier_verified` 設成 true 會直接拒絕，但這不表示每一個可能的 live 旗標都已列舉。
 
 `manage --live`、`status`、`open --live` 只寫在未啟用契約裡，指向 Mac 的 `~/quantboy-live/live_trader.py`。HALT、401、日虧 7%、累虧 30% 仍由那支 manage 負責。這包不執行。未驗 autoscan 不下單。paper 程式不改。60 秒 watch 與 2 小時老限價規則不改：老限價仍是叫醒原 AI，不撤單。
 

@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "live_send": false,
+  "base_url": "",
+  "installation_id": "",
+  "key_id": "",
+  "role": "publisher",
+  "trial": {
+    "approved": false,
+    "dry_run_only": true,
+    "new_ids": 1,
+    "max_wake_posts": 2,
+    "max_judgment_puts": 1,
+    "max_gets": 6,
+    "deadline_seconds": 600
+  }
+}

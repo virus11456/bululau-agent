@@ -72,6 +72,8 @@ Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及�
 
 可部署的入口在 `gateway/`。客戶端 URL 是 `/v1/...`，檔案在 `api/v1/...`，由 rewrite 接上。部署根、`npm ci`、`nodejs22.x`、`BLOB_STORE_ID` 與 OIDC 前提寫在 `gateway/DEPLOY.md`。原子建立是 Blob `put` 的 `allowOverwrite: false`（`x-allow-overwrite: 0`，服務端 `If-None-Match: *`）。沒有把 `token` 選項傳進去，並不證明當時用的是 OIDC。Python 的 `os.link` 只留給離線測試。還沒有建立 project 或 Blob。Hobby 用途與額度仍未知。
 
+Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下文必須帶白名單的 symbol、方向、數量、停損、掛單、對應 K 線與候選 plan；只有筆數不算足夠，不足就留原 AI。父層自己讀匯出的 context，把判斷寫進 `judgments-in/<event_id>.json`，把 trace 寫進同目錄的 `.trace.json`。這包不代寫。`keep_original_ai` 不是已完成的實盤裁量，現有介面也不能取代實盤裁量。gateway 客戶端預設 `enabled: false`，見 `gateway/client.example.json`。沒有 GM 給的 HTTPS 位址與有界授權就不會外發。不另裝排程，也不關每小時原 AI 或 60 秒 watch。
+
 真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
 
 ## 還沒有的無人值守通道

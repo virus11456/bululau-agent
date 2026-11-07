@@ -5,10 +5,14 @@
 import json
 import os
 import re
+import secrets
 import stat
 from datetime import datetime, timedelta, timezone
 
-from .ack_store import AckStore
+try:
+    from .ack_store import AckStore
+except ImportError:
+    from ack_store import AckStore
 
 ACCEPTED_FIELDS = ("kind", "event_id", "schema_valid", "status")
 PROCESSED_FIELDS = ("kind", "event_id", "evaluation_id", "processed_at")
@@ -68,6 +72,12 @@ def _reject(reason, store, event_id=None):
 def note_accepted(store, document):
     if classify_file(document) != "accepted":
         raise ValueError("rejected_ack_kind")
+    with store.exclusive():
+        store.reload()
+        return _note_accepted(store, document)
+
+
+def _note_accepted(store, document):
     event_id = document["event_id"]
     events = store.state.setdefault("test_events", {})
     row = events.setdefault(event_id, {"status": "pending", "process_count": 0, "receipt": None})
@@ -84,13 +94,19 @@ def note_accepted(store, document):
 
 
 def apply_processed_ack(store, document, *, expected_event_id, sent_at, now):
+    with store.exclusive():
+        store.reload()
+        return _apply_processed_ack(store, document, expected_event_id=expected_event_id, sent_at=sent_at, now=now)
+
+
+def _apply_processed_ack(store, document, *, expected_event_id, sent_at, now):
     try:
         _id(expected_event_id)
         kind = classify_file(document)
     except ValueError as exc:
         return _reject(str(exc), store)
     if kind != "processed":
-        return note_accepted(store, document)
+        return _note_accepted(store, document)
     event_id = document["event_id"]
     if event_id != expected_event_id:
         return _reject("wrong_event", store, expected_event_id)
@@ -99,7 +115,7 @@ def apply_processed_ack(store, document, *, expected_event_id, sent_at, now):
     current = _parse_time(now) if isinstance(now, str) else now.astimezone(timezone.utc)
     if processed_at < sent:
         return _reject("too_early", store, event_id)
-    if processed_at > current + timedelta(seconds=60) or current - processed_at > timedelta(minutes=15):
+    if processed_at > current + timedelta(seconds=60) or current - processed_at > MAX_ACK_AGE:
         return _reject("expired_or_future", store, event_id)
     evaluation_id = document["evaluation_id"]
     key = "cycle:" + evaluation_id
@@ -123,7 +139,9 @@ def apply_processed_ack(store, document, *, expected_event_id, sent_at, now):
     return {"applied": True, "reason": "processed", "pending": False, "process_count": 1, "old_ai_poll": "keep"}
 
 
-def write_processed_file(directory, document):
+def write_processed_file(directory, document, *, processing_complete):
+    if processing_complete is not True:
+        raise ValueError("processing_not_complete")
     if classify_file(document) != "processed":
         raise ValueError("rejected_ack_kind")
     info = os.lstat(directory)
@@ -135,11 +153,20 @@ def write_processed_file(directory, document):
         raise ValueError("rejected_id")
     if os.path.lexists(final) and stat.S_ISLNK(os.lstat(final).st_mode):
         raise ValueError("rejected_symlink")
-    tmp = os.path.join(root, ".processed-{0}.{1}.tmp".format(document["event_id"], os.getpid()))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(tmp, flags, 0o600)
+    fd = None
+    tmp = None
+    for _ in range(8):
+        tmp = os.path.join(root, ".processed-{0}.{1}.{2}.tmp".format(document["event_id"], os.getpid(), secrets.token_hex(8)))
+        try:
+            fd = os.open(tmp, flags, 0o600)
+            break
+        except FileExistsError:
+            fd = None
+    if fd is None:
+        raise OSError("store_failed")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(document, handle, separators=(",", ":"))
@@ -148,7 +175,7 @@ def write_processed_file(directory, document):
             os.fsync(handle.fileno())
         os.replace(tmp, final)
     except Exception:
-        if os.path.lexists(tmp):
+        if tmp and os.path.lexists(tmp) and not stat.S_ISLNK(os.lstat(tmp).st_mode):
             os.unlink(tmp)
         raise
     os.chmod(final, 0o600)

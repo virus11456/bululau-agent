@@ -15,9 +15,7 @@ def build(out_dir):
     stage = Path(tempfile.mkdtemp())
     bundle = stage / "bululau-ack-contract"
     bundle.mkdir()
-    source = (ROOT / "src/phase1/ack_contract.py").read_text(encoding="utf-8")
-    source = source.replace("from .ack_store import AckStore\n", "from ack_store import AckStore\n")
-    (bundle / "ack_contract.py").write_text(source, encoding="utf-8")
+    shutil.copy(ROOT / "src/phase1/ack_contract.py", bundle / "ack_contract.py")
     shutil.copy(ROOT / "src/phase1/ack_store.py", bundle / "ack_store.py")
     shutil.copy(ROOT / "tests/test_ack_contract.py", bundle / "test_ack_contract.py")
     (bundle / "README.md").write_text((ROOT / "packaging/ack_bundle_readme.md").read_text(encoding="utf-8"), encoding="utf-8")

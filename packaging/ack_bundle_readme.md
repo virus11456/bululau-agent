@@ -22,7 +22,7 @@ chmod 700 "$BULULAU_ACK_DIR"
 python3 ack_contract.py apply --state-dir "$BULULAU_ACK_DIR" --file processed-EVENT.json --expect EVENT_ID --sent-at SENT_AT --now NOW
 ```
 
-consumer 只能在測試處理完成後寫 `kind=processed`。不能把 `kind=accepted` 拿來當 processed。
+consumer 只能在測試處理完成後寫 `kind=processed`。不能把 `kind=accepted` 拿來當 processed。殘留的 `ack_state.json.tmp` 不會被刪，也不會擋住下一次保存。
 
 回退只刪這個解壓目錄，以及操作者自己建的 `$BULULAU_ACK_DIR` 裡這套狀態檔。目錄非空就不要強制刪：
 

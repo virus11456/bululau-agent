@@ -40,14 +40,32 @@ python3 -m src.phase1.cycle apply --state-dir PRODUCER --file PRODUCER/ack-inbox
 
 Mac 的 `account_status` 三查詢已在 15:38 用既有憑證通過，state 與鎖沒有被改。這項不必再測，除非以後改了 `account_status` 的查詢行為。
 
-## 替換前要先有的驗收
+## 已驗收，不必再測
 
-原掃描已經是每小時。替換後頻率不回到 15 分鐘。下面沒有完成之前，不替換現行程式，也不把 `switch_allowed` 改成 true。
+- 15:38：Mac 既有憑證 `account_status` 結束碼 0，三查詢 true，0 倉、0 一般單、0 條件單。`state.json` 與 `.lock` 的 inode、大小、mtime、ctime 都沒變。沒有 POST、沒有 manage。
+- 15:48 至 15:50：新的隔離 synthetic producer 經 CopyToBox、`box-accept`／`box-show`、真判斷 `keep_original_ai`、CopyFromBox、原目錄 `import-staged`／`commit` 時仍 pending，`apply` 後才 acked，`processing_ack` 與 `process_count` 為 1。新進程再 apply 是 duplicate，count 仍為 1。這不是無人值守，也不是真交易。
+- `c-15a60b2092e54c0a92e7fc28423b8559` 沒有 commit，維持 pending。不要改它的時間。`test_channel=true` 的事件不是真帳戶。
 
-1. Mac 用既有金鑰跑一次 `account_status`，結束碼 0，三個查詢都是 true，輸出沒有餘額，`~/quantboy-live` 的 state 與鎖檔時間沒有被這次改寫。
-2. 同一輪 `role=mac` 在真的零倉零單、無候選時 `protection_ai_skipped=true`，有候選時 `new_entry_ai=true`。
-3. `com.quantboy.livewatch` 仍是每 60 秒的舊指令。
-4. 回退只刪版本化安裝目錄與自己的 `CYCLE_DIR`，不動舊 root、state、鎖和 watch。
-5. 父層用模型寫出的 `judgment.json` 經 CopyFromBox 回到 Mac，`import-staged` 通過後在原目錄 apply 並讀回。離線迴路已測；真模型這一步還沒有做。
+判斷與 ACK 的時效以程式為準：`src/phase1/ack_contract.py` 的 `MAX_ACK_AGE` 是 15 分鐘。`_outside_window` 還允許比現在晚 60 秒。剛好 15 分鐘仍可收，多 1 秒才過期。不是幾分鐘。
 
-第 1 項已在 15:38 完成。第 5 項的真模型判斷與無人值守傳送都還沒有。
+## 可安全做的 quiet 掃描
+
+手動跑 `role=mac` 的一輪：只讀三查詢加公開掃描，不啟動 manage，不寫舊 state。零倉零單且新鮮、無候選時不叫保護 AI。不要為它再裝一條 cron。`install-schedule` 對 `role=mac` 會拒絕。現有每小時 routine 繼續負責原掃描；兩條一起跑就是雙排程。
+
+`python3 -m src.phase1.runner deploy-check --config runner.json` 會列出間隔、不開倉、不改 60 秒 watch、未知仍留原 AI。`switch_allowed` 仍是 false。現在不替換實盤。
+
+## 必須留下的原 AI 與受監督判斷
+
+有候選、有持倉、有掛單、查詢失敗或未知，都維持原 AI。`keep_original_ai` 與 `no_trade` 只記錄判斷，不會下單。真的開倉仍走 Mac 上原來的 `live_trader.py`，這包不呼叫它。
+
+context 裡的持倉與掛單是筆數，沒有幣種、方向、數量、停損，也沒有 K 線。候選若來自掃描，會帶 symbol、setup、bar、ladder，以及掃描已經算出的 entry、stop、target、rr、plan。這些仍不是下單指令。審持倉要看 Mac 上原來的 status，不能只看這份 context。
+
+回送繼續用 CopyToBox／CopyFromBox，再 `import-staged`。這要人在線批准。不是無人值守。
+
+## 還沒有的無人值守通道
+
+公開的 artifact 自動傳送規格已向 GM 要，尚未拿到。沒有這份非秘密規格之前，不開服務、不複製 token、也不把 webhook 說成已接通。外部依賴就是這份規格，以及之後另批的 POST。目前預算仍是 0。
+
+## 回退
+
+只刪版本化安裝目錄和自己的 `CYCLE_DIR`。不要刪 `~/quantboy-live`、`state.json`、`.lock`、`events.json`、HALT 旗標，也不要改 `com.quantboy.livewatch`。不要把掃描調回 15 分鐘。

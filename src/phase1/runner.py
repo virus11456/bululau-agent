@@ -689,6 +689,8 @@ def main(argv):
         return _check_root_main(argv[1:])
     if argv[:1] == ["check-install"]:
         return _check_install_main(argv[1:])
+    if argv[:1] == ["deploy-check"]:
+        return _deploy_check_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -762,6 +764,44 @@ def _rollback_main(argv):
         print(json.dumps({"reason": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def deploy_report(config_path):
+    """不啟動程序。說明這份設定會不會變成第二條排程或自行開倉。"""
+    loaded = _load_config(config_path)
+    return {
+        "role": loaded.get("role"),
+        "scan_interval_seconds": loaded["interval_seconds"],
+        "reverts_to_15m": False,
+        "install_schedule_for_mac": False,
+        "hard_watch_seconds": 60,
+        "hard_watch_modified": False,
+        "this_package_spawns_manage": loaded["commands"].get("manage") is not None,
+        "old_ai_poll": "keep",
+        "unknown_keeps_original_ai": True,
+        "context_positions": "count_only",
+        "context_has_klines": False,
+        "judgment_opens_position": False,
+        "allowed_decisions": ["keep_original_ai", "no_trade"],
+        "unattended_transport": False,
+        "switch_allowed": False,
+        "live_connected": False,
+        "post_authorized": False,
+    }
+
+
+def _deploy_check_main(argv):
+    found = _parse(argv)
+    if not found or "config" not in found:
+        print("用法: python3 -m src.phase1.runner deploy-check --config FILE")
+        return 2
+    try:
+        report = deploy_report(found["config"])
+    except ValueError as exc:
+        print(json.dumps({"switch_allowed": False, "reason": str(exc)}, ensure_ascii=False))
+        return 1
+    print(json.dumps(report, ensure_ascii=False))
     return 0
 
 

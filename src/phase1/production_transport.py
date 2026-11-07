@@ -153,16 +153,38 @@ def wake_document(envelope):
     return document
 
 
+_REVIEW_FIELDS = ("tf", "bar", "entry", "stop", "target", "rr", "plan", "sizing", "side", "vol_x", "rs24", "rs4h")
+
+
+def _review_value(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:160]
+    if isinstance(value, list) and value and all(isinstance(item, (int, float, str)) and not isinstance(item, bool) for item in value[:8]):
+        return value[:8]
+    return None
+
+
 def _candidate(item):
     if not isinstance(item, dict):
         return None
     ladder = item.get("ladder") if isinstance(item.get("ladder"), list) else []
-    return {
+    mapped = {
         "symbol": str(item.get("symbol") or "")[:64],
         "setup": str(item.get("setup") or "")[:64],
         "bar_time": str(item.get("bar_time") or item.get("bar_open_ms") or "")[:64],
         "ladder": ladder[:8],
     }
+    for key in _REVIEW_FIELDS:
+        if key not in item:
+            continue
+        cleaned = _review_value(item[key])
+        if cleaned is not None:
+            mapped[key] = cleaned
+    return mapped
 
 
 def build_envelope(snapshot, prefilter, freshness, *, event_id, evaluation_id, sent_at, reason):

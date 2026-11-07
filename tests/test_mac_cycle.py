@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.phase1.account_status import query_status
 from src.phase1.legacy_snapshot import snapshot_file
-from src.phase1.runner import HOURLY_SCAN_SECONDS, _load_config, run_configured
+from src.phase1.runner import HOURLY_SCAN_SECONDS, _load_config, deploy_report, run_configured
 from src.phase1.session import Store
 from src.phase1.status_contract import parse_status_json
 
@@ -130,6 +130,14 @@ class MacCycleTest(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(json.loads(proc.stdout)["reason"], "mac_schedule_not_installed")
+            report = deploy_report(hourly)
+            self.assertEqual(report["scan_interval_seconds"], 3600)
+            self.assertFalse(report["reverts_to_15m"])
+            self.assertFalse(report["this_package_spawns_manage"])
+            self.assertFalse(report["judgment_opens_position"])
+            self.assertEqual(report["context_positions"], "count_only")
+            self.assertFalse(report["unattended_transport"])
+            self.assertEqual(report["old_ai_poll"], "keep")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@
 
 同一個 `scan_id` 先記 `running`。執行中的第二個 worker 拿不到 claim，不另叫 AI。行程在 manage callback 中途退出後，新的行程看到 `running` 只補 fallback，不重跑 manage。fallback 沒接上或失敗就維持 `running`，不能記成 `recovered`。fallback 成功之後才記 `recovered`。
 
-`TimeoutError` 只在同步 callback 自己丟出時算超時。沒有執行器層的超時。`gateway_enabled` 或 `notifier_verified` 設成 true 會直接拒絕，但這不表示每一個可能的 live 旗標都已列舉。
+外部 callback 若是參數陣列，用新的 process session 執行，deadline 預設 20 秒、上限 60 秒。超時對該 process group 送 SIGKILL。行程內的函式自己丟 `TimeoutError` 不是這個執行器超時，也不會被這條 deadline 殺掉。不用 pickle。離開該 session 的孫行程不在殺死範圍內。live 命令仍拒絕。平台 AI 的超時沒有接上。`gateway_enabled` 或 `notifier_verified` 設成 true 會直接拒絕，但這不表示每一個可能的 live 旗標都已列舉。
 
 `manage --live`、`status`、`open --live` 只寫在未啟用契約裡，指向 Mac 的 `~/quantboy-live/live_trader.py`。HALT、401、日虧 7%、累虧 30% 仍由那支 manage 負責。這包不執行。未驗 autoscan 不下單。paper 程式不改。60 秒 watch 與 2 小時老限價規則不改：老限價仍是叫醒原 AI，不撤單。
 

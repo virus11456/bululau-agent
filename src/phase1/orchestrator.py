@@ -6,6 +6,8 @@ TimeoutError 只代表這次同步 callback 自己丟出，不是執行器真的
 import fcntl
 import json
 import os
+import signal
+import subprocess
 import secrets
 
 from .ack_contract import cycle_key
@@ -26,7 +28,19 @@ GAPS = (
     "gateway_live_send_off",
     "wakes_not_saved",
     "review_round_does_not_save_the_wake",
-    "executor_timeout_not_implemented",
+    "platform_ai_timeout_not_connected",
+)
+DEADLINE_MIN = 1
+DEADLINE_MAX = 60
+DEFAULT_DEADLINE_SECONDS = 20
+ISOLATION_LIMITS = (
+    "isolated_callbacks_are_argv_only",
+    "pickle_not_used",
+    "in_process_callable_timeout_is_self_raised_not_executor",
+    "timeout_kills_the_process_group",
+    "processes_that_leave_the_session_are_not_covered",
+    "live_commands_refused",
+    "platform_ai_timeout_not_connected",
 )
 COUNT_KEYS = ("positions", "open_orders", "algo_orders")
 REFUSED_TRUE_FLAGS = (
@@ -66,7 +80,10 @@ def load_orchestrator_config(document):
             raise ValueError("orchestrator_live_refused")
     if document.get("interval_seconds") != INTERVAL_SECONDS:
         raise ValueError("scan_interval_too_fast")
+    deadline = document.get("callback_deadline_seconds", DEFAULT_DEADLINE_SECONDS)
+    _bounded_deadline(deadline)
     contract = disabled_mac_contract()
+    contract["callback_deadline_seconds"] = deadline
     contract["loaded"] = True
     contract["refused_true_flags"] = list(REFUSED_TRUE_FLAGS)
     return contract
@@ -83,7 +100,57 @@ def run_disabled_manage(contract, runner=None):
     return {"executed": False, "called": False, "reason": "command_disabled"}
 
 
-def _invoke(name, fn, payload, order, gaps):
+def _bounded_deadline(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not DEADLINE_MIN <= value <= DEADLINE_MAX:
+        raise ValueError("deadline_out_of_bounds")
+    return value
+
+
+def _refuse_live_argv(argv):
+    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part.strip() and "\n" not in part and "\r" not in part for part in argv):
+        raise ValueError("malformed_command")
+    if "--live" in argv or any(os.path.basename(part) == "live_trader.py" for part in argv):
+        raise ValueError("manage_live_refused")
+
+
+def run_isolated(argv, deadline_seconds, payload):
+    """子行程加新 session。超時對整個 process group 送 SIGKILL，不等 thread 自己停。"""
+    _refuse_live_argv(argv)
+    deadline = _bounded_deadline(deadline_seconds)
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True, text=True,
+    )
+    try:
+        stdout, _stderr = proc.communicate(input=json.dumps(payload, ensure_ascii=False), timeout=deadline)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        return {"called": True, "ok": False, "timed_out": True, "isolated": True, "process_killed": True}
+    if proc.returncode != 0:
+        return {"called": True, "ok": False, "failed": True, "isolated": True, "process_killed": False}
+    try:
+        value = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        value = None
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        return {"called": True, "ok": False, "failed": True, "isolated": True, "process_killed": False, "value": value if isinstance(value, dict) else None}
+    value = dict(value)
+    value.update({"called": True, "ok": True, "isolated": True, "process_killed": False, "timed_out": False})
+    return value
+
+
+def _invoke(name, fn, payload, order, gaps, deadline_seconds):
+    if isinstance(fn, dict) and isinstance(fn.get("argv"), list):
+        order.append(name)
+        try:
+            limit = _bounded_deadline(fn.get("deadline_seconds", deadline_seconds))
+            return run_isolated(fn["argv"], limit, payload)
+        except ValueError:
+            return {"called": False, "ok": False, "failed": True}
     if not callable(fn):
         gaps.append(name + "_absent")
         return {"called": False, "ok": False, "absent": True}
@@ -91,9 +158,9 @@ def _invoke(name, fn, payload, order, gaps):
     try:
         value = fn(payload)
     except TimeoutError:
-        return {"called": True, "ok": False, "timed_out": True}
+        return {"called": True, "ok": False, "timed_out": True, "isolated": False, "process_killed": False}
     except Exception:
-        return {"called": True, "ok": False, "failed": True}
+        return {"called": True, "ok": False, "failed": True, "isolated": False, "process_killed": False}
     if not isinstance(value, dict) or value.get("ok") is not True or value.get("timed_out") is True:
         timed_out = isinstance(value, dict) and value.get("timed_out") is True
         return {"called": True, "ok": False, "timed_out": timed_out, "value": value if isinstance(value, dict) else None}
@@ -137,6 +204,7 @@ def _result(reason, order, gaps, *, quiet, event_id, duplicate=False, needs=None
         "routine_replaced": False,
         "watch_modified": False,
         "old_ai_poll": "keep",
+        "isolation_limits": list(ISOLATION_LIMITS),
         "gaps": list(GAPS) + [item for item in gaps if item not in GAPS],
     }
 
@@ -193,7 +261,7 @@ def _begin(store, scan_id):
 def _finish(store, scan_id, event_id, result):
     """fallback 沒接上或失敗時維持 running。不能把 pending 寫成 recovered。"""
     reason = result.get("reason")
-    if reason == "incomplete_restart" and result.get("fallback_settled") is not True:
+    if result.get("fallback_required") and result.get("fallback_settled") is not True:
         return
     status = "recovered" if reason == "incomplete_restart" else "completed"
     with store.exclusive():
@@ -207,12 +275,12 @@ def _finish(store, scan_id, event_id, result):
             store.save()
 
 
-def _recover(callbacks, event_id, scan_id):
+def _recover(callbacks, event_id, scan_id, deadline_seconds):
     """中斷後不重跑 manage。只明確 fallback，不當成已成功完成。"""
     order = []
     gaps = ["incomplete_restart"]
     payload = {"event_id": event_id, "evaluation_id": scan_id, "orders_placed": False, "live": False, "resume": True}
-    fallback = _invoke("fallback", callbacks.get("fallback"), payload, order, gaps)
+    fallback = _invoke("fallback", callbacks.get("fallback"), payload, order, gaps, deadline_seconds)
     settled = fallback.get("called") is True and fallback.get("ok") is True
     if not settled:
         gaps.append("original_ai_callback_unwired" if fallback.get("called") is not True else "fallback_not_settled")
@@ -220,16 +288,17 @@ def _recover(callbacks, event_id, scan_id):
         "incomplete_restart", order, gaps, quiet=False, event_id=event_id, fallback_called=fallback.get("called") is True,
     )
     result["fallback_settled"] = settled
+    result["fallback_required"] = True
     return result
 
 
-def _execute(callbacks, notifier, event_id, scan_id):
+def _execute(callbacks, notifier, event_id, scan_id, deadline_seconds):
     order = []
     extra_gaps = []
     payload = {"event_id": event_id, "evaluation_id": scan_id, "orders_placed": False, "live": False}
-    manage = _invoke("manage", callbacks.get("manage"), payload, order, extra_gaps)
-    status = _invoke("status", callbacks.get("status"), payload, order, extra_gaps)
-    prefilter = _invoke("prefilter", callbacks.get("prefilter"), payload, order, extra_gaps)
+    manage = _invoke("manage", callbacks.get("manage"), payload, order, extra_gaps, deadline_seconds)
+    status = _invoke("status", callbacks.get("status"), payload, order, extra_gaps, deadline_seconds)
+    prefilter = _invoke("prefilter", callbacks.get("prefilter"), payload, order, extra_gaps, deadline_seconds)
     status_value = status.get("value") if isinstance(status.get("value"), dict) else None
     prefilter_value = prefilter.get("value") if prefilter.get("ok") and isinstance(prefilter.get("value"), dict) else None
     counts = _counts(status_value)
@@ -266,19 +335,19 @@ def _execute(callbacks, notifier, event_id, scan_id):
         needs.append("candidate_ai")
     shared = dict(payload, needs=list(needs))
     if exposure:
-        protection = _invoke("protection", callbacks.get("protection"), shared, order, extra_gaps)
+        protection = _invoke("protection", callbacks.get("protection"), shared, order, extra_gaps, deadline_seconds)
         if not protection.get("ok"):
             failed = True
             candidate_allowed = False
     if candidate_allowed:
-        candidate = _invoke("candidate", callbacks.get("candidate"), shared, order, extra_gaps)
+        candidate = _invoke("candidate", callbacks.get("candidate"), shared, order, extra_gaps, deadline_seconds)
         if not candidate.get("ok"):
             failed = True
     unknown = (not counts_complete) or (not halted_clear) or halted_on or bool(uncovered) or candidates is None
     need_fallback = failed or unknown or (isinstance(candidates, list) and candidates and not candidate_allowed)
     fallback_called = False
     if need_fallback or (needs and any(item.endswith("_absent") for item in extra_gaps)):
-        fallback = _invoke("fallback", callbacks.get("fallback"), dict(payload, needs=list(needs)), order, extra_gaps)
+        fallback = _invoke("fallback", callbacks.get("fallback"), dict(payload, needs=list(needs)), order, extra_gaps, deadline_seconds)
         fallback_called = fallback.get("called") is True
         if not fallback_called:
             extra_gaps.append("original_ai_callback_unwired")
@@ -295,13 +364,17 @@ def _execute(callbacks, notifier, event_id, scan_id):
         reason = "callbacks_unwired"
     else:
         reason = "routed"
-    return _result(reason, order, extra_gaps, quiet=False, event_id=event_id, needs=needs, fallback_called=fallback_called)
+    result = _result(reason, order, extra_gaps, quiet=False, event_id=event_id, needs=needs, fallback_called=fallback_called)
+    result["fallback_required"] = bool(need_fallback or (needs and any(item.endswith("_absent") for item in extra_gaps)))
+    result["fallback_settled"] = (not result["fallback_required"]) or (fallback_called and fallback.get("ok") is True)
+    return result
 
 
-def run_orchestrator(store, *, now, scan_id, callbacks=None, notifier=None):
+def run_orchestrator(store, *, now, scan_id, callbacks=None, notifier=None, deadline_seconds=DEFAULT_DEADLINE_SECONDS):
     """manage → status → prefilter。quiet 只在欄位齊、halted 恰為 false、三個 count 都是 0。"""
     del now
     callbacks = callbacks or {}
+    deadline_seconds = _bounded_deadline(deadline_seconds)
     fd = _try_claim(store.root, scan_id)
     if fd is None:
         return _result(
@@ -311,8 +384,8 @@ def run_orchestrator(store, *, now, scan_id, callbacks=None, notifier=None):
         phase, event_id = _begin(store, scan_id)
         if phase == "done":
             return _result("duplicate_event", [], [], quiet=False, event_id=event_id, duplicate=True)
-        result = _recover(callbacks, event_id, scan_id) if phase == "incomplete" else _execute(
-            callbacks, notifier, event_id, scan_id,
+        result = _recover(callbacks, event_id, scan_id, deadline_seconds) if phase == "incomplete" else _execute(
+            callbacks, notifier, event_id, scan_id, deadline_seconds,
         )
         _finish(store, scan_id, event_id, result)
         return result

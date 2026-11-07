@@ -7,6 +7,7 @@
   "schedule_installed": false,
   "replaces_routine": false,
   "interval_seconds": 1800,
+  "callback_deadline_seconds": 20,
   "watch_seconds": 60,
   "watch_modified": false,
   "open_live_enabled": false,

@@ -14,7 +14,7 @@ manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小�
 
 一輪閘門：manage 不受候選限制。只有新鮮 0 倉 0 單且沒有新候選才免 AI。HTTP 2xx 不當作處理 ACK。故障時事件留在 outbox。未配置的送達路徑會 blocked。
 
-處理 ACK 與收件分開。`accepted` 不會變成 `processed`。錯的、過早、過期或未知事件的 ACK 維持 pending，舊 AI 不能停。
+處理 ACK 與收件分開。`accepted` 不會變成 `processed`。錯的、過早、過期、錯 evaluation、路徑字元或儲存失敗都維持 pending，舊 AI 不能停。可搬包含 store 與 discover 測試。
 
 ## 2026-11-06
 

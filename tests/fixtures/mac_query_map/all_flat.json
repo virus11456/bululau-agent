@@ -1,0 +1,5 @@
+{
+  "account": {"state": "success", "positions": 0},
+  "open_orders": {"state": "success", "count": 0},
+  "open_algo_orders": {"state": "success", "count": 0}
+}

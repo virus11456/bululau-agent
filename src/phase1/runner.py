@@ -730,6 +730,12 @@ def main(argv):
         return _receive_status_main(argv[1:])
     if argv[:1] == ["receive-expire"]:
         return _receive_expire_main(argv[1:])
+    if argv[:1] == ["receive-claim"]:
+        return _receive_claim_main(argv[1:])
+    if argv[:1] == ["map-queries"]:
+        return _map_queries_main(argv[1:])
+    if argv[:1] == ["fallback-gap"]:
+        return _fallback_gap_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -745,7 +751,7 @@ def _parse(argv):
             found["shadow"] = True
             index += 1
             continue
-        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter", "--entry-config", "--file", "--event-id", "--judgment", "--trace") or index + 1 >= len(argv):
+        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter", "--entry-config", "--file", "--event-id", "--judgment", "--trace", "--owner", "--role") or index + 1 >= len(argv):
             return None
         found[key[2:].replace("-", "_")] = argv[index + 1]
         index += 2
@@ -896,7 +902,9 @@ def _receive_submit_main(argv):
             trace = json.load(handle)
         store = Store(found["state_dir"])
         # found["now"] 是 payload 時鐘，submit 會丟棄，不能用來延長父判斷截止。
-        result = submit_parent_files(store, found["event_id"], judgment, trace, found["now"])
+        result = submit_parent_files(
+            store, found["event_id"], judgment, trace, found["now"], owner=found.get("owner"),
+        )
         stored = read_formal(store, found["event_id"])
         files = read_parent_files(store, found["event_id"])
     except ValueError as exc:
@@ -993,7 +1001,7 @@ def _receive_expire_main(argv):
         }, ensure_ascii=False))
         return 2
     try:
-        result = expire_parent(Store(found["state_dir"]), found["event_id"])
+        result = expire_parent(Store(found["state_dir"]), found["event_id"], role=found.get("role"))
     except ValueError as exc:
         print(json.dumps({
             "ack": False, "http_sent": False, "reason": str(exc), "mutated": False,
@@ -1003,6 +1011,73 @@ def _receive_expire_main(argv):
     print(json.dumps(result, ensure_ascii=False))
     if result.get("reason") == "claim_held":
         return 1
+    return 0
+
+
+def _receive_claim_main(argv):
+    """正式 claim。owner 必填，且不從 delivery 讀。漏 owner 不能當正式繞過。"""
+    from .formal_receive import claim_parent_run
+    if _payload_clock_rejected(argv):
+        return 1
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "event_id" not in found or "owner" not in found:
+        print(json.dumps({
+            "ai_start_allowed": False, "owner_is_authentication": False, "reason": "owner_required",
+            "http_sent": False, "parent_called": False,
+        }, ensure_ascii=False))
+        return 2
+    try:
+        result = claim_parent_run(Store(found["state_dir"]), found["event_id"], found["owner"])
+    except ValueError as exc:
+        print(json.dumps({
+            "ai_start_allowed": False, "owner_is_authentication": False, "reason": str(exc),
+            "http_sent": False, "parent_called": False, "payload_authorizes_owner": False,
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    if result.get("ai_start_allowed") is True:
+        return 0
+    return 1
+
+
+def _map_queries_main(argv):
+    """只讀 fixture。不執行 Mac，不取 ~/.quantboy-live 的鎖。"""
+    from .mac_query_map import map_queries
+    found = _parse(argv)
+    if not found or "file" not in found:
+        print(json.dumps({
+            "live_equivalent": False, "mac_executed": False, "reason": "fixture_required",
+        }, ensure_ascii=False))
+        return 2
+    try:
+        with open(found["file"], encoding="utf-8") as handle:
+            result = map_queries(json.load(handle))
+    except ValueError as exc:
+        print(json.dumps({
+            "live_equivalent": False, "mac_executed": False, "http_sent": False, "reason": str(exc),
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _fallback_gap_main(argv):
+    """寫本地未接通紀錄。不跑原 AI，不送告警。"""
+    from .formal_receive import record_fallback_gap
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "event_id" not in found:
+        print(json.dumps({
+            "fallback_ran": False, "alert_delivered": False, "reason": "fallback_unwired",
+        }, ensure_ascii=False))
+        return 2
+    try:
+        result = record_fallback_gap(Store(found["state_dir"]), found["event_id"])
+    except ValueError as exc:
+        print(json.dumps({
+            "fallback_ran": False, "alert_delivered": False, "reason": str(exc),
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

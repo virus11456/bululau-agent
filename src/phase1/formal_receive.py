@@ -9,6 +9,7 @@
 import fcntl
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 from .ack_contract import MAX_ACK_AGE, cycle_key
@@ -29,6 +30,26 @@ LEGACY_TEST_ROUTINE = {
     "budget_exhausted": {"ids": 2, "posts": 3},
     "formal_wake_authorized": False,
 }
+
+PAUSED_PLATFORM_ENTRIES = (
+    {
+        "automation_id": "automation-1794023232755",
+        "owner_id": "ef5f0556-2d5c-49a4-8b61-a4c5eef57780",
+        "state": "paused",
+        "event_authorized": False,
+        "formal_wake_authorized": False,
+    },
+    {
+        "automation_id": "automation-1794058224037",
+        "owner_id": "ef5f0556-2d5c-49a4-8b61-a4c5eef57780",
+        "state": "paused",
+        "event_authorized": False,
+        "formal_wake_authorized": False,
+        "secret": False,
+    },
+)
+EXPIRY_SUPERVISOR_ROLE = "expiry-supervisor"
+_OWNER_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 LAYERS = {
     "handler_verifiable": True,
@@ -166,6 +187,129 @@ def read_formal(store, event_id):
         store.reload()
         row = (store.state.get("formal_inbox") or {}).get(event_id)
     return row if isinstance(row, dict) else None
+
+
+def _require_owner(owner):
+    if not isinstance(owner, str) or _OWNER_RE.fullmatch(owner) is None:
+        raise ValueError("owner_rejected")
+    return owner
+
+
+def _require_matching_owner(row, owner):
+    """有正式 claim 時，漏 owner 或不同 owner 都不能寫。沒有 claim 的舊測試流程不要求 owner。"""
+    claim = row.get("parent_claim") if isinstance(row, dict) else None
+    if not isinstance(claim, dict):
+        return None
+    if owner is None:
+        raise ValueError("owner_required")
+    checked = _require_owner(owner)
+    if checked != claim.get("owner"):
+        raise ValueError("owner_mismatch")
+    return checked
+
+
+def _claim_view(row, *, ai_start_allowed, reason):
+    claim = row.get("parent_claim") if isinstance(row, dict) else None
+    return {
+        "accepted": ai_start_allowed,
+        "ai_start_allowed": ai_start_allowed,
+        "reason": reason,
+        "status": row.get("status") if isinstance(row, dict) else None,
+        "event_id": row.get("event_id") if isinstance(row, dict) else None,
+        "evaluation_id": row.get("evaluation_id") if isinstance(row, dict) else None,
+        "digest": row.get("digest") if isinstance(row, dict) else None,
+        "owner_is_authentication": False,
+        "owner_source": "cli_argument_not_payload",
+        "payload_authorizes_owner": False,
+        "formal_mode": isinstance(claim, dict),
+        "may_submit_existing": False,
+        "claim_held": False,
+        "parent_called": False,
+        "http_sent": False,
+        "ack": False,
+        "platform_ai_process_killed": False,
+        "scheduler_present": False,
+        "fallback_ran": False,
+        "alert_delivered": False,
+        "paused_platform_entries": [dict(item) for item in PAUSED_PLATFORM_ENTRIES],
+    }
+
+
+def claim_parent_run(store, event_id, owner, judgment_clock=None):
+    """在親讀 context 之前原子寫入 claim。同一事件只有第一次授予開始 AI。
+
+    owner 只來自呼叫端參數，不讀 delivery。自填字串不是身分驗證。
+    同 owner 重啟不再授權。不同 owner 不改列。過期不建立新的 AI 許可。
+    """
+    cycle_key(event_id)
+    owner = _require_owner(owner)
+    clock_text, source = trusted_judgment_clock(judgment_clock)
+    fd = _inbox_lock(store.root, event_id)
+    if fd is None:
+        row = read_formal(store, event_id) or {"status": "pending", "event_id": event_id}
+        view = _claim_view(row, ai_start_allowed=False, reason="claim_held")
+        view["claim_held"] = True
+        return view
+    try:
+        row = read_formal(store, event_id)
+        if not isinstance(row, dict):
+            raise ValueError("not_received")
+        existing = row.get("parent_claim")
+        if isinstance(existing, dict) and existing.get("owner") != owner:
+            raise ValueError("owner_mismatch")
+        if isinstance(existing, dict):
+            view = _claim_view(row, ai_start_allowed=False, reason="restart_no_new_ai")
+            view["may_submit_existing"] = row.get("status") == "pending" and not _past_deadline(
+                row.get("judgment_deadline"), clock_text,
+            )
+            return view
+        if row.get("status") != "publish_ready" and _past_deadline(row.get("judgment_deadline"), clock_text):
+            _mark_expired(store, event_id, clock_text)
+            return _claim_view(read_formal(store, event_id), ai_start_allowed=False, reason="parent_deadline_expired")
+        with store.exclusive():
+            store.reload()
+            current = store.state["formal_inbox"][event_id]
+            if isinstance(current.get("parent_claim"), dict):
+                if current["parent_claim"].get("owner") != owner:
+                    raise ValueError("owner_mismatch")
+                return _claim_view(current, ai_start_allowed=False, reason="restart_no_new_ai")
+            current["parent_claim"] = {
+                "owner": owner,
+                "evaluation_id": current.get("evaluation_id"),
+                "digest": current.get("digest"),
+                "claimed_at": clock_text,
+                "clock_source": source,
+            }
+            current["formal_mode"] = True
+            store.save()
+        view = _claim_view(read_formal(store, event_id), ai_start_allowed=True, reason="claim_granted")
+        view["context_path"] = os.path.join("formal-files", event_id, "context.json")
+        view["may_submit_existing"] = True
+        return view
+    finally:
+        _unlock(fd)
+
+
+def record_fallback_gap(store, event_id):
+    """只留下原 AI 沒有跑的本地接點。不呼叫原 AI，不送告警，不取消平台 process。"""
+    cycle_key(event_id)
+    body = {
+        "schema_version": 1,
+        "event_type": "local_fallback_unwired",
+        "event_id": event_id,
+        "fallback_ran": False,
+        "original_ai_invoked": False,
+        "alert_delivered": False,
+        "cancel_api_used": False,
+        "scheduler_present": False,
+        "punctual_delivery": False,
+        "http_sent": False,
+        "platform_ai_process_killed": False,
+        "protection_left_to_original_manage": True,
+    }
+    path = os.path.join(str(store.root), "formal-alerts", event_id + ".fallback.json")
+    _write_json(path, body)
+    return body
 
 
 def trusted_judgment_clock(injected=None):
@@ -421,7 +565,7 @@ def receive_delivery(store, document, now, parent=None, judgment_clock=None):
             else:
                 duplicate = True
             status = prior.get("status")
-            invoked = prior.get("parent_invoked") is True
+            invoked = prior.get("parent_invoked") is True or isinstance(prior.get("parent_claim"), dict)
             stored_deadline = prior.get("judgment_deadline")
         if status == "pending" and _past_deadline(stored_deadline, clock_text):
             _mark_expired(store, checked["event_id"], clock_text)
@@ -527,7 +671,7 @@ def _install_parent_files(store, event_id, judgment, trace, judgment_clock=None)
     return _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
 
 
-def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=None):
+def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=None, owner=None):
     """pending 補交父層已經寫好的 judgment／trace。不重新呼叫父 AI，也不假完成。
 
     now 是 payload 時鐘，刪掉不用。開頭的時鐘只做提早拒絕。
@@ -546,6 +690,7 @@ def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=No
         row = read_formal(store, event_id)
         if not isinstance(row, dict):
             raise ValueError("not_received")
+        _require_matching_owner(row, owner)
         if row.get("status") != "publish_ready" and (
             row.get("status") == "parent_deadline_expired" or _past_deadline(row.get("judgment_deadline"), clock_text)
         ):
@@ -585,7 +730,7 @@ def formal_status(store, event_id, judgment_clock=None):
     }
 
 
-def expire_parent(store, event_id, judgment_clock=None):
+def expire_parent(store, event_id, judgment_clock=None, role=None):
     """平台或人明示觸發才檢查到期。沒有 scheduler，不會自己準時發生。
 
     活躍 flock 不搶。已持久成功不覆寫。本地終止不殺平台 AI process。
@@ -604,6 +749,8 @@ def expire_parent(store, event_id, judgment_clock=None):
         before = read_formal(store, event_id)
         if not isinstance(before, dict):
             raise ValueError("not_received")
+        if isinstance(before.get("parent_claim"), dict) and role != EXPIRY_SUPERVISOR_ROLE:
+            raise ValueError("supervisor_required")
         if before.get("status") == "publish_ready" or not _past_deadline(before.get("judgment_deadline"), clock_text):
             verdict = _row_verdict(before, duplicate=False, parent_called=False)
             verdict["mutated"] = False

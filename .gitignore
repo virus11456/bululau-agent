@@ -1,5 +1,7 @@
 .env
 *.env
+sender.json
+trade_candidate_test.json
 !config.example.env
 binance.env
 **/.env

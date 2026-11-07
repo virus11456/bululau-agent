@@ -6,7 +6,11 @@
 
 同日另加省 token 閘門：沿用 `prefilter.py` 的輸出，同一候選只喚醒一次。沒有新候選結束碼 0。不取代 `watch`／`manage`，也不送尚未配置的 webhook。
 
-manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小時限價只標記要喚醒原 AI，不撤單。結構轉弱與移動停損沒有非 AI 等效，舊輪詢不能停。未配置的送達路徑會 blocked。
+manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小時限價只標記要喚醒原 AI，不撤單。結構轉弱與移動停損沒有非 AI 等效，舊輪詢不能停。
+
+狀態感知喚醒：只有新鮮的 0 倉、0 掛單、0 候選且無錯誤才免 AI。有倉的定期複查用週期身份，不用同一根 K 的指紋取消。sender 未配置時舊輪詢維持 blocked。
+
+本機 sender 設定只寫 `~/.config/bululau-agent/sender.json`。單筆測試契約五欄，重送保留同一事件。HTTP 成功仍是 pending。沒有真實發送。未配置的送達路徑會 blocked。
 
 ## 2026-11-06
 

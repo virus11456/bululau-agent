@@ -10,6 +10,39 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 NOW = "2026-11-07T12:20:00+08:00"
 PYTHON = sys.executable
+
+
+def _spawn_detail(proc):
+    """失敗時留下子程序的 argv、cwd、結束碼與 stdout 的 reason。不印環境值。"""
+    stdout = proc.stdout or ""
+    fields = None
+    reason = None
+    try:
+        body = json.loads(stdout)
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        reason = body.get("reason")
+        fields = {
+            key: body.get(key) for key in (
+                "reason", "mode", "executed_live", "command_errors", "cycle_needs_ai",
+                "scan_blocked", "evaluation_id", "old_ai_poll", "switch_allowed",
+            )
+        }
+    lowered = stdout.lower() + (proc.stderr or "").lower()
+    secret = any(mark in lowered for mark in ("binance_api", "api_secret", "authorization", "bearer "))
+    return json.dumps({
+        "returncode": proc.returncode,
+        "argv": list(getattr(proc, "diag_argv", []) or []),
+        "cwd": getattr(proc, "diag_cwd", None),
+        "reason": None if secret else reason,
+        "stdout_fields": None if secret else fields,
+        "stdout_unparsed": None if fields is not None or secret else stdout[:1500],
+        "stderr": "" if secret else (proc.stderr or "")[:1500],
+        "env_names": sorted(os.environ),
+    }, ensure_ascii=False)
+
+
 WORKER = r"""
 import json, sys
 mode = open(sys.argv[1], encoding="utf-8").read().strip()
@@ -323,7 +356,10 @@ class ProductionAdapterTest(unittest.TestCase):
             argv.extend(["--now", now, "--scan-id", scan_id])
         if extra:
             argv.extend(extra)
-        return subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True)
+        proc = subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True)
+        proc.diag_argv = argv
+        proc.diag_cwd = str(ROOT)
+        return proc
 
     def test_exit_contracts_and_status_text(self):
         expect = {
@@ -410,18 +446,18 @@ class ProductionAdapterTest(unittest.TestCase):
             root, state, config = self._tree(tmp, "quiet")
             first = self._run(state, config, now=None)
             second = self._run(state, config, now=None)
-            self.assertEqual(first.returncode, 0, first.stderr)
-            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(first.returncode, 0, _spawn_detail(first))
+            self.assertEqual(second.returncode, 0, _spawn_detail(second))
             one = json.loads(first.stdout)["evaluation_id"]
             two = json.loads(second.stdout)["evaluation_id"]
             self.assertRegex(one, r"^c\d{8}T\d{6}Z[0-9a-f]{8}$")
             self.assertNotEqual(one, two)
             dest = os.path.join(tmp, "schedule")
-            installed = subprocess.run(
-                [PYTHON, "-m", "src.phase1.runner", "install-schedule", "--dest", dest, "--state-dir", state, "--repo", str(ROOT), "--python", PYTHON, "--config", config],
-                cwd=str(ROOT), capture_output=True, text=True,
-            )
-            self.assertEqual(installed.returncode, 0, installed.stderr)
+            install_argv = [PYTHON, "-m", "src.phase1.runner", "install-schedule", "--dest", dest, "--state-dir", state, "--repo", str(ROOT), "--python", PYTHON, "--config", config]
+            installed = subprocess.run(install_argv, cwd=str(ROOT), capture_output=True, text=True)
+            installed.diag_argv = install_argv
+            installed.diag_cwd = str(ROOT)
+            self.assertEqual(installed.returncode, 0, _spawn_detail(installed))
             plist = Path(dest, "bululau-cycle-shadow.plist").read_text(encoding="utf-8")
             self.assertIn("<key>Disabled</key><true/>", plist)
             self.assertIn("<key>StartInterval</key><integer>180</integer>", plist)
@@ -431,7 +467,9 @@ class ProductionAdapterTest(unittest.TestCase):
             args = __import__("re").findall(r"<string>(.*?)</string>", matched.group(1))
             self.assertNotIn("--shadow", args)
             ran = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True)
-            self.assertEqual(ran.returncode, 0, ran.stderr)
+            ran.diag_argv = args
+            ran.diag_cwd = str(ROOT)
+            self.assertEqual(ran.returncode, 0, _spawn_detail(ran))
             self.assertTrue(json.loads(ran.stdout)["executed_live"])
             self.assertFalse(json.loads(ran.stdout)["switch_allowed"])
             self.assertIn("manage\n", Path(root, "spawned.txt").read_text(encoding="utf-8"))

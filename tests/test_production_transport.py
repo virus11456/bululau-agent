@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
@@ -572,6 +573,11 @@ class ProductionTransportTest(unittest.TestCase):
                 cwd=str(ROOT), capture_output=True, text=True,
             )
             self.assertEqual(same.returncode, 0, same.stderr)
+            same_body = json.loads(same.stdout)
+            self.assertTrue(same_body["logical_id_match"])
+            self.assertFalse(same_body["physical_store_proven"])
+            self.assertFalse(same_body["same_store"])
+            self.assertTrue(same_body["ack_requires_original_producer_apply"])
             os.makedirs(right)
             Store(right)
             other = subprocess.run(
@@ -580,6 +586,26 @@ class ProductionTransportTest(unittest.TestCase):
             )
             self.assertEqual(other.returncode, 1)
             self.assertEqual(json.loads(other.stdout)["reason"], "different_store")
+            self.assertFalse(json.loads(other.stdout)["physical_store_proven"])
+            copied = os.path.join(tmp, "copied-producer")
+            shutil.copytree(left, copied)
+            copied_check = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "verify-same-store", "--state-dir", copied, "--file", exported],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            copied_body = json.loads(copied_check.stdout)
+            self.assertTrue(copied_body["logical_id_match"])
+            self.assertFalse(copied_body["physical_store_proven"])
+            self.assertFalse(copied_body["same_store"])
+            from src.phase1.ack_contract import apply_processed_ack, load_ack, write_processed_file
+            inbox = os.path.join(copied, "ack-inbox")
+            os.makedirs(inbox)
+            processed = write_processed_file(inbox, {
+                "kind": "processed", "event_id": EVENT, "evaluation_id": "s1", "processed_at": "2026-11-07T04:22:00Z",
+            }, processing_complete=True)
+            apply_processed_ack(Store(copied), load_ack(processed), expected_event_id=EVENT, sent_at=SENT, now=NOW)
+            self.assertEqual(Store(left).state["outbox"]["cycle:s1"]["status"], "pending")
+            self.assertEqual(Store(copied).state["outbox"]["cycle:s1"]["status"], "acked")
             self.assertFalse(os.path.exists(os.path.join(left, "judgments")))
             stale = json.loads(text)
             stale["sent_at"] = "2026-11-07T02:00:00Z"

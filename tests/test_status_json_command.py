@@ -160,7 +160,11 @@ class StatusJsonCommandTest(unittest.TestCase):
             self.assertTrue(report["files_present"][".lock"])
             self.assertTrue(report["files_present"]["events.json"])
             self.assertFalse(report["files_present"]["HALT_REPORT_USER.flag"])
-            self.assertTrue(report["env_file_present"])
+            self.assertTrue(report["env_file_present"], json.dumps({
+                "env_file_present": report.get("env_file_present"),
+                "env_file_stat_errno": report.get("env_file_stat_errno"),
+                "env_file_stat_error": report.get("env_file_stat_error"),
+            }, ensure_ascii=False))
             self.assertFalse(report["env_file_copied"])
             self.assertTrue(report["foreign_state_in_root"])
             self.assertFalse(report["package_default_matches_live_root"])

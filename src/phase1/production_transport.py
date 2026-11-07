@@ -394,22 +394,26 @@ def verify_context(document, now):
         "producer_store_id": store_id,
         "automatic_transport": False,
         "same_store": False,
+        "physical_store_proven": False,
         "ai_execution_proven": False,
     }
 
 
 def verify_same_store(state_dir, document):
-    """比對 store 身份。兩個目錄即使路徑最後一段相同也不是同一個 store。"""
+    """只比對可被整份複製的邏輯 ID。不是原來那塊磁碟的證明。"""
     refuse_foreign_state_dir(state_dir)
     incoming = document.get("producer_store_id") if isinstance(document, dict) else None
     local = Store(state_dir).state.get("producer_store_id")
-    same = isinstance(local, str) and local == incoming
+    match = isinstance(local, str) and local == incoming
     return {
-        "same_store": same,
+        "logical_id_match": match,
+        "physical_store_proven": False,
+        "ack_requires_original_producer_apply": True,
+        "same_store": False,
         "path_ignored": True,
         "automatic_transport": False,
         "ai_execution_proven": False,
-        "reason": "same_store" if same else "different_store",
+        "reason": "logical_id_match" if match else "different_store",
     }
 
 
@@ -629,10 +633,10 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
                 report = verify_same_store(found["--state-dir"], json.load(handle))
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             reason = str(exc) if isinstance(exc, ValueError) else "rejected_context"
-            print(json.dumps({"same_store": False, "automatic_transport": False, "reason": reason}, ensure_ascii=False))
+            print(json.dumps({"logical_id_match": False, "physical_store_proven": False, "same_store": False, "automatic_transport": False, "reason": reason}, ensure_ascii=False))
             return 1
         print(json.dumps(report, ensure_ascii=False))
-        return 0 if report["same_store"] else 1
+        return 0 if report["logical_id_match"] else 1
     print("用法: python3 -m src.phase1.production_transport configure | send-wake --config-dir DIR --state-dir DIR | read-envelope --state-dir DIR --event-id ID --evaluation-id ID | export-context --state-dir DIR --event-id ID --evaluation-id ID --out FILE | verify-context --file FILE --now TIME | verify-same-store --state-dir DIR --file FILE | commit-judgment --state-dir DIR --event-id ID --evaluation-id ID --now TIME")
     return 2
 

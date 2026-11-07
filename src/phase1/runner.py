@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,6 +82,10 @@ def _load_config(path):
     if mode == "production":
         if any(name in loaded for name in ("scanner", "manage", "status")):
             raise ValueError("arbitrary_command")
+        from .legacy_root import check_legacy_install, production_block_reason
+        blocked = production_block_reason(check_legacy_install(loaded.get("quantboy_root") or ""))
+        if blocked:
+            raise ValueError(blocked)
         commands = production_argv(loaded.get("quantboy_root"), loaded.get("python") or "python3")
     else:
         commands = {}
@@ -438,6 +443,17 @@ LIVE_LAYOUT_FILES = (
 )
 
 
+def _file_stat(path):
+    """只 stat。不讀內容。被拒時保留 errno。"""
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        return {"present": False, "errno": exc.errno, "error": exc.strerror}
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return {"present": False, "errno": None, "error": "not_regular_file"}
+    return {"present": True, "errno": None, "error": None, "mode": oct(info.st_mode & 0o777)}
+
+
 def _file_sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -477,10 +493,10 @@ def inspect_quantboy_root(root):
     for name in LIVE_LAYOUT_FILES:
         path = os.path.join(root, name)
         present[name] = os.path.lexists(path) and not os.path.isdir(path)
-    env_path = os.path.join(root, ".env")
-    env_present = os.path.isfile(env_path) and not os.path.islink(env_path)
-    env_mode = oct(os.lstat(env_path).st_mode & 0o777) if env_present else None
+    env_stat = _file_stat(os.path.join(root, ".env"))
     foreign = any(os.path.lexists(os.path.join(root, name)) for name in ("state.json", ".lock", "HALT_REPORT_USER.flag"))
+    from .legacy_root import check_legacy_install
+    legacy = check_legacy_install(root)
     return {
         "quantboy_root": root,
         "layout": layout,
@@ -491,14 +507,20 @@ def inspect_quantboy_root(root):
         "status_json_revision": revision,
         "root_supports_status_json": layout == "src" and revision == "status-json-2",
         "files_present": present,
-        "env_file_present": env_present,
-        "env_file_mode": env_mode,
+        "env_file_present": env_stat["present"],
+        "env_file_mode": env_stat.get("mode"),
+        "env_file_stat_errno": env_stat.get("errno"),
+        "env_file_stat_error": env_stat.get("error"),
         "env_file_copied": False,
         "data_dir_env_set_in_this_process": "QUANTBOY_DATA_DIR" in os.environ,
         "events_file_env_set_in_this_process": "QUANTBOY_EVENTS_FILE" in os.environ,
         "package_default_data_dir": "data",
         "package_default_matches_live_root": False,
-        "same_lock_proven": False,
+        "same_lock_proven": bool(legacy["known_sha_match"] and legacy["bindings_match"] and legacy["lock_protocol_match"]),
+        "lock_protocol_match": legacy["lock_protocol_match"],
+        "bindings_match": legacy["bindings_match"],
+        "state_schema_proven": False,
+        "manage_allowed": False,
         "share_live_state": False,
         "cycle_dir_must_be_separate": True,
         "foreign_state_in_root": foreign,
@@ -578,6 +600,8 @@ def main(argv):
         return _check_main(argv[1:])
     if argv[:1] == ["check-root"]:
         return _check_root_main(argv[1:])
+    if argv[:1] == ["check-install"]:
+        return _check_install_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -652,6 +676,17 @@ def _rollback_main(argv):
         return 1
     print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def _check_install_main(argv):
+    found = _parse(argv)
+    if not found or "quantboy_root" not in found:
+        print("用法: python3 -m src.phase1.runner check-install --quantboy-root DIR")
+        return 2
+    from .legacy_root import check_legacy_install
+    report = check_legacy_install(found["quantboy_root"])
+    print(json.dumps(report, ensure_ascii=False))
+    return 1
 
 
 def _check_root_main(argv):

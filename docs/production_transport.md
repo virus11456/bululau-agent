@@ -65,7 +65,7 @@ python3 -m src.phase1.production_transport verify-context --file context.json --
 python3 -m src.phase1.production_transport verify-same-store --state-dir PRODUCER_DIR --file context.json
 ```
 
-`export-context` 只在本機寫檔。檔裡有 event_id、evaluation_id、envelope_sha256、sent_at、producer_store_id 和 envelope 本體。`automatic_transport` 固定 false。`verify-context` 核對摘要、事件、評估與時效，並且 `same_store` 固定 false：單看這份檔不能變成 producer 的 store。`verify-same-store` 才比對身份；路徑最後一段相同也會是 `different_store`。
+`export-context` 只在本機寫檔。檔裡有 event_id、evaluation_id、envelope_sha256、sent_at、producer_store_id 和 envelope 本體。`automatic_transport` 固定 false。`verify-context` 核對摘要、事件、評估與時效，並且 `same_store` 固定 false。`verify-same-store` 只回 `logical_id_match`。整份目錄複製後這個 ID 仍會相同，所以它不是原來那塊磁碟的證明。`physical_store_proven` 固定 false。真正的 ACK 必須在原來的 producer 目錄 apply，再從那個目錄讀回；複製出來的目錄 apply 不會改到原來的 outbox。這包不另做身份服務。
 
 誰負責：
 
@@ -132,7 +132,13 @@ python3 -m src.phase1.runner check-root --quantboy-root /既有/quantboy
 
 這只讀原始碼和檔名，不讀 `.env`、不讀 `state.json`、不建立 `data/`。父側 15:03 的唯讀 metadata：`/Users/frank/quantboy-live` 是平鋪的 `live_trader.py`，沒有 `src/` 和 `COMMIT`，SHA256 是 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`，沒有 `status-json-2`。`/usr/bin/python3` 是 3.9.6。`com.quantboy.livewatch` 每 60 秒執行該檔的 `watch --live`，cwd 是舊 root，而且 plist 與 launchd 全域都沒有 `QUANTBOY_DATA_DIR`、`QUANTBOY_EVENTS_FILE`。舊 root 看得到 `state.json`、`.lock`、`events.json`，沒有 HALT 旗標。`.env` 和 state 內容沒有讀，程式如何決定資料路徑也還沒有證據。
 
-因此這包的預設 `<root>/data` 不能當成那個平鋪目錄。`check-root` 對平鋪 root 回 `layout=flat`、`root_supports_status_json=false`、`same_lock_proven=false`、`share_live_state=false`。這包的實盤鎖是 `<data_dir>/.lock` 的 `fcntl.flock`，phase1 用的是另一個 `phase1_state.lock`，而且狀態目錄裡若已有 `state.json`、`.lock` 或 HALT 旗標就拒絕。在看到下面的非秘密證據之前，不宣稱可以共用舊鎖或舊 state，也不把新程式指到舊 root。
+父側之後給了平鋪程式的非秘密片段：`HOME = os.path.expanduser('~/quantboy-live')`，`STATE`、`EVENTS`、`HALT_FLAG`、`LOCK` 都是 `os.path.join(HOME, 固定檔名)`，沒有看到這些常數再被環境變數覆寫。`Lock` 是 `open(LOCK,'w')` 後 `LOCK_EX|LOCK_NB`，`BlockingIOError` 就結束，`with Lock()` 包住 status、open、manage、watch、flatten。這只證明路徑寫法與鎖的呼叫形狀。`state.json` 的欄位沒有在片段裡，所以 `manage_allowed` 與 `share_live_state` 仍是 false，新的 manage 不改去讀寫那個檔。這包的預設 `data/` 也不是那個 HOME。
+
+```bash
+python3 -m src.phase1.runner check-install --quantboy-root ~/quantboy-live
+```
+
+路徑不是 `~/quantboy-live` 就是 `unknown_path`，而且不 stat 那裡的 state。SHA、綁定或鎖形狀不符就拒絕。即使四項都符合，原因仍是 `state_schema_unproven`，結束碼 1，不會啟動 manage，也不會 flock。`check-root` 的 `same_lock_proven` 要 SHA、綁定與鎖形狀三者同時符合；只有路徑相同不夠。
 
 版本化安裝只解到新目錄，不覆蓋 `/Users/frank/quantboy-live`，不複製 `.env`，不啟動 watch 或 manage，不雙寫：
 

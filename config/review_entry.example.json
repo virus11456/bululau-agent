@@ -16,10 +16,14 @@
     "signature": "get(path, params=None, retries=2) -> object",
     "kline": {"path": "/fapi/v1/klines", "interval": "15m", "limit": 20}
   },
-  "mac_flat_source_absent": {
+  "mac_flat": {
     "path": "/Users/frank/quantboy-live/live_trader.py",
     "sha256": "65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b",
-    "expected_signature_if_later_proven": "req(method, path, params=None, signed=False) -> object",
+    "ast_verified": true,
+    "req": "req(method, path, params=None, signed=False, retries=5)",
+    "open_algo_used": false,
+    "klines_function": false,
+    "error_may_write_log": true,
     "wired": false
   }
 }

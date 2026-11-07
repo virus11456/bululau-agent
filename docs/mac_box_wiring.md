@@ -4,7 +4,7 @@
 
 ## 已接上的程式路徑
 
-`runner.json` 設 `mode=production`、`role=mac`。沒寫 `interval_seconds` 就是 3600 秒。小於 3600 直接拒絕，部署不會把掃描調回 15 分鐘。這個角色不另裝排程，也不改 `com.quantboy.livewatch`。
+本人 19:44 已核：現有新機會掃描是每 30 分鐘，routine 讀回 `*/30`，彈性 ±7。prompt 沒改，watch 仍是 60 秒。這包的 `runner.json` 沒寫 `interval_seconds` 時仍是 3600 秒，`role=mac` 小於 3600 會拒絕，而且這包還沒接到那條 routine，不提前切換。也不改 `com.quantboy.livewatch`。
 
 每一輪只做兩件事：
 
@@ -15,7 +15,7 @@
 
 可信、新鮮、三查詢都成功，而且持倉與兩種掛單都是 0：不跑持倉保護 AI。這只省空判斷。有候選時新倉審核仍要跑，不會被空倉規則一起跳掉。查詢失敗、超時或未知維持 `cycle_needs_ai=true`，`old_ai_poll=keep`，不當成空倉。舊 `state.json` 快照不是這三個查詢。
 
-有持倉或掛單時，這一輪仍會要 AI 裁量，但那是同一條每小時週期，不是另一條已驗證的即時持倉事件。`position_ai_event_path` 是 `not_implemented`。
+有持倉或掛單時，這一輪仍會要 AI 裁量，但那仍是現有的 30 分鐘 routine，不是另一條已驗證的即時持倉事件。`position_ai_event_path` 是 `not_implemented`。
 
 ## 受監督回流
 
@@ -50,7 +50,7 @@ Mac 的 `account_status` 三查詢已在 15:38 用既有憑證通過，state 與
 
 ## 可安全做的 quiet 掃描
 
-手動跑 `role=mac` 的一輪：只讀三查詢加公開掃描，不啟動 manage，不寫舊 state。零倉零單且新鮮、無候選時不叫保護 AI。不要為它再裝一條 cron。`install-schedule` 對 `role=mac` 會拒絕。現有每小時 routine 繼續負責原掃描；兩條一起跑就是雙排程。
+手動跑 `role=mac` 的一輪：只讀三查詢加公開掃描，不啟動 manage，不寫舊 state。零倉零單且新鮮、無候選時不叫保護 AI。不要為它再裝一條 cron。`install-schedule` 對 `role=mac` 會拒絕。現有 30 分鐘 routine 繼續負責原掃描；兩條一起跑就是雙排程。這包不提前切過去。
 
 `python3 -m src.phase1.runner deploy-check --config runner.json` 會列出間隔、不開倉、不改 60 秒 watch、未知仍留原 AI。`switch_allowed` 仍是 false。現在不替換實盤。
 
@@ -72,13 +72,13 @@ Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及�
 
 可部署的入口在 `gateway/`。客戶端 URL 是 `/v1/...`，檔案在 `api/v1/...`，由 rewrite 接上。部署根、`npm ci`、`engines.node` `22.x`、`BLOB_STORE_ID` 與 OIDC 前提寫在 `gateway/DEPLOY.md`。 `functions.runtime` 不寫 `nodejs22.x`。原子建立是 Blob `put` 的 `allowOverwrite: false`（`x-allow-overwrite: 0`，服務端 `If-None-Match: *`）。沒有把 `token` 選項傳進去，並不證明當時用的是 OIDC。Python 的 `os.link` 只留給離線測試。還沒有建立 project 或 Blob。Hobby 用途與額度仍未知。
 
-Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下文必須帶白名單的 symbol、方向、數量、停損、掛單、對應 K 線與候選 plan；只有筆數不算足夠，不足就留原 AI。父層自己讀匯出的 context，把判斷寫進 `judgments-in/<event_id>.json`，把 trace 寫進同目錄的 `.trace.json`。這包不代寫。`keep_original_ai` 不是已完成的實盤裁量，現有介面也不能取代實盤裁量。gateway 客戶端預設 `enabled: false`，見 `gateway/client.example.json`。沒有 GM 給的 HTTPS 位址與有界授權就不會外發。不另裝排程，也不關每小時原 AI 或 60 秒 watch。
+Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下文必須帶白名單的 symbol、方向、數量、停損、掛單、對應 K 線與候選 plan；只有筆數不算足夠，不足就留原 AI。父層自己讀匯出的 context，把判斷寫進 `judgments-in/<event_id>.json`，把 trace 寫進同目錄的 `.trace.json`。這包不代寫。`keep_original_ai` 不是已完成的實盤裁量，現有介面也不能取代實盤裁量。gateway 客戶端預設 `enabled: false`，見 `gateway/client.example.json`。沒有 GM 給的 HTTPS 位址與有界授權就不會外發。不另裝排程，也不關現有 30 分鐘掃描或 60 秒 watch。
 
 真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
 
 GM 交過的非秘密 endpoint 是 `https://bululau-return-isolated-8qi96wkvs-virus11456s-projects.vercel.app`，路徑 `/v1/installations/<installation_id>/judgments/<event_id>`。PUT 給 publisher，GET 給 reader，標頭是 `Bearer key_id:secret`。`gateway/client.example.json` 把這個 URL 寫成預設關閉的 `base_url`。`installation_id` 與 `key_id` 留空，不猜。secret 不進 argv、不進 git、不讀角色 secret 檔。GM 說 b559ced 的隔離 deployment 是 READY，未認證 GET 為 401 且 `no-store`，OIDC 與 Blob 尚未證明。本包沒有對該 URL 發過 PUT、POST 或 GET，也不把 GM 的回報說成自己驗過。
 
-`config/review_entry.example.json` 預設 `enabled`、`live_fetch`、`replaces_scan_entry`、`outbound` 都是 false。`review-round` 可以讀它，但 `runner run` 與 `com.quantboy.livewatch` 沒有改。真取數要等 `live_fetch` 被明確打開，才會呼叫 repo 裡的 `account_status._signed_get(path)` 與 `src.common.get(path, params=None, retries=2)`。repo 根的 `config/` 不是 `src/config.py`，公開行情從 `src.config.data_dir` 載入。載入或取數失敗留原 AI，不把例外丟出。`/Users/frank/quantboy-live/live_trader.py`（SHA256 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`）不在 repo，預期簽名若以後證明是 `req(method, path, params=None, signed=False)`，目前沒有接上。
+`config/review_entry.example.json` 預設 `enabled`、`live_fetch`、`replaces_scan_entry`、`outbound` 都是 false。`review-round` 可以讀它，但 `runner run` 與 `com.quantboy.livewatch` 沒有改。真取數要等 `live_fetch` 被明確打開，才會核對 `/Users/frank/quantboy-live/live_trader.py` 的 SHA256 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`，然後只用該檔的 `req(method, path, params=None, signed=False, retries=5)`。帳戶是 `req("GET", "/fapi/v2/account", signed=True)`，一般單是 `/fapi/v1/openOrders`，條件單直接 `req("GET", "/fapi/v1/openAlgoOrders", signed=True)`，不用 `open_algo`。`req` 成功時 `json.loads` 可以是 None；None 或非容器留原 AI，不收成 `[]`。錯誤路徑會寫 backoff／warn 日誌，不能說完全沒有寫入。這檔沒有 klines 函式。K 線沿 `src.common.get("/fapi/v1/klines", symbol, 15m, limit 20)`，參數沒有在這輪打過真 API。SHA 不符就不執行檔案。repo 根的 `config/` 不是 `src/config.py`。載入或取數失敗留原 AI。這包仍沒有接到現有 routine。
 
 Ledger 只保證正常設定與行程崩潰：呼叫端不能改 ledger 路徑或 method→stage；空檔、壞檔、缺檔不會重開 `approved_at`；寫入用替換，中斷不會把檔案截成空的再當新期限。有磁碟管理權限的人若刪掉 ledger 再 `init-ledger`，次數會歸零，期限仍是授權裡的 `approved_at`。不宣稱擋得住刪檔。
 

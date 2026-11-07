@@ -1,17 +1,30 @@
 """Mac 帳戶與公開 K 線的接線。預設不取數、不連線。
 
-repo 裡可呼叫的是 account_status._signed_get 與 common.get。
-~/quantboy-live/live_trader.py 不在這個 repo，不能把它說成已經接上。
+私有三查詢只在執行時載入 SHA 已核的平鋪 live_trader.req。
+不呼叫 open_algo。K 線用 repo 的公開 client，平鋪檔沒有 klines 函式。
 """
+import hashlib
+import importlib.util
+import os
+
 from .review_context import build_review, plan_round
+from .status_contract import require_account, require_order_list
 from .token_switch import UnconfiguredWebhook
 
 _PRIVATE_PATHS = ("/fapi/v2/account", "/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders")
+MAC_FLAT_SHA256 = "65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b"
+MAC_FLAT_PATH = "/Users/frank/quantboy-live/live_trader.py"
+REQ_CONTRACT = "req(method, path, params=None, signed=False, retries=5)"
 _ABSENT_MAC = {
-    "path": "/Users/frank/quantboy-live/live_trader.py",
-    "sha256": "65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b",
+    "path": MAC_FLAT_PATH,
+    "sha256": MAC_FLAT_SHA256,
     "layout": "flat live_trader.py, no src/, no status-json-2",
-    "expected_signature_if_later_proven": "req(method, path, params=None, signed=False) -> object",
+    "ast_verified": True,
+    "req": REQ_CONTRACT,
+    "open_algo_used": False,
+    "klines_function": False,
+    "error_may_write_log": True,
+    "in_repo": False,
     "wired": False,
 }
 
@@ -24,9 +37,13 @@ def source_gap():
         "public_kline": {"path": "/fapi/v1/klines", "interval": "15m", "limit": 20, "fields": ["open_time", "open", "high", "low", "close", "volume"]},
         "not_used": {
             "src.common.klines": "quote volume replaces base volume and the raw row is dropped",
-            "src.live_trader.open_algo": "errors become an empty list",
+            "open_algo": "BinanceError becomes [] after a warn log; adapter calls req directly",
         },
         "mac_flat_source_absent": dict(_ABSENT_MAC),
+        "klines_api_verified": False,
+        "routine_connected": False,
+        "live_scan": "*/30 flexible ±7",
+        "watch_seconds": 60,
     }
 
 
@@ -48,6 +65,11 @@ def load_entry_config(document):
     replaces = document.get("replaces_scan_entry") is True
     outbound = document.get("outbound") is True
     gateway = document.get("gateway_base_url") if isinstance(document.get("gateway_base_url"), str) else ""
+    mac = document.get("mac_flat") if isinstance(document.get("mac_flat"), dict) else {}
+    sha = mac.get("sha256", MAC_FLAT_SHA256)
+    if sha not in ("", MAC_FLAT_SHA256):
+        raise ValueError("unverified_module")
+    path = mac.get("path") if isinstance(mac.get("path"), str) else ""
     if outbound or (gateway and not gateway.startswith("https://")):
         raise ValueError("endpoint_not_provided")
     if replaces and not enabled:
@@ -58,8 +80,61 @@ def load_entry_config(document):
         "live_fetch": live_fetch and enabled,
         "outbound": False,
         "gateway_base_url": gateway,
+        "mac_flat_path": path,
+        "mac_flat_sha256": MAC_FLAT_SHA256,
         "source_gap": source_gap(),
     }
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def require_req_contract(req):
+    """只看已載入函式的參數名。不呼叫，不讀金鑰。"""
+    code = getattr(req, "__code__", None)
+    if code is None:
+        raise ValueError("req_signature")
+    names = code.co_varnames[:code.co_argcount]
+    if names[:2] != ("method", "path") or "params" not in names or "signed" not in names or "retries" not in names:
+        raise ValueError("req_signature")
+    return req
+
+
+def load_verified_req(path, expected_sha=MAC_FLAT_SHA256):
+    """SHA 不符就不執行檔案。執行後只取出 req，不呼叫它。"""
+    if expected_sha != MAC_FLAT_SHA256:
+        raise ValueError("unverified_module")
+    if not isinstance(path, str) or not path or os.path.islink(path) or not os.path.isfile(path):
+        raise ValueError("module_missing")
+    if file_sha256(path) != MAC_FLAT_SHA256:
+        raise ValueError("module_sha_mismatch")
+    spec = importlib.util.spec_from_file_location("mac_flat_live_trader", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("module_missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    req = getattr(module, "req", None)
+    if not callable(req):
+        raise ValueError("req_missing")
+    return require_req_contract(req)
+
+
+def call_verified_req(req, path):
+    """三個 GET 都直接走 req。None 與非容器不當成空清單。"""
+    if path not in _PRIVATE_PATHS:
+        raise ValueError("rejected_path")
+    value = req("GET", path, signed=True)
+    if path == "/fapi/v2/account":
+        return require_account(value)
+    return require_order_list(value)
 
 
 def _symbol_ok(symbol):
@@ -87,14 +162,20 @@ def _load_public_get():
     return public_get
 
 
-def _real_public(symbol):
+def kline_request(symbol):
+    """平鋪檔沒有 klines。參數沿 repo 公開 client，不代表已打過真 API。"""
     if not _symbol_ok(symbol):
         raise ValueError("rejected_symbol")
+    return "/fapi/v1/klines", {"symbol": symbol, "interval": "15m", "limit": 20}
+
+
+def _real_public(symbol):
+    path, params = kline_request(symbol)
     try:
         public_get = _load_public_get()
     except ImportError:
         raise ValueError("fetcher_missing")
-    return public_get("/fapi/v1/klines", {"symbol": symbol, "interval": "15m", "limit": 20})
+    return public_get(path, params)
 
 
 def resolve_clients(entry, private_get=None, public_get=None):
@@ -107,6 +188,12 @@ def resolve_clients(entry, private_get=None, public_get=None):
         return private_get, public_get
     if entry.get("live_fetch") is not True:
         return None, None
+    mac_path = entry.get("mac_flat_path") or ""
+    if mac_path:
+        req = load_verified_req(mac_path)
+        def private(path, bound=req):
+            return call_verified_req(bound, path)
+        return private, _real_public
     return _real_private, _real_public
 
 

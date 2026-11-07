@@ -242,6 +242,78 @@ _ENVELOPE_FIELDS = (
     "schema_version", "event_type", "event_id", "evaluation_id", "sent_at", "reason",
     "freshness", "snapshot", "candidates", "orders_allowed", "test_channel", "position_channel",
 )
+_FRESHNESS_FIELDS = ("valid", "status", "age_seconds")
+_FRESHNESS_STATUS = ("fresh", "stale", "missing", "blocked_clock_skew")
+_SNAPSHOT_FIELDS = (
+    "status", "as_of", "positions", "orders", "manage_error", "manage_complete",
+    "status_trusted", "limit_older_than_2h_implemented",
+)
+_CANDIDATE_FIELDS = ("symbol", "setup", "bar_time", "ladder")
+_CANDIDATE_OPTIONAL = (
+    "tf", "bar", "entry", "stop", "target", "rr", "plan", "sizing", "side", "vol_x", "rs24", "rs4h",
+)
+
+
+def _exact_int(value):
+    return type(value) is int
+
+
+def _review_scalar(value):
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float, str)):
+        return True
+    if isinstance(value, list) and len(value) <= 8 and all(
+        not isinstance(item, bool) and isinstance(item, (int, float, str)) for item in value
+    ):
+        return True
+    return False
+
+
+def _nested_envelope(envelope):
+    """snapshot、freshness、candidates 的型別與必填。合法摘要不能代替這個契約。"""
+    freshness = envelope.get("freshness")
+    if not isinstance(freshness, dict) or set(freshness) != set(_FRESHNESS_FIELDS):
+        return "rejected_context"
+    if type(freshness.get("valid")) is not bool or freshness.get("status") not in _FRESHNESS_STATUS:
+        return "rejected_context"
+    if not _exact_int(freshness.get("age_seconds")):
+        return "rejected_context"
+    snapshot = envelope.get("snapshot")
+    if not isinstance(snapshot, dict) or set(snapshot) != set(_SNAPSHOT_FIELDS):
+        return "rejected_context"
+    if not isinstance(snapshot.get("status"), str) or not snapshot.get("status"):
+        return "rejected_context"
+    as_of = snapshot.get("as_of")
+    if as_of is not None and not isinstance(as_of, str):
+        return "rejected_context"
+    for key in ("positions", "orders"):
+        if not _exact_int(snapshot.get(key)) or snapshot.get(key) < 0:
+            return "rejected_context"
+    for key in ("manage_error", "manage_complete", "status_trusted"):
+        if type(snapshot.get(key)) is not bool:
+            return "rejected_context"
+    if snapshot.get("limit_older_than_2h_implemented") is not False:
+        return "rejected_context"
+    candidates = envelope.get("candidates")
+    if not isinstance(candidates, list):
+        return "rejected_context"
+    for item in candidates:
+        if not isinstance(item, dict):
+            return "rejected_context"
+        if any(key not in item for key in _CANDIDATE_FIELDS):
+            return "rejected_context"
+        if any(key not in _CANDIDATE_FIELDS and key not in _CANDIDATE_OPTIONAL for key in item):
+            return "rejected_context"
+        if not all(isinstance(item.get(key), str) for key in ("symbol", "setup", "bar_time")):
+            return "rejected_context"
+        ladder = item.get("ladder")
+        if not isinstance(ladder, list) or len(ladder) > 8 or any(not _review_scalar(step) or isinstance(step, str) for step in ladder):
+            return "rejected_context"
+        for key in _CANDIDATE_OPTIONAL:
+            if key in item and not _review_scalar(item.get(key)):
+                return "rejected_context"
+    return None
 
 
 def _recomputed_context(context):
@@ -271,6 +343,9 @@ def _recomputed_context(context):
         return None, "rejected_context"
     if envelope.get("orders_allowed") is not False or envelope.get("test_channel") is not False or envelope.get("position_channel") is not False:
         return None, "rejected_context"
+    nested = _nested_envelope(envelope)
+    if nested:
+        return None, nested
     if envelope.get("event_id") != context.get("event_id") or envelope.get("evaluation_id") != context.get("evaluation_id"):
         return None, "binding_mismatch"
     try:

@@ -49,12 +49,14 @@ def _reject_sender_test_dir(directory):
             raise ValueError("refused_test_sender_dir")
 
 
-def write_transport_config(directory, url, authorization, ca_file=None):
+def write_transport_config(directory, url, authorization, ca_file=None, post_approved=False):
     _reject_sender_test_dir(directory)
     _production_url(url)
     validate_authorization(authorization)
     from .sender_setup import _write_private
     payload = {"webhook_url": url, "authorization": authorization}
+    if post_approved is True:
+        payload["post_approved"] = True
     if ca_file:
         if not os.path.isfile(ca_file):
             raise ValueError("rejected_ca")
@@ -76,7 +78,7 @@ def load_transport_config(directory):
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("rejected_config_fields")
-    allowed = {"webhook_url", "authorization", "ca_file"}
+    allowed = {"webhook_url", "authorization", "ca_file", "post_approved"}
     if set(data) - allowed or "webhook_url" not in data or "authorization" not in data:
         raise ValueError("rejected_config_fields")
     _production_url(data["webhook_url"])
@@ -109,6 +111,22 @@ class HttpsTransport:
             if exc.code in (301, 302, 303, 307, 308):
                 raise RedirectBlocked()
             return exc.code
+
+    def get(self, url, authorization):
+        validate_url(url)
+        validate_authorization(authorization)
+        request = urllib.request.Request(url, method="GET")
+        request.add_header("Authorization", authorization)
+        opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=self.ssl_context))
+        try:
+            with opener.open(request, timeout=15) as response:
+                return response.status, response.read(1000000)
+        except RedirectBlocked:
+            raise
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                raise RedirectBlocked()
+            return exc.code, exc.read(1000000)
 
 
 def wake_document(envelope):
@@ -318,10 +336,9 @@ def _secret_in(value):
     return False
 
 
-def export_context(state_dir, event_id, evaluation_id, dest):
-    """寫出一份可帶走的上下文。不開網路、不讀金鑰。自動跨機傳送沒有實作。"""
+def build_context(state_dir, event_id, evaluation_id):
+    """組上下文。這一步不開網路。"""
     refuse_foreign_state_dir(state_dir)
-    refuse_foreign_state_dir(os.path.dirname(os.path.abspath(dest)) or ".")
     envelope = read_envelope(state_dir, event_id, evaluation_id)
     if _secret_in(envelope):
         raise ValueError("rejected_context")
@@ -343,6 +360,13 @@ def export_context(state_dir, event_id, evaluation_id, dest):
         "envelope": envelope,
         "automatic_transport": False,
     }
+    return payload
+
+
+def export_context(state_dir, event_id, evaluation_id, dest):
+    """寫出一份可帶走的上下文。不開網路、不讀金鑰。"""
+    refuse_foreign_state_dir(os.path.dirname(os.path.abspath(dest)) or ".")
+    payload = build_context(state_dir, event_id, evaluation_id)
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     directory = os.path.dirname(os.path.abspath(dest))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -408,7 +432,8 @@ def prepare_handoff(state_dir, event_id, evaluation_id, dest):
         "event_id": event_id,
         "evaluation_id": evaluation_id,
         "context_file": os.path.basename(dest),
-        "transport_implemented": False,
+        "client_implemented": True,
+        "live_endpoint_approved": False,
         "post_authorized": False,
         "proposed_post_budget": {"new_ids": 1, "max_posts": 2, "approved": False},
         "prior_budget_exhausted": {"ids": 2, "posts": 3},
@@ -432,6 +457,239 @@ def prepare_handoff(state_dir, event_id, evaluation_id, dest):
         handle.write(raw)
         handle.write(b"\n")
     return manifest, side
+
+
+def build_delivery(state_dir, event_id, evaluation_id, max_bytes=None):
+    """外層是 wake 加 context。wake 本身維持八欄，太大就拒絕，不截斷。"""
+    context = build_context(state_dir, event_id, evaluation_id)
+    wake = wake_document(context["envelope"])
+    document = {"schema_version": 1, "event_type": "evaluation_delivery", "wake": wake, "context": context}
+    raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise ValueError("context_too_large")
+    return document, raw
+
+
+def _dispatch_record_path(state_dir, event_id):
+    cycle_key(event_id)
+    return os.path.join(str(state_dir), "dispatch", event_id + ".json")
+
+
+def _write_dispatch(path, record):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    raw = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = path + "." + secrets.token_hex(4) + ".tmp"
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def hold_dispatch(state_dir, event_id, evaluation_id, dest, max_bytes=None):
+    """寫出給 CopyToBox 的檔與本機紀錄。不 POST。"""
+    refuse_foreign_state_dir(state_dir)
+    document, raw = build_delivery(state_dir, event_id, evaluation_id, max_bytes=max_bytes)
+    record_path = _dispatch_record_path(state_dir, event_id)
+    digest = document["context"]["envelope_sha256"]
+    if os.path.isfile(record_path):
+        existing = json.loads(open(record_path, encoding="utf-8").read())
+        if existing.get("envelope_sha256") != digest:
+            raise ValueError("immutable_conflict")
+        return existing
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = dest + "." + secrets.token_hex(4) + ".tmp"
+    fd = os.open(tmp, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+        handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, dest)
+    record = {
+        "status": "held",
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+        "envelope_sha256": digest,
+        "bytes": len(raw),
+        "truncated": False,
+        "http_sent": False,
+        "attempts": 0,
+        "unattended": False,
+        "processed": False,
+    }
+    _write_dispatch(record_path, record)
+    return record
+
+
+def send_delivery(config_dir, state_dir, event_id, evaluation_id, transport=None, max_bytes=None):
+    """POST 外層包裹。未批准就不送。重試不重複送同一摘要。"""
+    config = load_transport_config(config_dir)
+    if config.get("post_approved") is not True:
+        raise ValueError("post_not_approved")
+    document, raw = build_delivery(state_dir, event_id, evaluation_id, max_bytes=max_bytes)
+    digest = document["context"]["envelope_sha256"]
+    record_path = _dispatch_record_path(state_dir, event_id)
+    existing = None
+    if os.path.isfile(record_path):
+        existing = json.loads(open(record_path, encoding="utf-8").read())
+        if existing.get("envelope_sha256") != digest:
+            raise ValueError("immutable_conflict")
+        if existing.get("status") == "delivered":
+            return {"delivered": True, "duplicate": True, "http_sent": False, "attempts": existing.get("attempts", 0), "processed": False, "live_connected": False, "unattended": False}
+    status = _transport(config, transport).post(config["webhook_url"], config["authorization"], raw)
+    attempts = int((existing or {}).get("attempts") or 0) + 1
+    delivered = 200 <= status < 300
+    record = {
+        "status": "delivered" if delivered else "held",
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+        "envelope_sha256": digest,
+        "bytes": len(raw),
+        "truncated": False,
+        "http_sent": delivered,
+        "attempts": attempts,
+        "unattended": False,
+        "processed": False,
+    }
+    _write_dispatch(record_path, record)
+    return {"delivered": delivered, "duplicate": False, "http_sent": delivered, "attempts": attempts, "processed": False, "live_connected": False, "unattended": False, "http_status": status}
+
+
+def send_context(config_dir, state_dir, event_id, evaluation_id, transport=None):
+    """把上下文 POST 到設定的 HTTPS。設定沒有 post_approved 就不送。這不是已接通正式端。"""
+    config = load_transport_config(config_dir)
+    if config.get("post_approved") is not True:
+        raise ValueError("post_not_approved")
+    payload = build_context(state_dir, event_id, evaluation_id)
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    status = _transport(config, transport).post(config["webhook_url"], config["authorization"], body)
+    delivered = 200 <= status < 300
+    return {
+        "delivered": delivered,
+        "http_status": status,
+        "processed": False,
+        "pending": True,
+        "ai_execution_proven": False,
+        "live_connected": False,
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+    }
+
+
+def pull_return(config_dir, event_id, transport=None):
+    """從接收端的 /returns/<event_id> 取回。沒有判斷就是還沒好。"""
+    config = load_transport_config(config_dir)
+    parts = urllib.parse.urlsplit(config["webhook_url"])
+    url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/returns/" + event_id, "", ""))
+    status, body = _transport(config, transport).get(url, config["authorization"])
+    if status == 404:
+        raise ValueError("judgment_not_ready")
+    if not 200 <= status < 300:
+        raise ValueError("return_failed")
+    document = json.loads(body.decode("utf-8"))
+    if not isinstance(document, dict) or document.get("event_id") != event_id:
+        raise ValueError("binding_mismatch")
+    return document
+
+
+def import_staged(state_dir, path, now):
+    """受監督匯入模型寫好的判斷。核對事件、摘要、時效與衝突。不 POST，也不標成已處理。"""
+    refuse_foreign_state_dir(state_dir)
+    with open(path, encoding="utf-8") as handle:
+        judgment = json.load(handle)
+    if not isinstance(judgment, dict) or judgment.get("ai_execution_proven") is not False:
+        raise ValueError("ai_not_proven_by_attestation")
+    if judgment.get("orders_placed") is not False or judgment.get("event_type") != "dry_run_judgment":
+        raise ValueError("rejected_judgment")
+    envelope = read_envelope(state_dir, judgment.get("event_id"), judgment.get("evaluation_id"))
+    item = Store(state_dir).state["outbox"][cycle_key(judgment["evaluation_id"])]
+    if judgment.get("envelope_sha256") != item.get("envelope_sha256"):
+        raise ValueError("digest_mismatch")
+    basis = judgment.get("basis")
+    expected = {
+        "reason": envelope.get("reason"),
+        "as_of": envelope.get("snapshot", {}).get("as_of"),
+        "positions": envelope.get("snapshot", {}).get("positions"),
+        "orders": envelope.get("snapshot", {}).get("orders"),
+        "freshness_status": envelope.get("freshness", {}).get("status"),
+        "candidate_count": len(envelope.get("candidates") or []),
+    }
+    if not isinstance(basis, dict) or set(basis) != set(expected) or any(basis.get(key) != value for key, value in expected.items()):
+        raise ValueError("rejected_basis")
+    completed = _moment(judgment.get("completed_at"))
+    if completed < _moment(envelope["sent_at"]) or _outside_window(completed, now):
+        raise ValueError("expired")
+    dest = judgment_path(state_dir, judgment["event_id"])
+    os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+    raw = json.dumps(judgment, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if os.path.isfile(dest):
+        with open(dest, "rb") as handle:
+            existing = handle.read().strip()
+        if existing != raw:
+            raise ValueError("immutable_conflict")
+        return dest
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(dest, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+        handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return dest
+
+
+def import_return(state_dir, document):
+    """把回傳裡的判斷寫進原來的 producer。不改決定，也不當成已處理。"""
+    refuse_foreign_state_dir(state_dir)
+    if not isinstance(document, dict) or document.get("event_type") != "model_return":
+        raise ValueError("rejected_context")
+    if document.get("ai_execution_proven") is not False or document.get("program_filled") is not False:
+        raise ValueError("ai_not_proven_by_attestation")
+    judgment = document.get("judgment")
+    if not isinstance(judgment, dict) or judgment.get("ai_execution_proven") is not False:
+        raise ValueError("ai_not_proven_by_attestation")
+    store = Store(state_dir)
+    if store.state.get("producer_store_id") != document.get("producer_store_id"):
+        raise ValueError("different_store")
+    item = store.state.get("outbox", {}).get(cycle_key(document.get("evaluation_id")))
+    if not isinstance(item, dict) or item.get("event_id") != document.get("event_id"):
+        raise ValueError("binding_mismatch")
+    if item.get("envelope_sha256") != document.get("envelope_sha256"):
+        raise ValueError("digest_mismatch")
+    path = judgment_path(state_dir, document["event_id"])
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    raw = json.dumps(judgment, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if os.path.isfile(path):
+        with open(path, "rb") as handle:
+            existing = handle.read().strip()
+        if existing != raw:
+            raise ValueError("immutable_conflict")
+        return path
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+        handle.write(b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path
 
 
 def verify_same_store(state_dir, document):
@@ -652,6 +910,23 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
             return 1
         print(json.dumps({"exported": True, "automatic_transport": False, "ai_execution_proven": False}, ensure_ascii=False))
         return 0
+    if argv[:1] == ["dispatch-hold"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--out" in found:
+        try:
+            record = hold_dispatch(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"])
+        except ValueError as exc:
+            print(json.dumps({"http_sent": False, "unattended": False, "processed": False, "reason": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps(record, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["import-staged"] and found and "--state-dir" in found and "--file" in found and "--now" in found:
+        try:
+            path = import_staged(found["--state-dir"], found["--file"], found["--now"])
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "rejected_judgment"
+            print(json.dumps({"imported": False, "processed": False, "unattended": False, "reason": reason}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"imported": True, "processed": False, "unattended": False, "judgment_file": os.path.basename(path), "ai_execution_proven": False}, ensure_ascii=False))
+        return 0
     if argv[:1] == ["prepare-handoff"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--out" in found:
         try:
             manifest, _side = prepare_handoff(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"])
@@ -659,6 +934,32 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
             print(json.dumps({"exported": False, "post_authorized": False, "transport_implemented": False, "reason": str(exc)}, ensure_ascii=False))
             return 1
         print(json.dumps(manifest, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["send-context"] and found and "--config-dir" in found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found:
+        try:
+            result = send_context(found["--config-dir"], found["--state-dir"], found["--event-id"], found["--evaluation-id"], transport)
+        except ValueError as exc:
+            print(json.dumps({"delivered": False, "processed": False, "pending": True, "live_connected": False, "ai_execution_proven": False, "reason": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("delivered") else 1
+    if argv[:1] == ["pull-return"] and found and "--config-dir" in found and "--event-id" in found:
+        try:
+            document = pull_return(found["--config-dir"], found["--event-id"], transport)
+        except ValueError as exc:
+            print(json.dumps({"pending": True, "ai_execution_proven": False, "live_connected": False, "reason": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"event_id": document.get("event_id"), "program_filled": False, "ai_execution_proven": False, "live_connected": False}, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["import-return"] and found and "--state-dir" in found and "--file" in found:
+        try:
+            with open(found["--file"], encoding="utf-8") as handle:
+                path = import_return(found["--state-dir"], json.load(handle))
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "rejected_context"
+            print(json.dumps({"imported": False, "processed": False, "reason": reason}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"imported": True, "processed": False, "judgment_file": os.path.basename(path), "ai_execution_proven": False}, ensure_ascii=False))
         return 0
     if argv[:1] == ["verify-context"] and found and "--file" in found and "--now" in found:
         try:

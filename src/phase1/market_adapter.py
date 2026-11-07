@@ -76,13 +76,24 @@ def _real_private(path):
     return _signed_get(path)
 
 
+def _load_public_get():
+    """repo 根以 python -m 執行時，公開 K 線在 src.common。"""
+    try:
+        from src.common import get as public_get
+    except ImportError:
+        from common import get as public_get
+    if not callable(public_get):
+        raise ValueError("fetcher_missing")
+    return public_get
+
+
 def _real_public(symbol):
     if not _symbol_ok(symbol):
         raise ValueError("rejected_symbol")
     try:
-        from common import get as public_get
+        public_get = _load_public_get()
     except ImportError:
-        from src.common import get as public_get
+        raise ValueError("fetcher_missing")
     return public_get("/fapi/v1/klines", {"symbol": symbol, "interval": "15m", "limit": 20})
 
 
@@ -141,10 +152,11 @@ def fetch_market(private_get, public_get, candidates, now_ms):
                 raise ValueError("query_failed")
             klines[symbol] = raw
         review = build_review(account, orders, algo, klines, candidates or [], now_ms, queries_present=True)
-    except (OSError, ValueError, TypeError):
+    except Exception:
         failed = build_review(None, None, None, {}, candidates or [], now_ms, queries_present=False)
         failed["missing"] = ["query_failed"]
         failed["context_sufficient"] = False
+        failed["old_ai_poll"] = "keep"
         return failed
     for symbol in _needed_symbols(review, candidates):
         if not _bars_complete(review.get("klines", {}).get(symbol)):
@@ -179,7 +191,15 @@ def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry,
         base["reason"] = "clock_invalid"
         base["context_sufficient"] = False
         return base
-    private, public = resolve_clients(entry, private_get, public_get)
+    try:
+        private, public = resolve_clients(entry, private_get, public_get)
+    except Exception:
+        private, public = None, None
+        base["reason"] = "context_insufficient"
+        base["context_sufficient"] = False
+        base["old_ai_poll"] = "keep"
+        base["fetch_review_called"] = True
+        return base
     candidates = prefilter.get("candidates") if isinstance(prefilter, dict) else []
     if not isinstance(candidates, list):
         candidates = []
@@ -189,7 +209,10 @@ def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry,
             store, snapshot, prefilter, now=now, scan_id=scan_id, notifier=notifier, now_ms=now_ms,
         )
     else:
-        review = fetch_market(private, public, candidates, now_ms)
+        try:
+            review = fetch_market(private, public, candidates, now_ms)
+        except Exception:
+            review = {"context_sufficient": False, "missing": ["query_failed"]}
         if review.get("context_sufficient") is not True:
             planned = {
                 "quiet": False,

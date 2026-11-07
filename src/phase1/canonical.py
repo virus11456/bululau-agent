@@ -46,7 +46,8 @@ def _js_number(value):
 
 
 def _js_string(value):
-    return json.dumps(value, ensure_ascii=False).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    """JSON.stringify 保留 U+2028 與 U+2029，不編成 \\u 跳脫。"""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _utf16_key(value):

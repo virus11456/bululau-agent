@@ -39,7 +39,7 @@ _FIXED_REASONS = {
     "get_budget_exhausted", "wake_budget_exhausted", "deadline_exceeded", "event_not_approved",
     "rejected_id", "role_rejected", "timeout", "transport_failed", "too_large",
     "rejected_schema", "non_finite", "unsafe_integer", "digest_mismatch", "binding_mismatch",
-    "not_applied", "store_failed", "ledger_missing", "ledger_corrupt", "ledger_path_rejected",
+    "not_applied", "store_failed", "rejected_context", "ledger_missing", "ledger_corrupt", "ledger_path_rejected",
     "stage_rejected", "parent_package_not_ready", "clock_invalid",
 }
 LEDGER_LIMITS = (
@@ -538,7 +538,7 @@ def publisher_document(config, event_id, judgment_path, trace_path, context_path
         context = json.load(handle)
     ready = read_parent_package(context, judgment_path, trace_path)
     if ready.get("ready") is not True:
-        raise ValueError("parent_package_not_ready")
+        raise ValueError(ready.get("reason") or "parent_package_not_ready")
     with open(judgment_path, encoding="utf-8") as handle:
         judgment = json.load(handle)
     if not isinstance(judgment, dict) or judgment.get("event_type") != "dry_run_judgment":

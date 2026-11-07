@@ -234,6 +234,54 @@ def _bound_id(value):
     return isinstance(value, str) and bool(value) and value.lower() != "none"
 
 
+_CONTEXT_FIELDS = (
+    "schema_version", "event_type", "event_id", "evaluation_id", "envelope_sha256",
+    "sent_at", "producer_store_id", "envelope", "automatic_transport",
+)
+_ENVELOPE_FIELDS = (
+    "schema_version", "event_type", "event_id", "evaluation_id", "sent_at", "reason",
+    "freshness", "snapshot", "candidates", "orders_allowed", "test_channel", "position_channel",
+)
+
+
+def _recomputed_context(context):
+    """重算 envelope 內容摘要。宣告的同名摘要不能單獨通過。"""
+    import hashlib
+    from .canonical import canonical_json
+    from .wake_gate import ALLOWED_WAKE_REASONS
+    if not isinstance(context, dict) or set(context) != set(_CONTEXT_FIELDS):
+        return None, "rejected_context"
+    if context.get("schema_version") != 1 or context.get("event_type") != "immutable_context":
+        return None, "rejected_context"
+    if context.get("automatic_transport") is not False:
+        return None, "rejected_context"
+    if not _bound_id(context.get("event_id")) or not _bound_id(context.get("evaluation_id")):
+        return None, "binding_mismatch"
+    if not isinstance(context.get("sent_at"), str) or not context.get("sent_at"):
+        return None, "rejected_context"
+    store_id = context.get("producer_store_id")
+    if not isinstance(store_id, str) or len(store_id) != 32 or any(ch not in "0123456789abcdef" for ch in store_id):
+        return None, "rejected_context"
+    envelope = context.get("envelope")
+    if not isinstance(envelope, dict) or set(envelope) != set(_ENVELOPE_FIELDS):
+        return None, "rejected_context"
+    if envelope.get("schema_version") != 1 or envelope.get("event_type") != "evaluation_envelope":
+        return None, "rejected_context"
+    if envelope.get("reason") not in ALLOWED_WAKE_REASONS:
+        return None, "rejected_context"
+    if envelope.get("orders_allowed") is not False or envelope.get("test_channel") is not False or envelope.get("position_channel") is not False:
+        return None, "rejected_context"
+    if envelope.get("event_id") != context.get("event_id") or envelope.get("evaluation_id") != context.get("evaluation_id"):
+        return None, "binding_mismatch"
+    try:
+        digest = hashlib.sha256(canonical_json(envelope).encode("utf-8")).hexdigest()
+    except ValueError:
+        return None, "digest_mismatch"
+    if digest != context.get("envelope_sha256"):
+        return None, "digest_mismatch"
+    return digest, None
+
+
 def parent_package_ready(judgment, trace, context=None):
     """只檢查父層已經寫好的檔。缺 event_id 不能用 None==None 通過。不代填 trace。"""
     if not isinstance(judgment, dict) or judgment.get("program_filled") is True:
@@ -253,15 +301,12 @@ def parent_package_ready(judgment, trace, context=None):
     if "envelope_sha256" in trace and trace.get("envelope_sha256") != judgment.get("envelope_sha256"):
         return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
     if context is not None:
-        envelope = context.get("envelope") if isinstance(context.get("envelope"), dict) else {}
-        event_id = context.get("event_id") or envelope.get("event_id")
-        evaluation_id = context.get("evaluation_id") or envelope.get("evaluation_id")
-        digest = context.get("envelope_sha256") or envelope.get("envelope_sha256")
-        if event_id != judgment.get("event_id") or evaluation_id != judgment.get("evaluation_id"):
+        digest, problem = _recomputed_context(context)
+        if problem:
+            return {"ready": False, "reason": problem, "discretion_complete": False}
+        if context.get("event_id") != judgment.get("event_id") or context.get("evaluation_id") != judgment.get("evaluation_id"):
             return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
-        if not _bound_id(digest) or judgment.get("envelope_sha256") != digest:
-            return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
-        if trace.get("envelope_sha256") != digest:
+        if judgment.get("envelope_sha256") != digest or trace.get("envelope_sha256") != digest:
             return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
     return {
         "ready": True,

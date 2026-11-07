@@ -57,6 +57,7 @@ FILES = (
     "tests/test_gateway_client.py",
     "tests/test_operate_chain.py",
     "tests/test_run33_gates.py",
+    "tests/test_run34_gaps.py",
     "gateway/client.example.json",
     "gateway/package.json",
     "gateway/package-lock.json",

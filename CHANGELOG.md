@@ -20,7 +20,7 @@ cycle 的 processed 回條寫回同一個 `phase1_state.json`。`python3 -m src.
 
 掃描錯誤不再被空倉蓋成 quiet。`python3 -m src.phase1.runner run --shadow` 用子程序串 scanner、manage、status 與同一個 store。預設不執行實盤指令，排程檔是 Disabled。`switch_allowed` 不是 true。
 
-production 設定只接受操作者給的 quantboy 路徑，並組固定的 prefilter、manage --live、status。10 只沿 prefilter 的 call_ai 契約。正式 notifier 在 verified 且回 delivered 時記送達，不記 processed。沒有 verified 就 blocked。
+production 設定只接受操作者給的 quantboy 路徑，並組固定的 prefilter、manage --live、status-json。10 只沿 prefilter 的 call_ai 契約。status 文字的零倉零單不能當查詢成功。正式傳輸用獨立 transport.json，八欄 wake 只是通知，envelope 只從狀態目錄的固定檔讀。判斷完成且未下單才寫 processed。verified 的 delivered 不是 processed。沒有 verified 就 blocked。
 
 ## 2026-11-06
 

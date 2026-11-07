@@ -50,7 +50,7 @@ def production_argv(root, python):
     return {
         "scanner": [python, prefilter, "--quiet", "--nolog"],
         "manage": [python, trader, "manage", "--live"],
-        "status": [python, trader, "status"],
+        "status": [python, trader, "status-json"],
     }
 
 
@@ -117,10 +117,10 @@ def _spawn(argv, timeout, payload=None):
     try:
         proc = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=timeout, shell=False)
     except subprocess.TimeoutExpired:
-        return "", None, "timeout"
+        return "", "", None, "timeout"
     except OSError:
-        return "", None, "spawn_failed"
-    return proc.stdout or "", proc.returncode, None
+        return "", "", None, "spawn_failed"
+    return proc.stdout or "", proc.stderr or "", proc.returncode, None
 
 
 def _object(text):
@@ -183,22 +183,26 @@ def parse_status_text(text):
     return {"positions": positions, "orders": general + algo, "as_of": as_of}
 
 
-def adapt_status(text, code, fault, manage_code, manage_fault):
-    failed = manage_fault is not None or manage_code != 0 or fault is not None or code != 0
-    parsed = None if failed and (fault or code != 0) else parse_status_text(text or "")
-    if parsed is None:
+def adapt_status_json(text, stderr, code, fault, manage_code, manage_fault):
+    """production 只信 status-json。人類可讀 status 的零倉零單不能證明查詢成功。"""
+    from .status_contract import parse_status_json
+    parsed = None if fault else parse_status_json(text, code, stderr or "")
+    manage_failed = manage_fault is not None or manage_code != 0
+    if not parsed or not parsed["trusted"]:
         return {
             "status": "unknown", "as_of": None, "positions": None, "orders": None,
             "manage_error": True, "manage_complete": False, "limit_older_than_2h": False,
+            "status_trusted": False,
         }
     return {
         "status": "ok",
         "as_of": parsed["as_of"],
         "positions": parsed["positions"],
         "orders": parsed["orders"],
-        "manage_error": manage_fault is not None or manage_code != 0,
-        "manage_complete": manage_fault is None and manage_code == 0,
+        "manage_error": manage_failed,
+        "manage_complete": not manage_failed,
         "limit_older_than_2h": False,
+        "status_trusted": True,
     }
 
 
@@ -243,7 +247,7 @@ class CommandNotifier:
             payload = wake_contract(event, self.sent_at)
         except ValueError:
             return {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "rejected_id"}
-        text, code, fault = _spawn(self.spec["argv"], self.timeout, json.dumps(payload, ensure_ascii=False))
+        text, _stderr, code, fault = _spawn(self.spec["argv"], self.timeout, json.dumps(payload, ensure_ascii=False))
         body = _object(text)
         if fault or code != 0 or body is None or body.get("schema_version") != WAKE_SCHEMA or body.get("delivered") is not True:
             return {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "sender_failed"}
@@ -261,12 +265,12 @@ def run_configured(store, config, *, now, scan_id):
     timeout = config["timeout_seconds"]
     commands = config["commands"]
     if config["mode"] == "production":
-        scan_text, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
-        manage_text, manage_code, manage_fault = _spawn(commands["manage"], timeout)
-        status_text, status_code, status_fault = _spawn(commands["status"], timeout)
+        scan_text, _scan_err, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
+        manage_text, _manage_err, manage_code, manage_fault = _spawn(commands["manage"], timeout)
+        status_text, status_err, status_code, status_fault = _spawn(commands["status"], timeout)
         del manage_text
         prefilter = adapt_prefilter(scan_text, scan_code, scan_fault)
-        snapshot = adapt_status(status_text, status_code, status_fault, manage_code, manage_fault)
+        snapshot = adapt_status_json(status_text, status_err, status_code, status_fault, manage_code, manage_fault)
         manage_exit = 0 if manage_fault is None and manage_code == 0 else 1
         command_errors = {
             "scanner": None if scan_fault is None and scan_code in (0, 2, 10) else scan_fault or "unexpected_exit_{0}".format(scan_code),
@@ -276,9 +280,9 @@ def run_configured(store, config, *, now, scan_id):
         executed = True
         mode = "production"
     else:
-        scan_text, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
-        manage_text, manage_code, manage_fault = _spawn(commands["manage"], timeout)
-        status_text, status_code, status_fault = _spawn(commands["status"], timeout)
+        scan_text, _scan_err, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
+        manage_text, _manage_err, manage_code, manage_fault = _spawn(commands["manage"], timeout)
+        status_text, _status_err, status_code, status_fault = _spawn(commands["status"], timeout)
         del manage_text
         scan_text, scan_error = _shadow_outputs(scan_text, scan_code, scan_fault)
         status_text, status_error = _shadow_outputs(status_text, status_code, status_fault)
@@ -314,7 +318,20 @@ def run_configured(store, config, *, now, scan_id):
     decision["old_ai_poll"] = "keep"
     decision["delivered"] = bool(decision.get("sender", {}).get("delivered"))
     decision["processing_ack"] = False
+    decision["limit_older_than_2h_implemented"] = False
     decision["command_errors"] = command_errors
+    if decision.get("event_id") and decision.get("evaluation_id"):
+        from .autoscan import freshness as freshness_of
+        from .production_transport import bind_envelope, build_envelope
+        fresh = freshness_of(snapshot.get("as_of"), now) if snapshot.get("as_of") else {"valid": False, "status": "missing", "age_seconds": None}
+        try:
+            envelope = build_envelope(
+                snapshot, prefilter, fresh, event_id=decision["event_id"], evaluation_id=decision["evaluation_id"],
+                sent_at=now, reason=decision["reason"],
+            )
+            bind_envelope(store, envelope)
+        except ValueError:
+            pass
     write_json_atomic(str(store.root), str(Path(store.root) / "last_decision.json"), {
         key: decision.get(key) for key in (
             "mode", "ready", "switch_allowed", "executed_live", "account_verified", "routine_stopped",

@@ -6,6 +6,18 @@
 import secrets
 
 from .ack_contract import cycle_key
+
+ALLOWED_WAKE_REASONS = (
+    "snapshot_missing",
+    "snapshot_stale",
+    "snapshot_blocked_clock_skew",
+    "snapshot_unknown",
+    "manage_or_scan_error",
+    "positions_open",
+    "orders_open",
+    "candidates_present",
+    "not_quiet",
+)
 from .autoscan import ScanBook, freshness
 from .token_switch import UnconfiguredWebhook, _identity
 
@@ -100,8 +112,17 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
 
 
 def _reason(snapshot, fresh, scan_error, positions, orders, candidates):
-    if snapshot.get("status") != "ok" or not fresh.get("valid"):
-        return "snapshot_" + str(fresh.get("status") or snapshot.get("status") or "unknown")
+    if snapshot.get("status") != "ok":
+        return "snapshot_unknown"
+    if not fresh.get("valid"):
+        status = fresh.get("status")
+        if status == "stale":
+            return "snapshot_stale"
+        if status == "blocked_clock_skew":
+            return "snapshot_blocked_clock_skew"
+        if status == "missing":
+            return "snapshot_missing"
+        return "snapshot_unknown"
     if snapshot.get("manage_error") or scan_error:
         return "manage_or_scan_error"
     if positions not in (0,):

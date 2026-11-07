@@ -8,7 +8,7 @@
 
 HTTP 2xx 不把 outbox 標成已處理。布林值不會讓它離開 pending。發送或 consumer 失敗時事件還在。掃描錯誤或 manage 沒跑完時 `protection_complete` 是 false。
 
-可執行入口預設 shadow，拒絕 `live_trader.py` 與 `--live`。`runner.json` 設 `mode=production` 且給 `quantboy_root` 時，才組固定的三條既有指令：`src/prefilter.py --quiet --nolog`、`src/live_trader.py manage --live`、`src/live_trader.py status`。不接受任意 shell。`prefilter` 的 0 是無候選、10 是它自己的 `call_ai`、2 是行情失敗；10 不是 manage 或 status 的成功碼，也不是 11-06 策略已通過。`status` 用它印出的「時間 … 台北」「持倉 n/m」「一般掛單 n  條件單 n」，不讀餘額。
+可執行入口預設 shadow，拒絕 `live_trader.py` 與 `--live`。`runner.json` 設 `mode=production` 且給 `quantboy_root` 時，才組固定的三條既有指令：`src/prefilter.py --quiet --nolog`、`src/live_trader.py manage --live`、`src/live_trader.py status`。不接受任意 shell。`prefilter` 的 0 是無候選、10 是它自己的 `call_ai`、2 是行情失敗；10 不是 manage 或 status 的成功碼，也不是 11-06 策略已通過。production 的 status 指令是只讀 `status-json`。`open_algo()` 失敗會變成空清單且 `status` 文字仍可能結束碼 0，所以零倉零單或後面的「查詢失敗 HTTP 429」都不能當成功。三個查詢都要 `true`、`ok` 要是 true、結束碼要是 0。`limit_older_than_2h` 不是已實作的老單訊號；有掛單本來就留 AI。`account_verified` 不能由設定檔改成 true。
 
 正式喚醒契約由接收端讀 stdin。沒有 `verified: true` 就是 blocked。回 `{"schema_version":1,"delivered":true}` 只代表送到，`processing_ack` 仍是 false，outbox 維持 pending。這支程式不 POST、不組 HTTP header、不讀金鑰。`switch_allowed` 固定 false。
 

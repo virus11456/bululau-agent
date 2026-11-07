@@ -239,8 +239,7 @@ sys.exit(0)
 """
 
 TRADER = r"""
-import os, sys
-from datetime import datetime, timedelta, timezone
+import json, os, sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 mode = open(os.path.join(root, "mode.txt"), encoding="utf-8").read().strip()
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -250,27 +249,39 @@ if cmd == "manage":
     with open(os.path.join(root, "spawned.txt"), "a", encoding="utf-8") as handle:
         handle.write("manage\n")
     sys.exit(1 if mode == "manage_fail" else (10 if mode == "manage10" else 0))
-if cmd == "status":
+if cmd == "status-json":
     if len(sys.argv) != 2:
         sys.exit(9)
     with open(os.path.join(root, "spawned.txt"), "a", encoding="utf-8") as handle:
         handle.write("status\n")
-    if mode == "status10":
-        sys.exit(10)
-    if mode == "status_fail":
-        sys.exit(1)
-    now = "2026-11-07 12:19"
-    held = "2" if mode == "position" else "0"
-    general = "1" if mode == "order" else "0"
-    algo = "1" if mode == "algo" else "0"
-    if mode == "broken":
-        print("時間壞掉")
+    queries = {"account": True, "open_orders": True, "open_algo_orders": True}
+    body = {"schema_version": 1, "command": "status-json", "ok": True, "as_of": "2026-11-07T12:19:30+08:00", "positions": 0, "open_orders": 0, "algo_orders": 0, "queries": queries, "limit_older_than_2h_implemented": False}
+    code = 0
+    if mode == "position":
+        body["positions"] = 2
+    elif mode == "order":
+        body["open_orders"] = 1
+    elif mode == "algo":
+        body["algo_orders"] = 1
+    elif mode == "status10":
+        code = 10
+    elif mode == "status_fail":
+        body = {"schema_version": 1, "command": "status-json", "ok": False, "error": "query_failed", "queries": {"account": False, "open_orders": False, "open_algo_orders": False}}
+        code = 2
+    elif mode == "ok_false":
+        body["ok"] = False
+        body["error"] = "query_failed"
+    elif mode == "algo_hidden":
+        body["queries"] = {"account": True, "open_orders": True, "open_algo_orders": False}
+    elif mode == "error_text":
+        json.dump(body, sys.stdout)
+        sys.stdout.write("\n查詢失敗 HTTP 429\n")
         sys.exit(0)
-    print("時間 {0} 台北".format(now))
-    print("錢包 1.00  未實現 +0.00  淨值 1.00  可用 1.00 USDT")
-    print("持倉 {0}/5".format(held))
-    print("一般掛單 {0}  條件單 {1}".format(general, algo))
-    sys.exit(0)
+    elif mode == "broken":
+        sys.stdout.write("時間 2026-11-07 12:19 台北\n持倉 0/5\n一般掛單 0  條件單 0\n")
+        sys.exit(0)
+    json.dump(body, sys.stdout)
+    sys.exit(code)
 sys.exit(9)
 """
 
@@ -298,7 +309,7 @@ class ProductionAdapterTest(unittest.TestCase):
             handle.write(mode)
         state = os.path.join(tmp, "state")
         os.makedirs(state)
-        config = {"mode": "production", "quantboy_root": root, "python": PYTHON, "interval_seconds": 180, "timeout_seconds": 10}
+        config = {"mode": "production", "quantboy_root": root, "python": PYTHON, "interval_seconds": 180, "timeout_seconds": 10, "account_verified": True, "ready": True, "switch_allowed": True}
         if notifier is not None:
             config["notifier"] = notifier
         path = os.path.join(state, "runner.json")
@@ -328,6 +339,9 @@ class ProductionAdapterTest(unittest.TestCase):
             "status_fail": {"needs": True, "blocked": False},
             "broken": {"needs": True, "blocked": False},
             "contradict": {"needs": True, "blocked": True},
+            "error_text": {"needs": True, "blocked": False},
+            "algo_hidden": {"needs": True, "blocked": False},
+            "ok_false": {"needs": True, "blocked": False},
         }
         with tempfile.TemporaryDirectory() as tmp:
             for mode, wanted in expect.items():
@@ -353,7 +367,7 @@ class ProductionAdapterTest(unittest.TestCase):
                     self.assertTrue(body["protection_complete"])
                 else:
                     self.assertEqual(body["ai_suggestion"], "keep", mode)
-                if mode in ("rate", "manage_fail", "manage10", "status10", "status_fail", "broken", "contradict"):
+                if mode in ("rate", "manage_fail", "manage10", "status10", "status_fail", "broken", "contradict", "error_text", "algo_hidden", "ok_false"):
                     self.assertFalse(body["protection_complete"], mode)
                 if mode == "status10":
                     self.assertNotEqual(body["reason"], "candidates_present")
@@ -433,7 +447,7 @@ class ProductionAdapterTest(unittest.TestCase):
             self.assertFalse(report["account_verified"])
             self.assertFalse(report["switch_allowed"])
             self.assertEqual(report["commands"]["manage"][-2:], ["manage", "--live"])
-            self.assertEqual(report["commands"]["status"][-1], "status")
+            self.assertEqual(report["commands"]["status"][-1], "status-json")
             self.assertEqual(report["commands"]["scanner"][-2:], ["--quiet", "--nolog"])
             self.assertEqual(os.listdir(os.path.join(tmp, "empty")), [])
 

@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     "src/__init__.py",
     "src/config.py",
+    "src/common.py",
+    "src/prefilter.py",
     "src/live_trader.py",
     "src/phase1/__init__.py",
     "src/phase1/cycle.py",

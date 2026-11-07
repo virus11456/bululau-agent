@@ -68,6 +68,80 @@ class StatusJsonCommandTest(unittest.TestCase):
         self.assertTrue(body["queries"]["open_orders"])
         self.assertFalse(body["queries"]["open_algo_orders"])
 
+    def test_null_and_similar_values_are_not_empty_books(self):
+        lt = _load()
+        bad_orders = (None, False, 0, "", {}, "[]", [None], ["x"])
+        bad_accounts = (None, False, 0, "", [], {"positions": None}, {"positions": False}, {"positions": 0}, {"positions": ""}, {"positions": {}}, {"positions": [None]}, {"positions": [{"positionAmt": None}]}, {"positions": [{"positionAmt": False}]}, {"positions": [{"positionAmt": ""}]})
+        for value in bad_orders:
+            lt.account = lambda: {"positions": [], "totalWalletBalance": "999.99", "totalUnrealizedProfit": "0"}
+            lt.open_orders = lambda symbol=None: []
+            lt.req = lambda method, path, params=None, signed=False, found=value: found
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                with self.assertRaises(SystemExit) as caught:
+                    lt.cmd_status_json(None)
+            self.assertEqual(caught.exception.code, 2, value)
+            text = buf.getvalue()
+            self.assertNotIn("999.99", text)
+            body = json.loads(text)
+            self.assertFalse(body["ok"])
+            self.assertNotIn("positions", body)
+            self.assertNotIn("algo_orders", body)
+        for value in bad_accounts:
+            lt.account = lambda found=value: found
+            lt.open_orders = lambda symbol=None: []
+            lt.req = lambda method, path, params=None, signed=False: []
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                with self.assertRaises(SystemExit) as caught:
+                    lt.cmd_status_json(None)
+            self.assertEqual(caught.exception.code, 2, value)
+            body = json.loads(buf.getvalue())
+            self.assertFalse(body["ok"], value)
+            self.assertFalse(body["queries"]["account"], value)
+        lt.account = lambda: {"positions": [], "totalWalletBalance": "999.99", "totalUnrealizedProfit": "0"}
+        for value in bad_orders:
+            lt.open_orders = lambda symbol=None, found=value: found
+            lt.req = lambda method, path, params=None, signed=False: []
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                with self.assertRaises(SystemExit) as caught:
+                    lt.cmd_status_json(None)
+            self.assertEqual(caught.exception.code, 2, value)
+            body = json.loads(buf.getvalue())
+            self.assertTrue(body["queries"]["account"])
+            self.assertFalse(body["queries"]["open_orders"])
+            self.assertNotIn("algo_orders", body)
+        lt.open_orders = lambda symbol=None: []
+        lt.req = lambda method, path, params=None, signed=False: []
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            lt.cmd_status_json(None)
+        body = json.loads(buf.getvalue())
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["positions"], 0)
+        self.assertEqual(body["open_orders"], 0)
+        self.assertEqual(body["algo_orders"], 0)
+
+    def test_check_root_is_not_completed_by_pointing_at_a_directory(self):
+        from src.phase1.runner import inspect_quantboy_root
+        report = inspect_quantboy_root(str(ROOT))
+        self.assertTrue(report["prefilter_present"])
+        self.assertTrue(report["root_supports_status_json"])
+        self.assertFalse(report["deploy_complete"])
+        self.assertFalse(report["account_verified"])
+        self.assertFalse(report["spawned"])
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "src"))
+            with open(os.path.join(tmp, "src", "prefilter.py"), "w", encoding="utf-8") as handle:
+                handle.write("# old scanner\n")
+            with open(os.path.join(tmp, "src", "live_trader.py"), "w", encoding="utf-8") as handle:
+                handle.write("def cmd_status():\n    return None\n")
+            old = inspect_quantboy_root(tmp)
+            self.assertTrue(old["prefilter_present"])
+            self.assertFalse(old["root_supports_status_json"])
+            self.assertFalse(old["deploy_complete"])
+
 
 if __name__ == "__main__":
     unittest.main()

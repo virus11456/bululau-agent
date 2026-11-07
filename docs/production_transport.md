@@ -4,7 +4,7 @@
 
 ## 通知與上下文分開
 
-八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 `$CYCLE_DIR/envelopes/<event_id>.json`，寫入後摘要不同就拒絕覆蓋。新的 scan 不會改掉舊 pending 的檔。
+八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 `$CYCLE_DIR/envelopes/<event_id>.json`。寫入先落在同目錄的暫存檔並 fsync，再換上最終檔名。換檔前中斷不會把半成品當成可信 envelope，也不會蓋掉已有的有效摘要。這是行程中斷測試，不是斷電測試。新的 scan 不會改掉舊 pending 的檔。
 
 `event_id` 在 `wake_gate._enqueue_cycle` 產生，形狀 `c-` 加 32 個十六進位，寫進 `phase1_state.json` 的 outbox 後不覆寫。`evaluation_id` 就是通過 `^[A-Za-z0-9_-]{1,128}$` 的 `scan_id`。outbox 鍵是 `cycle:<evaluation_id>`。`sent_at` 是 runner 產生的 UTC 時間。
 
@@ -57,7 +57,9 @@ python3 -m src.phase1.production_transport read-envelope --state-dir "$CYCLE_DIR
 
 收到 wake 不能寫 processed。布林 `judgment_completed=true` 也不能證明模型真的跑過；本程式不核對父側的 consumer 身分。父側若要可信完成收據，須另定簽章（至少覆蓋 event_id、evaluation_id、envelope_sha256、completed_at）。在那之前 `ai_execution_proven` 必須是 false，processed 只表示這份可稽核判斷被接受。
 
-判斷檔固定是 `$CYCLE_DIR/dry_run_judgment.json`：
+每筆判斷各寫 `$CYCLE_DIR/judgments/<event_id>.json`。一次 commit 只處理指定的 event_id，不會清掉另一筆 pending，也不會拿 A 的摘要去配 B。本地能寫狀態目錄的人可以做出符合欄位的判斷檔；這是信任邊界。`ai_execution_proven` 必須維持 false，本程式不另造執行證明。正式 consumer 由父側控制。
+
+判斷檔：
 
 ```json
 {"schema_version":1,"event_type":"dry_run_judgment","event_id":"c-…","evaluation_id":"s1","envelope_sha256":"<envelope 摘要>","decision":"keep_original_ai","basis":{"reason":"positions_open","as_of":"…","positions":1,"orders":0,"freshness_status":"fresh","candidate_count":1},"completed_at":"2026-11-07T04:22:00Z","orders_placed":false,"ai_execution_proven":false}
@@ -89,4 +91,10 @@ python3 -m src.phase1.cycle apply --state-dir "$CYCLE_DIR" --file "$CYCLE_DIR/ac
 
 `live_trader.py status` 的文字裡，`open_algo()` 失敗會變成空清單並且整支程式仍可能結束碼 0。`multiAssetsMargin` 失敗也會被接住後結束碼 0。所以「時間 + 持倉 0 + 掛單 0」不能證明查詢成功；後面再出現「查詢失敗 HTTP 429」仍必須拒絕。
 
-production 改走只讀的 `status-json`。三個查詢 `account`、`open_orders`、`open_algo_orders` 都必須是 true，`ok` 必須是 true，結束碼必須是 0，而且輸出不得含餘額或失敗文字。任一失敗結束碼 2，且不印零倉冒充成功。時鐘新鮮不能代替這個契約。
+production 改走只讀的 `status-json`。三個查詢的原始回傳都要先通過型別檢查：帳戶是 dict 且 `positions` 是 list，兩種掛單都必須是 list。空 list 才表示真的沒有單。`null`、`false`、`0`、空字串、dict 或錯的元素都不能變成空單。三個查詢都成功、`ok` 是 true、結束碼是 0，而且輸出不得含餘額或失敗文字，才可信。任一失敗結束碼 2，且不印零倉冒充成功。時鐘新鮮不能代替這個契約。
+
+```bash
+python3 -m src.phase1.runner check-root --quantboy-root /既有/quantboy
+```
+
+這只讀原始碼，不執行查詢。舊目錄沒有 `STATUS_JSON_REVISION = "status-json-2"` 就不是已支援。把 root 指到一個目錄不會變成部署完成。套件內含 `src/prefilter.py`、`src/common.py` 與 `src/live_trader.py`，仍不含金鑰。

@@ -190,25 +190,25 @@ def upcoming_event():
     return None
 
 # ---------- 指令 ----------
+STATUS_JSON_REVISION = "status-json-2"
+
 def cmd_status_json(a):
-    """只讀帳戶查詢結果。任一必要查詢失敗就結束碼 2，不以零倉零單冒充成功。不印餘額，不改策略。"""
+    """只讀帳戶查詢結果。原始回傳不是規定的容器就結束碼 2。不印餘額，不改策略。"""
     try:
-        from phase1.status_contract import failure_document, success_document
+        from phase1.status_contract import failure_document, require_account, require_order_list, success_document
     except Exception:
         print('{"schema_version":1,"command":"status-json","ok":false,"error":"contract_unavailable"}')
         raise SystemExit(2)
     queries = {"account": False, "open_orders": False, "open_algo_orders": False}
     try:
-        acc = account()
+        acc = require_account(account())
         queries["account"] = True
         pos = positions(acc)
-        oo = open_orders()
+        oo = require_order_list(open_orders())
         queries["open_orders"] = True
-        algo = req("GET", "/fapi/v1/openAlgoOrders", {}, signed=True) or []
-        if not isinstance(algo, list):
-            raise BinanceError(0, 0, "open_algo_not_list")
+        algo = require_order_list(req("GET", "/fapi/v1/openAlgoOrders", {}, signed=True))
         queries["open_algo_orders"] = True
-    except BinanceError:
+    except (BinanceError, ValueError, TypeError, KeyError):
         print(json.dumps(failure_document(queries), ensure_ascii=False))
         raise SystemExit(2)
     print(json.dumps(success_document(len(pos), len(oo), len(algo), now_tpe().isoformat(timespec="seconds")), ensure_ascii=False))

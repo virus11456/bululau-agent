@@ -430,6 +430,27 @@ SWITCH_BLOCKERS = (
 )
 
 
+def inspect_quantboy_root(root):
+    """只讀原始碼。不執行 status-json，不讀金鑰。有目錄不等於已支援新契約。"""
+    trader = os.path.join(root, "src", "live_trader.py")
+    text = ""
+    if os.path.isfile(trader) and not os.path.islink(trader):
+        with open(trader, encoding="utf-8") as handle:
+            text = handle.read()
+    revision = "status-json-2" if 'STATUS_JSON_REVISION = "status-json-2"' in text and "def cmd_status_json" in text else None
+    return {
+        "quantboy_root": root,
+        "prefilter_present": os.path.isfile(os.path.join(root, "src", "prefilter.py")) and not os.path.islink(os.path.join(root, "src", "prefilter.py")),
+        "common_present": os.path.isfile(os.path.join(root, "src", "common.py")),
+        "status_json_revision": revision,
+        "root_supports_status_json": revision == "status-json-2",
+        "deploy_complete": False,
+        "spawned": False,
+        "account_verified": False,
+        "switch_allowed": False,
+    }
+
+
 def check_config(config_path, state_dir=None):
     """只讀。不建立狀態、不啟動程序、不 load 排程。"""
     loaded = _load_config(config_path)
@@ -496,6 +517,8 @@ def main(argv):
         return _rollback_main(argv[1:])
     if argv[:1] == ["check"]:
         return _check_main(argv[1:])
+    if argv[:1] == ["check-root"]:
+        return _check_root_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -511,7 +534,7 @@ def _parse(argv):
             found["shadow"] = True
             index += 1
             continue
-        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python") or index + 1 >= len(argv):
+        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root") or index + 1 >= len(argv):
             return None
         found[key[2:].replace("-", "_")] = argv[index + 1]
         index += 2
@@ -570,6 +593,16 @@ def _rollback_main(argv):
         return 1
     print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def _check_root_main(argv):
+    found = _parse(argv)
+    if not found or "quantboy_root" not in found:
+        print("用法: python3 -m src.phase1.runner check-root --quantboy-root DIR")
+        return 2
+    report = inspect_quantboy_root(found["quantboy_root"])
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if report["root_supports_status_json"] else 1
 
 
 def _check_main(argv):

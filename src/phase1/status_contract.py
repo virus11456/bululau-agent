@@ -15,6 +15,36 @@ SECRET_KEYS = {
 FAILURE_TEXT = ("查詢失敗", "HTTP 429", "BinanceError", "rate limit")
 
 
+def require_account(value):
+    """帳戶本體必須是 dict，positions 必須是 list。null、False、0、空字串都不是空倉。"""
+    if not isinstance(value, dict):
+        raise ValueError("bad_account")
+    rows = value.get("positions")
+    if not isinstance(rows, list):
+        raise ValueError("bad_account")
+    for row in rows:
+        if not isinstance(row, dict) or "positionAmt" not in row:
+            raise ValueError("bad_account")
+        amount = row["positionAmt"]
+        if isinstance(amount, bool) or amount is None or amount == "" or isinstance(amount, (list, dict)):
+            raise ValueError("bad_account")
+        try:
+            float(amount)
+        except (TypeError, ValueError):
+            raise ValueError("bad_account")
+    return value
+
+
+def require_order_list(value):
+    """只有 list 算查詢成功。空 list 表示真的沒有單。null、False、0、空字串、dict 都拒絕。"""
+    if not isinstance(value, list):
+        raise ValueError("bad_order_list")
+    for row in value:
+        if not isinstance(row, dict):
+            raise ValueError("bad_order_list")
+    return value
+
+
 def success_document(positions, open_orders, algo_orders, as_of):
     return {
         "schema_version": SCHEMA,

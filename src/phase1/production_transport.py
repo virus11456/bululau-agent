@@ -25,7 +25,7 @@ from .wake_gate import ALLOWED_WAKE_REASONS
 
 CONFIG_NAME = "transport.json"
 ENVELOPE_DIR = "envelopes"
-JUDGMENT_NAME = "dry_run_judgment.json"
+JUDGMENT_DIR = "judgments"
 ACK_DIR_NAME = "ack-inbox"
 ALLOWED_DECISIONS = ("keep_original_ai", "no_trade")
 WAKE_FIELDS = (
@@ -184,8 +184,8 @@ def envelope_path(state_dir, event_id):
     return directory, os.path.join(directory, event_id + ".json")
 
 
-def bind_envelope(store, envelope):
-    """每筆事件一個不可變檔。已存在且摘要相同則保留，不同就拒絕覆蓋。"""
+def bind_envelope(store, envelope, crash=None):
+    """先寫獨立暫存檔並 fsync，再換上最終檔名。這只模擬行程在換檔前中斷，不是斷電。"""
     refuse_foreign_state_dir(store.root)
     raw = _canonical(envelope)
     digest = hashlib.sha256(raw).hexdigest()
@@ -197,28 +197,39 @@ def bind_envelope(store, envelope):
     os.makedirs(directory, mode=0o700, exist_ok=True)
     if os.path.islink(directory) or (os.path.lexists(path) and os.path.islink(path)):
         raise ValueError("rejected_symlink")
-    if os.path.exists(path):
-        with open(path, "rb") as handle:
-            existing = handle.read().strip()
-        if hashlib.sha256(existing).hexdigest() != digest:
-            raise ValueError("immutable_conflict")
-    else:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = os.path.join(directory, ".{0}.{1}.tmp".format(envelope["event_id"], os.getpid()))
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if crash == "before_replace":
+            raise OSError("crash_before_replace")
+        if os.path.isfile(path):
             with open(path, "rb") as handle:
                 existing = handle.read().strip()
+            os.unlink(tmp)
             if hashlib.sha256(existing).hexdigest() != digest:
                 raise ValueError("immutable_conflict")
         else:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(raw)
-                handle.write(b"\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            dir_flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                dir_flags |= os.O_DIRECTORY
+            dir_fd = os.open(directory, dir_flags)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        if crash != "before_replace" and os.path.lexists(tmp) and not os.path.islink(tmp):
+            os.unlink(tmp)
+        raise
     item["envelope_sha256"] = digest
     store.save()
     return digest
@@ -311,20 +322,28 @@ def send_wake_stdin(config_dir, state_dir, raw, now, transport=None):
     return send_wake(config_dir, state_dir, transport, incoming["event_id"], incoming["evaluation_id"], now)
 
 
-def commit_judgment(state_dir, now):
-    """可稽核判斷才寫 processed。布林值不能證明 AI 真的跑過。過期直接拒絕。"""
+def judgment_path(state_dir, event_id):
+    cycle_key(event_id)
+    return os.path.join(str(state_dir), JUDGMENT_DIR, event_id + ".json")
+
+
+def commit_judgment(state_dir, event_id, evaluation_id, now):
+    """每筆判斷各寫一個檔。布林值不能證明 AI 真的跑過。過期直接拒絕。"""
     refuse_foreign_state_dir(state_dir)
-    path = os.path.join(str(state_dir), JUDGMENT_NAME)
-    with open(path, encoding="utf-8") as handle:
-        judgment = json.load(handle)
+    path = judgment_path(state_dir, event_id)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            judgment = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        raise ValueError("rejected_judgment")
     required = {
         "schema_version", "event_type", "event_id", "evaluation_id", "envelope_sha256",
         "decision", "basis", "completed_at", "orders_placed", "ai_execution_proven",
     }
     if not isinstance(judgment, dict) or set(judgment) != required or judgment.get("schema_version") != 1:
         raise ValueError("rejected_judgment")
-    if judgment.get("event_type") != "dry_run_judgment":
-        raise ValueError("rejected_judgment")
+    if judgment.get("event_type") != "dry_run_judgment" or judgment.get("event_id") != event_id or judgment.get("evaluation_id") != evaluation_id:
+        raise ValueError("binding_mismatch")
     if judgment.get("ai_execution_proven") is not False:
         raise ValueError("ai_not_proven_by_attestation")
     if judgment.get("orders_placed") is not False or judgment.get("decision") not in ALLOWED_DECISIONS:
@@ -419,9 +438,9 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
             return 1
         print(json.dumps(document, ensure_ascii=False))
         return 0
-    if argv[:1] == ["commit-judgment"] and found and "--state-dir" in found and "--now" in found and set(found) <= {"--state-dir", "--now"}:
+    if argv[:1] == ["commit-judgment"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--now" in found:
         try:
-            path = commit_judgment(found["--state-dir"], found["--now"])
+            path = commit_judgment(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--now"])
         except ValueError as exc:
             print(json.dumps({"processed": False, "old_ai_poll": "keep", "reason": str(exc)}, ensure_ascii=False))
             return 1

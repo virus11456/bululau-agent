@@ -335,7 +335,8 @@ def _acked_readback(state_dir, event_id, evaluation_id):
 def _validate_put(document, state_dir, installation_id, event_id, evaluation_id):
     if not isinstance(document, dict) or set(document) != set(PUT_FIELDS):
         raise ValueError("rejected_schema")
-    if document.get("schema_version") != 1 or document.get("event_type") != "judgment_put":
+    from .review_context import exact_schema_version
+    if not exact_schema_version(document.get("schema_version")) or document.get("event_type") != "judgment_put":
         raise ValueError("rejected_schema")
     if document.get("installation_id") != installation_id or document.get("event_id") != event_id or document.get("evaluation_id") != evaluation_id:
         raise ValueError("binding_mismatch")

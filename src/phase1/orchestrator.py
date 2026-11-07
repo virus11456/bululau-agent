@@ -117,10 +117,13 @@ def run_isolated(argv, deadline_seconds, payload):
     """子行程加新 session。超時對整個 process group 送 SIGKILL，不等 thread 自己停。"""
     _refuse_live_argv(argv)
     deadline = _bounded_deadline(deadline_seconds)
-    proc = subprocess.Popen(
-        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, text=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, text=True,
+        )
+    except OSError:
+        return {"called": True, "ok": False, "failed": True, "isolated": True, "process_killed": False, "spawn_failed": True, "value": None}
     try:
         stdout, _stderr = proc.communicate(input=json.dumps(payload, ensure_ascii=False), timeout=deadline)
     except subprocess.TimeoutExpired:
@@ -138,9 +141,7 @@ def run_isolated(argv, deadline_seconds, payload):
         value = None
     if not isinstance(value, dict) or value.get("ok") is not True:
         return {"called": True, "ok": False, "failed": True, "isolated": True, "process_killed": False, "value": value if isinstance(value, dict) else None}
-    value = dict(value)
-    value.update({"called": True, "ok": True, "isolated": True, "process_killed": False, "timed_out": False})
-    return value
+    return {"called": True, "ok": True, "timed_out": False, "isolated": True, "process_killed": False, "value": value}
 
 
 def _invoke(name, fn, payload, order, gaps, deadline_seconds):

@@ -447,7 +447,8 @@ def verify_context(document, now):
     """只核對帶走的檔。不寫 store，不把路徑字串當成同一個 store。"""
     if not isinstance(document, dict) or set(document) != set(CONTEXT_FIELDS):
         raise ValueError("rejected_context")
-    if document.get("schema_version") != 1 or document.get("event_type") != "immutable_context":
+    from .review_context import exact_schema_version
+    if not exact_schema_version(document.get("schema_version")) or document.get("event_type") != "immutable_context":
         raise ValueError("rejected_context")
     if document.get("automatic_transport") is not False:
         raise ValueError("automatic_transport_not_implemented")
@@ -902,7 +903,8 @@ def commit_judgment(state_dir, event_id, evaluation_id, now):
         "schema_version", "event_type", "event_id", "evaluation_id", "envelope_sha256",
         "decision", "basis", "completed_at", "orders_placed", "ai_execution_proven",
     }
-    if not isinstance(judgment, dict) or set(judgment) != required or judgment.get("schema_version") != 1:
+    from .review_context import exact_schema_version
+    if not isinstance(judgment, dict) or set(judgment) != required or not exact_schema_version(judgment.get("schema_version")):
         raise ValueError("rejected_judgment")
     if judgment.get("event_type") != "dry_run_judgment" or judgment.get("event_id") != event_id or judgment.get("evaluation_id") != evaluation_id:
         raise ValueError("binding_mismatch")

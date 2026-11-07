@@ -259,6 +259,11 @@ _CANDIDATE_OPTIONAL = (
 )
 
 
+def exact_schema_version(value):
+    """布林 True 等於 1，但不能當成 schema 版本。"""
+    return type(value) is int and value == 1
+
+
 def _exact_int(value):
     return type(value) is int
 
@@ -373,7 +378,7 @@ def _review_context_ok(envelope):
     review = envelope.get("review_context")
     if not isinstance(review, dict) or set(review) != set(_REVIEW_CONTEXT_FIELDS):
         return False
-    if review.get("schema_version") != 1 or review.get("event_type") != "review_context":
+    if not exact_schema_version(review.get("schema_version")) or review.get("event_type") != "review_context":
         return False
     if review.get("event_id") != envelope.get("event_id") or review.get("evaluation_id") != envelope.get("evaluation_id"):
         return False
@@ -417,7 +422,7 @@ def _recomputed_context(context):
     from .wake_gate import ALLOWED_WAKE_REASONS
     if not isinstance(context, dict) or set(context) != set(_CONTEXT_FIELDS):
         return None, "rejected_context"
-    if context.get("schema_version") != 1 or context.get("event_type") != "immutable_context":
+    if not exact_schema_version(context.get("schema_version")) or context.get("event_type") != "immutable_context":
         return None, "rejected_context"
     if context.get("automatic_transport") is not False:
         return None, "rejected_context"
@@ -431,7 +436,7 @@ def _recomputed_context(context):
     envelope = context.get("envelope")
     if not isinstance(envelope, dict) or set(envelope) != set(_ENVELOPE_FIELDS):
         return None, "rejected_context"
-    if envelope.get("schema_version") != 1 or envelope.get("event_type") != "evaluation_envelope":
+    if not exact_schema_version(envelope.get("schema_version")) or envelope.get("event_type") != "evaluation_envelope":
         return None, "rejected_context"
     if envelope.get("reason") not in ALLOWED_WAKE_REASONS:
         return None, "rejected_context"

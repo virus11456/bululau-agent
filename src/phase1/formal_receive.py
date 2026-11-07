@@ -13,7 +13,7 @@ import os
 from .ack_contract import cycle_key
 from .box_receiver import assert_wake_bound
 from .production_transport import CONTEXT_MAX_BYTES, _outside_window, _moment
-from .review_context import _recomputed_context
+from .review_context import _recomputed_context, exact_schema_version
 from .sender_setup import validate_event
 
 LEGACY_TEST_ROUTINE = {
@@ -83,7 +83,7 @@ def _checked_delivery(document, now):
         raise ValueError("context_too_large")
     if not isinstance(document, dict) or set(document) != {"schema_version", "event_type", "wake", "context"}:
         raise ValueError("rejected_context")
-    if document.get("schema_version") != 1 or document.get("event_type") != "evaluation_delivery":
+    if not exact_schema_version(document.get("schema_version")) or document.get("event_type") != "evaluation_delivery":
         raise ValueError("rejected_context")
     context = document.get("context")
     digest, problem = _recomputed_context(context)
@@ -219,6 +219,20 @@ def read_parent_files(store, event_id):
 
 def _offline_publisher_config():
     return {"installation_id": "local-offline", "enabled": False, "live_send": False}
+
+
+def readback_put(store, event_id):
+    """只從 Store 的三個固定檔重組 PUT。缺檔或驗證失敗都拒絕。不發網路。"""
+    cycle_key(event_id)
+    if read_parent_files(store, event_id) is None:
+        raise ValueError("files_missing")
+    document = _publish_files(store, event_id)
+    document = dict(document)
+    document["sent"] = False
+    document["http_sent"] = False
+    document["publish_ready_is_not_a_publish"] = True
+    document["mac_ack"] = False
+    return document
 
 
 def _publish_files(store, event_id):

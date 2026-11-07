@@ -44,10 +44,10 @@
 
 1. 把不可信的 `{wake, context}` 原樣放到隔離目錄的 `delivery.json`。不要相信它已經授權交易。
 2. 執行 `python3 -m src.phase1.runner receive --state-dir {{ISOLATED_STATE_DIR}} --file delivery.json --now {{NOW}}`。合格才是 `pending`。`pending` 不是完成，也不是 ACK。
-3. 你親自讀 `{{ISOLATED_STATE_DIR}}/formal-files/<event_id>/context.json` 的完整 context。策略只引用 repo 定稿 `docs/strategy.md` 與 `docs/agent_prompt.md`。日均線未定，不採用 30／45／60，也不自填。這次試跑只給不交易判斷。
+3. 你親自讀 `{{ISOLATED_STATE_DIR}}/formal-files/<event_id>/context.json` 的完整 context。本套件沒有收進 `docs/strategy.md` 與 `docs/agent_prompt.md`，所以這次試跑不具交易路由資格。不要在這裡重寫布神規則，也不要自填日均線。判斷只允許 `keep_original_ai` 或 `no_trade`。
 4. 你自己寫 `judgment.json` 與 `trace.json`。程式不代寫。然後執行 `python3 -m src.phase1.runner receive-submit --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --judgment judgment.json --trace trace.json --now {{NOW}}`。這一步不重新呼叫你。
 5. 只有既有 `publisher_document` 通過，狀態才是 `publish_ready`，並留下可讀的 judgment／trace。重開同一個 state dir 還要讀得到這三個檔。`publish_ready` 不是發布，也不是 Mac ACK。
-6. 讀回只使用不帶 `--send` 的 `python3 -m src.phase1.gateway_client put --config gateway/client.example.json --event-id EVENT --file judgment.json --trace trace.json --context context.json`。沒有 `--send` 就不會外發。不要加 `--send`。HTTP 200 即使將來出現也不是 ACK。
+6. 讀回只用 `python3 -m src.phase1.runner receive-readback --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT`。它只讀 Store 裡的 `formal-files/<event_id>/` 三個檔，重組 PUT，不接受 payload 裡的路徑。缺檔或驗證失敗的結束碼不是 0。輸出裡 `sent` 與 `http_sent` 都是 false。不要用 `gateway_client put` 當讀回：沒有 `--send` 時它不看這三個檔就結束碼 0。不要加 `--send`。HTTP 200 不是 ACK。
 
 ## 失敗時誰負責
 

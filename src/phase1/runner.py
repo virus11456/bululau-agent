@@ -724,6 +724,8 @@ def main(argv):
         return _receive_main(argv[1:])
     if argv[:1] == ["receive-submit"]:
         return _receive_submit_main(argv[1:])
+    if argv[:1] == ["receive-readback"]:
+        return _receive_readback_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -912,6 +914,26 @@ def _receive_submit_main(argv):
         "reason": result.get("reason"),
     }, ensure_ascii=False))
     return 0 if result.get("ack") is True else 1
+
+
+def _receive_readback_main(argv):
+    """從 Store 持久三檔重組 PUT。缺檔非 0。不接受 payload 路徑，不發網路。"""
+    from .formal_receive import readback_put
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "event_id" not in found:
+        print(json.dumps({
+            "sent": False, "http_sent": False, "reason": "files_missing", "mac_ack": False,
+        }, ensure_ascii=False))
+        return 2
+    try:
+        document = readback_put(Store(found["state_dir"]), found["event_id"])
+    except ValueError as exc:
+        print(json.dumps({
+            "sent": False, "http_sent": False, "reason": str(exc), "mac_ack": False,
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(document, ensure_ascii=False))
+    return 0
 
 
 def _orchestrate_main(argv):

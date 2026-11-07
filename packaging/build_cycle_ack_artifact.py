@@ -73,6 +73,7 @@ FILES = (
     "tests/test_run43_persist.py",
     "tests/test_run44_submit.py",
     "tests/test_run45_timeout.py",
+    "tests/test_run46_gaps.py",
     "gateway/client.example.json",
     "gateway/package.json",
     "gateway/package-lock.json",

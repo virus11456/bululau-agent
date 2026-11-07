@@ -55,7 +55,8 @@ def assert_wake_bound(wake, context):
     envelope = context.get("envelope")
     if not isinstance(envelope, dict):
         raise ValueError("rejected_context")
-    if wake.get("schema_version") != 1 or context.get("schema_version") != 1 or envelope.get("schema_version") != 1:
+    from .review_context import exact_schema_version
+    if not exact_schema_version(wake.get("schema_version")) or not exact_schema_version(context.get("schema_version")) or not exact_schema_version(envelope.get("schema_version")):
         raise ValueError("binding_mismatch")
     if wake.get("event_type") != "evaluation_wake" or context.get("event_type") != "immutable_context" or envelope.get("event_type") != "evaluation_envelope":
         raise ValueError("binding_mismatch")
@@ -75,7 +76,8 @@ def accept_delivery(document, now, inbox):
     """接收 {wake, context}。wake 必須剛好八欄，而且和 envelope 逐欄相同。"""
     if not isinstance(document, dict) or set(document) != {"schema_version", "event_type", "wake", "context"}:
         raise ValueError("rejected_context")
-    if document.get("schema_version") != 1 or document.get("event_type") != "evaluation_delivery":
+    from .review_context import exact_schema_version
+    if not exact_schema_version(document.get("schema_version")) or document.get("event_type") != "evaluation_delivery":
         raise ValueError("rejected_context")
     wake = document.get("wake")
     context = document.get("context")

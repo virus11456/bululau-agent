@@ -118,7 +118,8 @@ def require_put_document(document, installation_id, event_id):
     _walk_finite(document)
     if not _same_fields(document, _PUT_FIELDS):
         raise ValueError("rejected_schema")
-    if document.get("schema_version") != 1 or document.get("event_type") != "judgment_put":
+    from .review_context import exact_schema_version
+    if not exact_schema_version(document.get("schema_version")) or document.get("event_type") != "judgment_put":
         raise ValueError("rejected_schema")
     if document.get("installation_id") != installation_id or document.get("event_id") != event_id:
         raise ValueError("binding_mismatch")
@@ -129,7 +130,7 @@ def require_put_document(document, installation_id, event_id):
     judgment = document.get("judgment")
     if not _same_fields(judgment, _JUDGMENT_FIELDS):
         raise ValueError("rejected_schema")
-    if judgment.get("schema_version") != 1 or judgment.get("event_type") != "dry_run_judgment":
+    if not exact_schema_version(judgment.get("schema_version")) or judgment.get("event_type") != "dry_run_judgment":
         raise ValueError("rejected_schema")
     if judgment.get("event_id") != event_id or judgment.get("evaluation_id") != document.get("evaluation_id"):
         raise ValueError("binding_mismatch")

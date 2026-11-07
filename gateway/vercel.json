@@ -3,7 +3,6 @@
   "installCommand": "npm ci",
   "functions": {
     "api/v1/installations/[installationId]/judgments/[eventId].js": {
-      "runtime": "nodejs22.x",
       "maxDuration": 15,
       "includeFiles": "lib/**"
     }

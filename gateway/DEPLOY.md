@@ -15,8 +15,8 @@
 | installCommand | `npm ci` |
 | buildCommand | 不設定。沒有靜態輸出目錄 |
 | output | `api/v1/installations/[installationId]/judgments/[eventId].js` 這一個 Node Function |
-| runtime | `nodejs22.x` |
-| node engines | `22.x` |
+| functions.runtime | 不設定。Node 是官方 runtime，`nodejs22.x` 不是合法的 runtime 套件名 |
+| Node.js 版本 | `package.json` 的 `engines.node` 為 `22.x`，覆蓋 Project Settings 的 Node.js Version |
 | maxDuration | 15 秒 |
 
 客戶端使用的 URL 是：

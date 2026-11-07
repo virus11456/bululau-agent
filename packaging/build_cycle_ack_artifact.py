@@ -66,6 +66,7 @@ FILES = (
     "gateway/lib/route.js",
     "gateway/api/v1/installations/[installationId]/judgments/[eventId].js",
     "gateway/test/handler.test.js",
+    "gateway/test/vercel-config.test.js",
     "docs/mac_box_wiring.md",
     "tests/test_cycle.py",
     "tests/test_wake_gate.py",

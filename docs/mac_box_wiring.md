@@ -70,7 +70,7 @@ context 裡的持倉與掛單是筆數，沒有幣種、方向、數量、停損
 
 Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及帶 `call_ai`、`n_candidates`、候選清單和有限正價格 `btc.last` 的掃描。`btc` 裡其他數字也必須有限。NaN、正負無限、0、負數，以及 JSON 的 `NaN`／`Infinity` 都留原 AI，而且會叫 notifier。
 
-可部署的入口在 `gateway/`。客戶端 URL 是 `/v1/...`，檔案在 `api/v1/...`，由 rewrite 接上。部署根、`npm ci`、`nodejs22.x`、`BLOB_STORE_ID` 與 OIDC 前提寫在 `gateway/DEPLOY.md`。原子建立是 Blob `put` 的 `allowOverwrite: false`（`x-allow-overwrite: 0`，服務端 `If-None-Match: *`）。沒有把 `token` 選項傳進去，並不證明當時用的是 OIDC。Python 的 `os.link` 只留給離線測試。還沒有建立 project 或 Blob。Hobby 用途與額度仍未知。
+可部署的入口在 `gateway/`。客戶端 URL 是 `/v1/...`，檔案在 `api/v1/...`，由 rewrite 接上。部署根、`npm ci`、`engines.node` `22.x`、`BLOB_STORE_ID` 與 OIDC 前提寫在 `gateway/DEPLOY.md`。 `functions.runtime` 不寫 `nodejs22.x`。原子建立是 Blob `put` 的 `allowOverwrite: false`（`x-allow-overwrite: 0`，服務端 `If-None-Match: *`）。沒有把 `token` 選項傳進去，並不證明當時用的是 OIDC。Python 的 `os.link` 只留給離線測試。還沒有建立 project 或 Blob。Hobby 用途與額度仍未知。
 
 Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下文必須帶白名單的 symbol、方向、數量、停損、掛單、對應 K 線與候選 plan；只有筆數不算足夠，不足就留原 AI。父層自己讀匯出的 context，把判斷寫進 `judgments-in/<event_id>.json`，把 trace 寫進同目錄的 `.trace.json`。這包不代寫。`keep_original_ai` 不是已完成的實盤裁量，現有介面也不能取代實盤裁量。gateway 客戶端預設 `enabled: false`，見 `gateway/client.example.json`。沒有 GM 給的 HTTPS 位址與有界授權就不會外發。不另裝排程，也不關每小時原 AI 或 60 秒 watch。
 

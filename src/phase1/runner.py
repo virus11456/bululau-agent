@@ -714,6 +714,8 @@ def main(argv):
         return _check_install_main(argv[1:])
     if argv[:1] == ["deploy-check"]:
         return _deploy_check_main(argv[1:])
+    if argv[:1] == ["review-round"]:
+        return _review_round_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -729,7 +731,7 @@ def _parse(argv):
             found["shadow"] = True
             index += 1
             continue
-        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root") or index + 1 >= len(argv):
+        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter") or index + 1 >= len(argv):
             return None
         found[key[2:].replace("-", "_")] = argv[index + 1]
         index += 2
@@ -815,6 +817,32 @@ def deploy_report(config_path):
         "live_connected": False,
         "post_authorized": False,
     }
+
+
+def _review_round_main(argv):
+    """預設不取數、不外發、不改現有 routine。quiet 在 wake 之前。"""
+    from .review_context import operate_round
+    from .session import Store
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "now" not in found or "scan_id" not in found or "snapshot" not in found:
+        print(json.dumps({"external_send": False, "routine_stopped": False, "reason": "review_round_disabled"}, ensure_ascii=False))
+        return 2
+    with open(found["snapshot"], encoding="utf-8") as handle:
+        snapshot = json.load(handle)
+    prefilter_path = found.get("prefilter")
+    if prefilter_path:
+        with open(prefilter_path, encoding="utf-8") as handle:
+            prefilter = json.load(handle)
+    else:
+        prefilter = {}
+    store = Store(found["state_dir"])
+    result = operate_round(store, snapshot, prefilter, now=found["now"], scan_id=found["scan_id"], notifier=None, now_ms=0)
+    result["live_fetch"] = False
+    print(json.dumps({key: result.get(key) for key in (
+        "quiet", "wake_sent", "external_send", "routine_stopped", "watch_modified", "wakes_saved",
+        "old_ai_poll", "context_sufficient", "discretion_complete", "fetch_review_called", "reason", "live_fetch",
+    )}, ensure_ascii=False))
+    return 0
 
 
 def _deploy_check_main(argv):

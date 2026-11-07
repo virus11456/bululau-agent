@@ -1,4 +1,5 @@
 """白名單行情。只收注入進來的既有查詢與公開 K 線，不寫 state、不開鎖、不讀餘額。"""
+import json
 import math
 
 from .wake_gate import decide
@@ -63,13 +64,19 @@ def _bars(raw):
     if not isinstance(raw, list):
         return bars
     for item in raw[-20:]:
-        if not isinstance(item, list) or len(item) < 5:
+        if not isinstance(item, list) or len(item) < 6:
             continue
-        opened = _num(item[0])
-        close = _num(item[4])
-        if opened is None or close is None:
+        opened, opened_price, high, low, close, volume = (_num(item[index]) for index in range(6))
+        if None in (opened, opened_price, high, low, close, volume):
             continue
-        bars.append({"open_time": int(opened), "close": close})
+        bars.append({
+            "open_time": int(opened),
+            "open": opened_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
     return bars
 
 
@@ -80,11 +87,35 @@ def _fresh(bars, now_ms):
     return 0 <= age <= _MAX_BAR_AGE_MS
 
 
-def build_review(account, open_orders, algo_orders, klines, candidates, now_ms):
-    """counts 不是持倉。缺 symbol、方向、數量、停損或 K 線就標記不足。"""
-    rows = account.get("positions") if isinstance(account, dict) else None
-    positions = [item for item in (_position(row) for row in (rows or [])) if item]
-    orders = [item for item in (_order(row) for row in list(open_orders or []) + list(algo_orders or [])) if item]
+def build_review(account, open_orders, algo_orders, klines, candidates, now_ms, queries_present=True):
+    """counts 不是持倉。缺 symbol、方向、數量、停損或完整 K 線就標記不足。"""
+    missing = []
+    if queries_present is not True:
+        missing.append("query_failed")
+    if not isinstance(account, dict) or not isinstance(account.get("positions"), list):
+        missing.append("account_query")
+        rows = []
+    else:
+        rows = account["positions"]
+    if not isinstance(open_orders, list) or not isinstance(algo_orders, list):
+        missing.append("order_query")
+        order_rows = []
+    else:
+        order_rows = list(open_orders) + list(algo_orders)
+    positions = []
+    for row in rows:
+        amount = _num(row.get("positionAmt")) if isinstance(row, dict) else None
+        if not isinstance(row, dict) or "positionAmt" not in row or amount is None:
+            missing.append("bad_position")
+            continue
+        if amount == 0:
+            continue
+        item = _position(row)
+        if item:
+            positions.append(item)
+        else:
+            missing.append("bad_position")
+    orders = [item for item in (_order(row) for row in order_rows) if item]
     cleaned = {}
     for symbol, raw in (klines or {}).items():
         if isinstance(symbol, str):
@@ -100,7 +131,6 @@ def build_review(account, open_orders, algo_orders, klines, candidates, now_ms):
             "stop": _num(item.get("stop")),
             "entry": _num(item.get("entry")),
         })
-    missing = []
     for pos in positions:
         if pos["qty"] <= 0:
             missing.append("qty:" + pos["symbol"])
@@ -120,7 +150,7 @@ def build_review(account, open_orders, algo_orders, klines, candidates, now_ms):
         "orders": orders,
         "klines": cleaned,
         "candidates": plans,
-        "context_sufficient": not missing,
+        "context_sufficient": not missing and queries_present is True,
         "missing": missing,
         "counts_are_sufficient": False,
         "discretion_complete": False,
@@ -139,17 +169,27 @@ def fetch_review(private_get, public_get, symbols, now_ms):
         account = private_get("/fapi/v2/account")
         orders = private_get("/fapi/v1/openOrders")
         algo = private_get("/fapi/v1/openAlgoOrders")
-        klines = {}
-        for symbol in symbols:
+        if account is None or orders is None or algo is None:
+            failed = build_review(None, None, None, {}, [], now_ms, queries_present=False)
+            return failed
+        preview = build_review(account, orders, algo, {}, [], now_ms, queries_present=True)
+        needed = []
+        for pos in preview["positions"]:
+            if pos["symbol"] not in needed:
+                needed.append(pos["symbol"])
+        for symbol in symbols or []:
             if not isinstance(symbol, str) or not symbol.isalnum():
                 raise ValueError("rejected_symbol")
+            if symbol not in needed:
+                needed.append(symbol)
+        klines = {}
+        for symbol in needed:
             klines[symbol] = public_get("/fapi/v1/klines?symbol={0}&interval=15m&limit=20".format(symbol))
     except (OSError, ValueError, TypeError):
-        failed = build_review(None, [], [], {}, [], now_ms)
-        failed["context_sufficient"] = False
+        failed = build_review(None, None, None, {}, [], now_ms, queries_present=False)
         failed["missing"] = ["query_failed"]
         return failed
-    return build_review(account, orders, algo, klines, [], now_ms)
+    return build_review(account, orders, algo, klines, [], now_ms, queries_present=True)
 
 
 def _gap(reason):
@@ -190,21 +230,63 @@ def plan_round(store, snapshot, prefilter, review, *, now, scan_id, notifier):
     }
 
 
-def parent_package_ready(judgment, trace):
-    """只檢查父層已經寫好的檔。不代填決定或 trace。"""
+def _bound_id(value):
+    return isinstance(value, str) and bool(value) and value.lower() != "none"
+
+
+def parent_package_ready(judgment, trace, context=None):
+    """只檢查父層已經寫好的檔。缺 event_id 不能用 None==None 通過。不代填 trace。"""
     if not isinstance(judgment, dict) or judgment.get("program_filled") is True:
         return {"ready": False, "reason": "program_must_not_fill_judgment", "discretion_complete": False}
+    if not _bound_id(judgment.get("event_id")) or not _bound_id(judgment.get("evaluation_id")):
+        return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
     if judgment.get("ai_execution_proven") is not False or judgment.get("orders_placed") is not False:
         return {"ready": False, "reason": "not_a_live_order", "discretion_complete": False}
     if judgment.get("decision") not in ("keep_original_ai", "no_trade"):
         return {"ready": False, "reason": "decision_not_allowed", "discretion_complete": False}
     if not isinstance(trace, dict) or not isinstance(trace.get("trace"), str) or not trace["trace"].strip():
         return {"ready": False, "reason": "parent_trace_missing", "discretion_complete": False}
-    if trace.get("event_id") != judgment.get("event_id"):
+    if not _bound_id(trace.get("event_id")) or trace.get("event_id") != judgment.get("event_id"):
         return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
+    if not _bound_id(trace.get("evaluation_id")) or trace.get("evaluation_id") != judgment.get("evaluation_id"):
+        return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
+    if context is not None:
+        envelope = context.get("envelope") if isinstance(context.get("envelope"), dict) else {}
+        event_id = context.get("event_id") or envelope.get("event_id")
+        evaluation_id = context.get("evaluation_id") or envelope.get("evaluation_id")
+        digest = context.get("envelope_sha256") or envelope.get("envelope_sha256")
+        if event_id != judgment.get("event_id") or evaluation_id != judgment.get("evaluation_id"):
+            return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
+        if not _bound_id(digest) or judgment.get("envelope_sha256") != digest:
+            return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
     return {
         "ready": True,
         "reason": "parent_package_present",
         "discretion_complete": False,
         "keep_original_ai_is_not_a_fill": judgment.get("decision") == "keep_original_ai",
+        "program_fills_trace": False,
     }
+
+
+def read_parent_package(context, judgment_path, trace_path):
+    """從實際檔案讀。不存在就不造 trace。"""
+    try:
+        with open(judgment_path, encoding="utf-8") as handle:
+            judgment = json.load(handle)
+        with open(trace_path, encoding="utf-8") as handle:
+            trace = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"ready": False, "reason": "parent_trace_missing", "discretion_complete": False}
+    return parent_package_ready(judgment, trace, context)
+
+
+def operate_round(store, snapshot, prefilter, *, now, scan_id, notifier, private_get=None, public_get=None, symbols=None, now_ms=0):
+    """可操作入口。外部發送保持關閉。quiet 在 notifier 之前。"""
+    review = fetch_review(private_get, public_get, symbols or [], now_ms)
+    planned = plan_round(store, snapshot, prefilter, review, now=now, scan_id=scan_id, notifier=notifier)
+    planned["fetch_review_called"] = True
+    planned["external_send"] = False
+    planned["routine_stopped"] = False
+    planned["watch_modified"] = False
+    planned["wakes_saved"] = False
+    return planned

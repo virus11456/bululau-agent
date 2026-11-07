@@ -8,6 +8,7 @@
   "trial": {
     "approved": false,
     "dry_run_only": true,
+    "event_id": "",
     "new_ids": 1,
     "max_wake_posts": 2,
     "max_judgment_puts": 1,

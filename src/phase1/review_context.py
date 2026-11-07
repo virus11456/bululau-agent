@@ -241,6 +241,11 @@ _CONTEXT_FIELDS = (
 _ENVELOPE_FIELDS = (
     "schema_version", "event_type", "event_id", "evaluation_id", "sent_at", "reason",
     "freshness", "snapshot", "candidates", "orders_allowed", "test_channel", "position_channel",
+    "review_context",
+)
+_REVIEW_CONTEXT_FIELDS = (
+    "schema_version", "event_type", "event_id", "evaluation_id", "included",
+    "context_sufficient", "daily_ma_parameter", "daily_ma_gate", "klines", "missing",
 )
 _FRESHNESS_FIELDS = ("valid", "status", "age_seconds")
 _FRESHNESS_STATUS = ("fresh", "stale", "missing", "blocked_clock_skew")
@@ -364,6 +369,44 @@ def _trustworthy_book(envelope):
     )
 
 
+def _series_continuous(bars, interval):
+    from .market_adapter import _INTERVAL_MS, continuous_window
+    if interval not in _INTERVAL_MS or not isinstance(bars, list) or not bars:
+        return False
+    return continuous_window(bars, interval, len(bars))
+
+
+def _review_context_ok(envelope):
+    review = envelope.get("review_context")
+    if not isinstance(review, dict) or set(review) != set(_REVIEW_CONTEXT_FIELDS):
+        return False
+    if review.get("schema_version") != 1 or review.get("event_type") != "review_context":
+        return False
+    if review.get("event_id") != envelope.get("event_id") or review.get("evaluation_id") != envelope.get("evaluation_id"):
+        return False
+    if review.get("daily_ma_parameter") != "undecided" or review.get("daily_ma_gate") != "not_evaluated":
+        return False
+    if type(review.get("included")) is not bool or type(review.get("context_sufficient")) is not bool:
+        return False
+    if review.get("included") is False and (review.get("context_sufficient") is not False or review.get("klines") != {}):
+        return False
+    if review.get("context_sufficient") is True and review.get("included") is not True:
+        return False
+    klines = review.get("klines")
+    if not isinstance(klines, dict) or not isinstance(review.get("missing"), list):
+        return False
+    if review.get("context_sufficient") is True:
+        if not klines:
+            return False
+        for series in klines.values():
+            if not isinstance(series, dict) or not series:
+                return False
+            for interval, bars in series.items():
+                if not _series_continuous(bars, interval):
+                    return False
+    return True
+
+
 def _nested_envelope(envelope):
     """型別加上跨欄一致。unknown/missing 可以表示，不能裝成 fresh 或已完成。"""
     freshness = envelope.get("freshness")
@@ -373,6 +416,8 @@ def _nested_envelope(envelope):
     if not _snapshot_consistent(snapshot, freshness):
         return "rejected_context"
     if not _candidates_consistent(envelope.get("candidates")):
+        return "rejected_context"
+    if not _review_context_ok(envelope):
         return "rejected_context"
     return None
 

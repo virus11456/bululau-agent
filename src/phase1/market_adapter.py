@@ -216,7 +216,7 @@ def _setup_names(symbol, candidates):
 
 
 def closed_ohlcv(raw, interval, now_ms):
-    """丟掉未收盤與沒對齊的根。保留 open/high/low/close/volume。"""
+    """依 open_time 排序並去重。未收盤、沒對齊的根不留。重複根不能拿來湊數。"""
     step = _INTERVAL_MS[interval]
     bars = []
     if not isinstance(raw, list):
@@ -244,7 +244,36 @@ def closed_ohlcv(raw, interval, now_ms):
             "volume": prices[4],
             "closed": True,
         })
-    return bars
+    bars.sort(key=lambda bar: bar["open_time"])
+    unique = []
+    seen = set()
+    for bar in bars:
+        if bar["open_time"] in seen:
+            continue
+        seen.add(bar["open_time"])
+        unique.append(bar)
+    return unique
+
+
+def continuous_window(bars, interval, count):
+    """最後 count 根必須步進剛好一個週期。中間挖空不能用更早的根湊數。"""
+    if not isinstance(bars, list) or len(bars) < count or count < 1:
+        return False
+    step = _INTERVAL_MS[interval]
+    window = bars[-count:]
+    previous = None
+    for bar in window:
+        opened = bar.get("open_time") if isinstance(bar, dict) else None
+        if not _exact_count(opened) or bar.get("closed") is not True:
+            return False
+        if previous is not None and opened - previous != step:
+            return False
+        previous = opened
+    return True
+
+
+def _exact_count(value):
+    return type(value) is int
 
 
 def _series_fresh(bars, interval, now_ms):
@@ -329,6 +358,54 @@ def fetch_market(private_get, public_get, candidates, now_ms):
     return review
 
 
+def _bar_count(review):
+    total = 0
+    for series in (review.get("klines") or {}).values() if isinstance(review.get("klines"), dict) else []:
+        if not isinstance(series, dict):
+            continue
+        for bars in series.values():
+            if isinstance(bars, list):
+                total += len(bars)
+    return total
+
+
+def _envelope_for(snapshot, prefilter, review, *, now, scan_id, event_id, reason):
+    from .autoscan import freshness as freshness_of
+    from .production_transport import build_envelope
+    fresh = freshness_of(snapshot.get("as_of"), now) if snapshot.get("as_of") else {
+        "valid": False, "status": "missing", "age_seconds": None,
+    }
+    return build_envelope(
+        snapshot, prefilter, fresh, review=review, event_id=event_id, evaluation_id=scan_id,
+        sent_at=now, reason=reason or "not_quiet",
+    )
+
+
+def _review_exceeds_context_limit(snapshot, prefilter, review, *, now, scan_id):
+    from .production_transport import context_too_large
+    probe = "c-" + ("ab" * 16)
+    try:
+        envelope = _envelope_for(
+            snapshot, prefilter, review, now=now, scan_id=scan_id, event_id=probe, reason="candidates_present",
+        )
+    except ValueError:
+        return True
+    return context_too_large(envelope)
+
+
+def _bind_review_envelope(store, snapshot, prefilter, review, *, now, scan_id, event_id, reason):
+    from .production_transport import bind_envelope, context_too_large
+    if not event_id:
+        return False
+    envelope = _envelope_for(
+        snapshot, prefilter, review, now=now, scan_id=scan_id, event_id=event_id, reason=reason,
+    )
+    if context_too_large(envelope):
+        return False
+    bind_envelope(store, envelope)
+    return True
+
+
 def _annotate_strategy(review):
     review["daily_ma_parameter"] = "undecided"
     review["daily_ma_gate"] = "not_evaluated"
@@ -384,8 +461,8 @@ def fetch_strategy_market(private_get, public_get, candidates, now_ms):
                 if not isinstance(raw, list):
                     raise ValueError("query_failed")
                 closed = closed_ohlcv(raw, interval, now_ms)
-                series[symbol][interval] = closed[-count:]
-                if len(closed) < count or not _series_fresh(closed, interval, now_ms):
+                series[symbol][interval] = closed
+                if not continuous_window(closed, interval, count) or not _series_fresh(closed, interval, now_ms):
                     strategy_missing.append("klines:{0}:{1}".format(symbol, interval))
         for symbol in unknown:
             strategy_missing.append("unknown_setup:" + (symbol or ""))
@@ -447,8 +524,24 @@ def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry,
         try:
             review = fetch_strategy_market(private, public, candidates, now_ms)
         except Exception:
-            review = {"context_sufficient": False, "missing": ["query_failed"]}
-        if review.get("context_sufficient") is not True:
+            review = {"context_sufficient": False, "missing": ["query_failed"], "klines": {}}
+        bars_retained = _bar_count(review)
+        if _review_exceeds_context_limit(snapshot, prefilter, review, now=now, scan_id=scan_id):
+            planned = {
+                "quiet": False,
+                "notifier_called": False,
+                "cycle_needs_ai": True,
+                "reason": "context_too_large",
+                "event_id": None,
+                "old_ai_poll": "keep",
+                "context_sufficient": False,
+                "missing": list(review.get("missing") or []),
+                "fetch_review_called": True,
+                "trimmed": False,
+                "bars_retained": bars_retained,
+                "parent_received_klines": False,
+            }
+        elif review.get("context_sufficient") is not True:
             planned = {
                 "quiet": False,
                 "notifier_called": False,
@@ -459,10 +552,20 @@ def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry,
                 "context_sufficient": False,
                 "missing": list(review.get("missing") or []),
                 "fetch_review_called": True,
+                "trimmed": False,
+                "bars_retained": bars_retained,
+                "parent_received_klines": False,
             }
         else:
             planned = plan_round(store, snapshot, prefilter, review, now=now, scan_id=scan_id, notifier=notifier)
             planned["fetch_review_called"] = True
+            planned["trimmed"] = False
+            planned["bars_retained"] = bars_retained
+            delivered = _bind_review_envelope(
+                store, snapshot, prefilter, review, now=now, scan_id=scan_id,
+                event_id=planned.get("event_id"), reason=planned.get("reason"),
+            )
+            planned["parent_received_klines"] = delivered
     planned.update({key: base[key] for key in (
         "wake_sent", "external_send", "routine_stopped", "watch_modified", "wakes_saved",
         "routine_replaced", "live_fetch", "entry_enabled", "replaces_scan_entry", "discretion_complete", "now_ms", "source_gap",

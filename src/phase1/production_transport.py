@@ -187,7 +187,33 @@ def _candidate(item):
     return mapped
 
 
-def build_envelope(snapshot, prefilter, freshness, *, event_id, evaluation_id, sent_at, reason):
+# 跟 gateway／judgment 的 MAX_BYTES 分開。省略 delivery 上限時用這個值，不是無上限。
+CONTEXT_MAX_BYTES = 64 * 1024
+
+
+def _review_context(review, event_id, evaluation_id):
+    """正式 envelope 裡的行情。沒附上就明示 included=false，不假裝已經交給父層。"""
+    included = isinstance(review, dict)
+    body = review if included else {}
+    klines = body.get("klines") if isinstance(body.get("klines"), dict) else {}
+    missing = list(body.get("missing") or [])
+    if not included:
+        missing = ["review_not_attached"]
+    return {
+        "schema_version": 1,
+        "event_type": "review_context",
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+        "included": included,
+        "context_sufficient": included and body.get("context_sufficient") is True,
+        "daily_ma_parameter": "undecided",
+        "daily_ma_gate": "not_evaluated",
+        "klines": klines,
+        "missing": missing,
+    }
+
+
+def build_envelope(snapshot, prefilter, freshness, *, event_id, evaluation_id, sent_at, reason, review=None):
     if reason not in ALLOWED_WAKE_REASONS:
         raise ValueError("rejected_reason")
     cycle_key(event_id)
@@ -216,6 +242,7 @@ def build_envelope(snapshot, prefilter, freshness, *, event_id, evaluation_id, s
         "orders_allowed": False,
         "test_channel": False,
         "position_channel": False,
+        "review_context": _review_context(review, event_id, evaluation_id),
     }
 
 
@@ -488,13 +515,27 @@ def prepare_handoff(state_dir, event_id, evaluation_id, dest, scan_interval_seco
     return manifest, side
 
 
+def context_limit(max_bytes=None):
+    """省略上限不是無上限。呼叫端給更大的數字也不能超過這個 context 上限。"""
+    if max_bytes is None:
+        return CONTEXT_MAX_BYTES
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise ValueError("context_too_large")
+    return min(max_bytes, CONTEXT_MAX_BYTES)
+
+
+def context_too_large(document, max_bytes=None):
+    raw = _canonical(document)
+    return len(raw) > context_limit(max_bytes)
+
+
 def build_delivery(state_dir, event_id, evaluation_id, max_bytes=None):
     """外層是 wake 加 context。wake 本身維持八欄，太大就拒絕，不截斷。"""
     context = build_context(state_dir, event_id, evaluation_id)
     wake = wake_document(context["envelope"])
     document = {"schema_version": 1, "event_type": "evaluation_delivery", "wake": wake, "context": context}
     raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if max_bytes is not None and len(raw) > max_bytes:
+    if len(raw) > context_limit(max_bytes):
         raise ValueError("context_too_large")
     return document, raw
 

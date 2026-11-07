@@ -14,6 +14,8 @@
 
 `event_id` 在 `wake_gate._enqueue_cycle` 產生，形狀 `c-` 加 32 個十六進位，寫進 `phase1_state.json` 的 outbox 後不覆寫。`evaluation_id` 就是通過 `^[A-Za-z0-9_-]{1,128}$` 的 `scan_id`。outbox 鍵是 `cycle:<evaluation_id>`。`sent_at` 是 runner 產生的 UTC 時間。
 
+`review-round` 在 context 沒超過上限時，把 `review_context` 寫進同一份 envelope。內外 `event_id`／`evaluation_id` 相同，摘要含這段 K 線。K 線先按 `open_time` 排序、去重，再檢查指定週期的連續已收盤窗；重複根不能湊數，挖空或錯資料就 `context_sufficient=false`。publisher 重算摘要並套同一套 schema，adapter 回傳值不算已交給父層。context 總位元組上限是 `CONTEXT_MAX_BYTES`（64KiB），跟判斷檔的 64KiB 分開。省略 `delivery.max_bytes` 仍用這個上限，呼叫端給更大的數字也不能放寬。超過就留原 AI，不裁 K 線、不裁候選、不叫 notifier。日均線仍是 `undecided`／`not_evaluated`。
+
 允許的 `reason` 只有：
 
 - `snapshot_missing`

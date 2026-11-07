@@ -61,6 +61,7 @@ FILES = (
     "tests/test_run35_adapter.py",
     "tests/test_run36_contract.py",
     "tests/test_run37_context.py",
+    "tests/test_run38_delivery.py",
     "gateway/client.example.json",
     "gateway/package.json",
     "gateway/package-lock.json",

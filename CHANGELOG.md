@@ -4,7 +4,9 @@
 
 離線第一期：`src/phase1` 用紙上 mock 做持倉出場監控、保護單輪替、成交摘要，以及掃描 outbox／inbox。沒有改策略定稿，沒有排進實盤，沒有交易金鑰，也沒有宣稱 webhook 已接通。
 
-同日另加省 token 閘門：沿用 `prefilter.py` 的輸出，同一候選只喚醒一次。沒有新候選結束碼 0。不取代 `watch`／`manage`，也不送尚未配置的 webhook。未配置的送達路徑會 blocked。
+同日另加省 token 閘門：沿用 `prefilter.py` 的輸出，同一候選只喚醒一次。沒有新候選結束碼 0。不取代 `watch`／`manage`，也不送尚未配置的 webhook。
+
+manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小時限價只標記要喚醒原 AI，不撤單。結構轉弱與移動停損沒有非 AI 等效，舊輪詢不能停。未配置的送達路徑會 blocked。
 
 ## 2026-11-06
 

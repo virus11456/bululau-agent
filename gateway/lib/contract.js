@@ -94,13 +94,14 @@ function hasTimezone(value) {
   return typeof value === "string" && /(Z|[+-]\d{2}:\d{2})$/.test(value);
 }
 
-export function validatePut(document, installationId, eventId, now) {
-  if (!Buffer.isBuffer(document.raw) || document.raw.length > MAX_BYTES) {
+export function validateStored(raw, installationId, eventId) {
+  const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw));
+  if (bytes.length > MAX_BYTES) {
     throw Object.assign(new Error("too_large"), { status: 400 });
   }
   let parsed;
   try {
-    parsed = JSON.parse(document.raw.toString("utf8"));
+    parsed = JSON.parse(bytes.toString("utf8"));
   } catch {
     throw Object.assign(new Error("rejected_schema"), { status: 400 });
   }
@@ -137,10 +138,15 @@ export function validatePut(document, installationId, eventId, now) {
   if (sha256Hex(canonical(judgment)) !== parsed.judgment_sha256) {
     throw Object.assign(new Error("digest_mismatch"), { status: 400 });
   }
-  if (!hasTimezone(judgment.completed_at)) {
+  if (!hasTimezone(judgment.completed_at) || !Number.isFinite(Date.parse(judgment.completed_at))) {
     throw Object.assign(new Error("expired"), { status: 400 });
   }
-  const completed = Date.parse(judgment.completed_at);
+  return parsed;
+}
+
+export function validatePut(document, installationId, eventId, now) {
+  const parsed = validateStored(document.raw, installationId, eventId);
+  const completed = Date.parse(parsed.judgment.completed_at);
   const current = now instanceof Date ? now.getTime() : Date.parse(now);
   if (!Number.isFinite(completed) || !Number.isFinite(current)) {
     throw Object.assign(new Error("expired"), { status: 400 });

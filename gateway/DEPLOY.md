@@ -4,7 +4,7 @@
 
 ## 已驗 commit
 
-`VERIFIED_COMMIT` 是已跑過 gateway 測試的程式 commit。部署 PR head，不要部署 `main`。PR head 可以只比該檔多戳記與 cycle ACK 套件；`git diff --stat $(cat gateway/VERIFIED_COMMIT) HEAD -- gateway` 除了 `VERIFIED_COMMIT` 本身不應再有程式差異。`create_git_project` 預設會從 production branch `main` 部署，不能拿它宣稱已部署這個 PR head。
+套件裡的 `COMMIT` 與打包後的 `gateway/VERIFIED_COMMIT` 是同一個 git HEAD，也就是跑過 gateway 測試的那一版。git 工作樹裡的 `VERIFIED_COMMIT` 只說明這條規則，不另記一個較舊的程式 commit。branch head 可以只比套件 COMMIT 多 `dist/bululau-cycle-ack.tar.gz` 與 `.sha256`。不要把空的戳記 commit 說成與已測程式同一版。部署套件 COMMIT，不要部署 `main`。`create_git_project` 預設會從 production branch `main` 部署，不能拿它宣稱已部署這個 head。
 
 ## root / build
 
@@ -19,12 +19,12 @@
 | node engines | `22.x` |
 | maxDuration | 15 秒 |
 
-入口只接受：
+客戶端使用的 URL 是：
 
 - `PUT /v1/installations/<installation_id>/judgments/<event_id>`
 - `GET /v1/installations/<installation_id>/judgments/<event_id>`
 
-路徑由路由參數決定。客戶端不能傳 pathname 或 callback URL。
+檔案在 `api/v1/...`，所以 Vercel 的實體路徑是 `/api/v1/...`。`vercel.json` 的 rewrite 把公開的 `/v1/...` 轉到那個 Function。兩種路徑都解析成同一組 installation 與 event。客戶端不能傳 pathname 或 callback URL。
 
 ## 原子建立
 
@@ -42,7 +42,9 @@
 - `GATEWAY_READER_KEY_ID`
 - `GATEWAY_READER_SECRET_SHA256`
 
-Blob 連到這個 project 後，Function 使用平台注入的 OIDC。程式不傳 `token`。不要把 `BLOB_READ_WRITE_TOKEN` 或 `VERCEL_OIDC_TOKEN` 匯出、寫進文件或放到 Mac／box。
+Blob 認證前提是 Function 執行環境同時有 `BLOB_STORE_ID` 與 `VERCEL_OIDC_TOKEN`。程式把這兩個值傳給 SDK，而且在缺任一個時直接拒絕，不呼叫 Blob。`@vercel/blob` 在沒有 OIDC 時會改讀 `BLOB_READ_WRITE_TOKEN`；這個 gateway 不走那條 fallback。沒有把 `token` 選項傳進 `put`/`get`，並不能單獨證明當時用的是 OIDC。`BLOB_READ_WRITE_TOKEN` 與 `VERCEL_OIDC_TOKEN` 都不得寫進 git，也不得配置到 Mac 或 box。
+
+`npm audit` 在覆寫前有 4 個 high，其中 zod `GHSA-mrhx-c7xc-m3w5` 經 `@vercel/cli-config` 與 `@vercel/oidc` 進入 `@vercel/blob`。`package.json` 的 overrides 把這三個釘在 `@vercel/oidc@4.0.7`、`@vercel/cli-config@0.3.7`、`zod@4.6.7`。覆寫後 `npm audit` 是 0 vulnerabilities。沒有用 `--audit-level` 或忽略設定把警告藏起來。
 
 ## 部署前仍要另批
 

@@ -8,9 +8,22 @@
       "includeFiles": "lib/**"
     }
   },
+  "rewrites": [
+    {
+      "source": "/v1/installations/:installationId/judgments/:eventId",
+      "destination": "/api/v1/installations/:installationId/judgments/:eventId"
+    }
+  ],
   "headers": [
     {
-      "source": "/v1/(.*)",
+      "source": "/v1/installations/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "private, no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    },
+    {
+      "source": "/api/v1/installations/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "private, no-store" },
         { "key": "X-Content-Type-Options", "value": "nosniff" }

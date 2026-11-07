@@ -16,12 +16,26 @@ export function isAlreadyExists(error) {
   return message.includes("already exists") || message.includes("blob_already_exists");
 }
 
-export function officialBlobStore() {
+export function officialBlobStore(env = process.env) {
+  const storeId = typeof env.BLOB_STORE_ID === "string" ? env.BLOB_STORE_ID.trim() : "";
+  const oidcToken = typeof env.VERCEL_OIDC_TOKEN === "string" ? env.VERCEL_OIDC_TOKEN.trim() : "";
+  if (!storeId || !oidcToken) {
+    return {
+      async create() {
+        throw Object.assign(new Error("blob_auth_unconfigured"), { status: 503 });
+      },
+      async read() {
+        throw Object.assign(new Error("blob_auth_unconfigured"), { status: 503 });
+      },
+    };
+  }
+  const auth = { storeId, oidcToken };
   return {
     async create(pathname, body) {
       let result;
       try {
         result = await put(pathname, body, {
+          ...auth,
           access: "private",
           allowOverwrite: false,
           addRandomSuffix: false,
@@ -33,7 +47,7 @@ export function officialBlobStore() {
         if (isAlreadyExists(error)) {
           throw Object.assign(new Error("blob_already_exists"), { status: 409 });
         }
-        throw error;
+        throw Object.assign(new Error("store_failed"), { status: 502 });
       }
       if (!result || result.pathname !== pathname) {
         throw Object.assign(new Error("pathname_rewritten"), { status: 500 });
@@ -41,7 +55,7 @@ export function officialBlobStore() {
       return { pathname: result.pathname };
     },
     async read(pathname) {
-      const result = await get(pathname, { access: "private", useCache: false });
+      const result = await get(pathname, { ...auth, access: "private", useCache: false });
       if (!result || result.statusCode !== 200 || !result.stream) return null;
       const reader = result.stream.getReader();
       const chunks = [];

@@ -3,11 +3,12 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { ATOMIC_CREATE } from "../lib/blob-store.js";
+import { ATOMIC_CREATE, officialBlobStore } from "../lib/blob-store.js";
 import { canonical, sha256Hex } from "../lib/contract.js";
 import { handle } from "../lib/handler.js";
+import { FUNCTION_PATH, PUBLIC_PATH, matchJudgmentRoute } from "../lib/route.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALL = "inst-local-1";
@@ -234,4 +235,141 @@ test("gateway sources do not import the trading programs", async () => {
     assert.equal(text.includes("prefilter"), false, file);
     assert.equal(text.includes("BLOB_READ_WRITE_TOKEN="), false, file);
   }
+});
+
+function mockRes() {
+  return {
+    statusCode: 0,
+    payload: null,
+    setHeader() {},
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.payload = body;
+    },
+  };
+}
+
+test("function entry imports and both urls reach the same ids", async () => {
+  const entryPath = path.join(ROOT, "api/v1/installations/[installationId]/judgments/[eventId].js");
+  const source = await readFile(entryPath, "utf8");
+  assert.match(source, /from "\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/lib\//);
+  assert.doesNotMatch(source, /\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\//);
+  assert.equal(path.resolve(path.dirname(entryPath), "../../../../../lib/handler.js"), path.join(ROOT, "lib/handler.js"));
+  const loaded = await import(pathToFileURL(entryPath).href);
+  assert.equal(typeof loaded.default, "function");
+  assert.equal(typeof loaded.judgmentRoute, "function");
+  const config = JSON.parse(await readFile(path.join(ROOT, "vercel.json"), "utf8"));
+  assert.equal(config.rewrites[0].source, PUBLIC_PATH);
+  assert.equal(config.rewrites[0].destination, FUNCTION_PATH);
+  const event = `c-${"ab".repeat(16)}`;
+  for (const prefix of ["", "/api"]) {
+    const matched = matchJudgmentRoute(`${prefix}/v1/installations/${INSTALL}/judgments/${event}`);
+    assert.equal(matched.installationId, INSTALL);
+    assert.equal(matched.eventId, event);
+    const res = mockRes();
+    const store = memoryStore();
+    await loaded.judgmentRoute({
+      method: "GET",
+      url: `${prefix}/v1/installations/${INSTALL}/judgments/${event}`,
+      query: {},
+      headers: { authorization: auth("reader") },
+    }, res, { store, credentials, now: NOW });
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.payload.reason, "not_found");
+  }
+});
+
+test("store failures stay redacted on get and conflict readback", async () => {
+  const exploding = memoryStore();
+  exploding.read = async () => {
+    throw new Error("SYNTHETIC_SECRET_MARKER");
+  };
+  const missing = await handle({
+    method: "GET",
+    installationId: INSTALL,
+    eventId: EVENT,
+    authorization: auth("reader"),
+    credentials,
+    now: NOW,
+    store: exploding,
+  });
+  assert.equal(missing.status, 502);
+  assert.equal(JSON.stringify(missing), '{"status":502,"headers":{"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"},"body":{"reason":"store_failed"}}');
+  const conflict = memoryStore();
+  conflict.create = async () => {
+    throw Object.assign(new Error("Vercel Blob: This blob already exists"), { status: 409 });
+  };
+  conflict.read = exploding.read;
+  const denied = await put(conflict);
+  assert.equal(denied.status, 502);
+  assert.equal(denied.body.reason, "store_failed");
+  assert.equal(JSON.stringify(denied).includes("SYNTHETIC_SECRET_MARKER"), false);
+});
+
+test("get and conflict readback reject unbound or non finite objects", async () => {
+  const cases = [
+    Buffer.from('{"x":1e309}'),
+    Buffer.from(JSON.stringify({ ...document(), installation_id: "other-inst" })),
+    Buffer.from(JSON.stringify({ ...document(), event_id: "c-" + "cd".repeat(16) })),
+  ];
+  for (const raw of cases) {
+    const store = memoryStore();
+    store.read = async () => raw;
+    const got = await handle({
+      method: "GET",
+      installationId: INSTALL,
+      eventId: EVENT,
+      authorization: auth("reader"),
+      credentials,
+      now: NOW,
+      store,
+    });
+    assert.notEqual(got.status, 200);
+    assert.equal(got.body.reason, "store_failed");
+    const racing = memoryStore();
+    racing.create = async () => {
+      throw Object.assign(new Error("Vercel Blob: This blob already exists"), { status: 409 });
+    };
+    racing.read = async () => raw;
+    const again = await put(racing);
+    assert.notEqual(again.status, 200);
+    assert.equal(again.body.reason, "store_failed");
+    assert.equal(JSON.stringify(again).includes("1e309"), false);
+  }
+});
+
+test("oidc prerequisites do not fall back to a store token", async () => {
+  const source = await readFile(path.join(ROOT, "lib/blob-store.js"), "utf8");
+  assert.equal(source.includes("BLOB_READ_WRITE_TOKEN"), false);
+  const previous = process.env.BLOB_READ_WRITE_TOKEN;
+  const previousStore = process.env.BLOB_STORE_ID;
+  const previousOidc = process.env.VERCEL_OIDC_TOKEN;
+  process.env.BLOB_READ_WRITE_TOKEN = "SYNTHETIC_SECRET_MARKER";
+  delete process.env.BLOB_STORE_ID;
+  delete process.env.VERCEL_OIDC_TOKEN;
+  try {
+    await assert.rejects(officialBlobStore().create("returns/a/b.json", Buffer.from("{}")), (error) => {
+      assert.equal(error.message, "blob_auth_unconfigured");
+      assert.equal(JSON.stringify(error.message).includes("SYNTHETIC_SECRET_MARKER"), false);
+      return true;
+    });
+  } finally {
+    if (previous === undefined) delete process.env.BLOB_READ_WRITE_TOKEN;
+    else process.env.BLOB_READ_WRITE_TOKEN = previous;
+    if (previousStore === undefined) delete process.env.BLOB_STORE_ID;
+    else process.env.BLOB_STORE_ID = previousStore;
+    if (previousOidc === undefined) delete process.env.VERCEL_OIDC_TOKEN;
+    else process.env.VERCEL_OIDC_TOKEN = previousOidc;
+  }
+});
+
+test("zod override stays on the patched release", async () => {
+  const lock = JSON.parse(await readFile(path.join(ROOT, "package-lock.json"), "utf8"));
+  const zod = lock.packages["node_modules/zod"];
+  assert.ok(zod);
+  const parts = zod.version.split(".").map(Number);
+  assert.ok(parts[0] > 4 || (parts[0] === 4 && (parts[1] > 6 || (parts[1] === 6 && parts[2] >= 6))));
 });

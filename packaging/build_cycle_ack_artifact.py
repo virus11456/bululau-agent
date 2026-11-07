@@ -60,6 +60,7 @@ FILES = (
     "gateway/lib/auth.js",
     "gateway/lib/blob-store.js",
     "gateway/lib/handler.js",
+    "gateway/lib/route.js",
     "gateway/api/v1/installations/[installationId]/judgments/[eventId].js",
     "gateway/test/handler.test.js",
     "docs/mac_box_wiring.md",
@@ -79,6 +80,9 @@ def build(out_dir):
         shutil.copy(ROOT / name, dest)
     (bundle / "README.md").write_text((ROOT / "packaging/cycle_ack_bundle_readme.md").read_text(encoding="utf-8"), encoding="utf-8")
     (bundle / "COMMIT").write_text(commit + "\n", encoding="utf-8")
+    verified = bundle / "gateway" / "VERIFIED_COMMIT"
+    if verified.parent.is_dir():
+        verified.write_text(commit + "\n", encoding="utf-8")
     lines = []
     for path in sorted(bundle.rglob("*")):
         if path.is_file() and path.name != "MANIFEST.sha256":

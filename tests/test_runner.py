@@ -229,6 +229,7 @@ class RunnerChainTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             plist = Path(dest, "bululau-cycle-shadow.plist").read_text(encoding="utf-8")
             self.assertIn("<key>Disabled</key><true/>", plist)
+            self.assertIn("<key>StartInterval</key><integer>3600</integer>", plist)
             self.assertIn("<key>RunAtLoad</key><false/>", plist)
             self.assertNotIn("--live", plist)
             self.assertNotIn("sender_setup", plist)

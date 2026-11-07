@@ -4,6 +4,8 @@
 
 實盤與撈資料都留在 Mac。box 只做開發、測試、協調和受控判斷。交易金鑰、`state.json` 與資料目錄不搬到 box。box 不跑 scanner，也不打幣安。GM 轉述 box 的公開 fapi time 是 HTTP 451；這裡沒有重測，也不繞過。Mac 到 box 的自動傳送還沒有接上。`verify-same-store` 的邏輯 ID 在複製目錄後仍會相同，不是原來的磁碟。ACK 要在原來的 Mac producer 目錄 apply，再從那個目錄讀回。
 
+新機會掃描預設 3600 秒。`role=mac` 小於 3600 會拒絕，部署不會調回 15 分鐘。60 秒舊 watch 不改。可信的零倉零單不跑持倉保護 AI；有候選仍要新倉審核；查詢未知不當空倉。持倉的即時 AI 事件路徑還沒有。細節在 [mac_box_wiring.md](mac_box_wiring.md)。
+
 ## 通知與上下文分開
 
 八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 producer 狀態目錄的 `envelopes/<event_id>.json`。發布時先寫暫存檔並 fsync，再在同一把 `envelopes/publish.lock` 裡用 hard link 掛上最終檔名，並在這把鎖裡重讀 outbox、寫入 `envelope_sha256`。hard link 不會覆蓋已存在的檔。同事件不同內容只有先發布的那一份成功，另一份回 `immutable_conflict`。同內容再跑一次是冪等。不同事件都會留下。行程被殺掉時，這把鎖由作業系統釋放，不會死鎖。這不是斷電測試。

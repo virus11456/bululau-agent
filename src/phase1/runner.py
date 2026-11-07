@@ -19,6 +19,7 @@ from .cycle import run_cycle
 from .session import Store, refuse_foreign_state_dir
 
 MARKER = "bululau-cycle-shadow\n"
+HOURLY_SCAN_SECONDS = 3600
 TPE = timezone(timedelta(hours=8))
 WAKE_SCHEMA = 1
 REFUSED_BASES = ("sender_setup.py",)
@@ -37,6 +38,38 @@ def _refused_command(argv):
         if part == "--live" or base in ("live_trader.py",) or base in REFUSED_BASES or "sender_setup" in base:
             return "refused_unverified_live_command"
     return None
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def mac_commands(python):
+    """Mac 週期只跑公開掃描與只讀三查詢。不啟動 manage，舊 watch 維持原程式。"""
+    if not _plain(python):
+        raise ValueError("malformed_command")
+    prefilter = PACKAGE_ROOT / "src" / "prefilter.py"
+    if not prefilter.is_file() or prefilter.is_symlink():
+        raise ValueError("quantboy_scripts_missing")
+    return {
+        "scanner": [python, str(prefilter), "--quiet", "--nolog"],
+        "manage": None,
+        "status": [python, "-m", "src.phase1.account_status"],
+    }
+
+
+def scanner_env(cycle_dir):
+    """掃描日誌不得寫進舊的 ~/quantboy-live。"""
+    from .legacy_root import legacy_home_path
+    env = os.environ.copy()
+    live = legacy_home_path()
+    current = env.get("QUANTBOY_DATA_DIR")
+    redirect = not current
+    if current:
+        real = os.path.realpath(os.path.expanduser(current))
+        redirect = real == live or real.startswith(live + os.sep)
+    if redirect:
+        env["QUANTBOY_DATA_DIR"] = os.path.join(str(cycle_dir), "scanner-cache")
+    return env
 
 
 def production_argv(root, python):
@@ -77,16 +110,31 @@ def _load_config(path):
     timeout = loaded.get("timeout_seconds", 20)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 120:
         raise ValueError("malformed_config")
-    interval = _interval(loaded.get("interval_seconds", 900))
+    role = loaded.get("role", "package")
+    interval = _interval(loaded.get("interval_seconds", HOURLY_SCAN_SECONDS))
+    if role == "mac" and interval < HOURLY_SCAN_SECONDS:
+        raise ValueError("scan_interval_too_fast")
     notifier = _notifier_config(loaded.get("notifier"))
+    if role not in ("package", "mac"):
+        raise ValueError("malformed_config")
+    if role == "mac" and mode != "production":
+        raise ValueError("mac_requires_production")
     if mode == "production":
         if any(name in loaded for name in ("scanner", "manage", "status")):
             raise ValueError("arbitrary_command")
-        from .legacy_root import check_legacy_install, production_block_reason
-        blocked = production_block_reason(check_legacy_install(loaded.get("quantboy_root") or ""))
-        if blocked:
-            raise ValueError(blocked)
-        commands = production_argv(loaded.get("quantboy_root"), loaded.get("python") or "python3")
+        if role == "mac":
+            root = loaded.get("quantboy_root")
+            if root:
+                from .legacy_root import check_legacy_install
+                if not check_legacy_install(root)["path_is_legacy_home"]:
+                    raise ValueError("unknown_path")
+            commands = mac_commands(loaded.get("python") or "python3")
+        else:
+            from .legacy_root import check_legacy_install, production_block_reason
+            blocked = production_block_reason(check_legacy_install(loaded.get("quantboy_root") or ""))
+            if blocked:
+                raise ValueError(blocked)
+            commands = production_argv(loaded.get("quantboy_root"), loaded.get("python") or "python3")
     else:
         commands = {}
         for name in ("scanner", "manage", "status"):
@@ -101,6 +149,7 @@ def _load_config(path):
         "interval_seconds": interval,
         "notifier": notifier,
         "quantboy_root": loaded.get("quantboy_root"),
+        "role": role,
     }
 
 
@@ -119,9 +168,9 @@ def _notifier_config(value):
     return {"verified": True, "argv": value["argv"]}
 
 
-def _spawn(argv, timeout, payload=None):
+def _spawn(argv, timeout, payload=None, env=None, cwd=None):
     try:
-        proc = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=timeout, shell=False)
+        proc = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=timeout, shell=False, env=env, cwd=cwd)
     except subprocess.TimeoutExpired:
         return "", "", None, "timeout"
     except OSError:
@@ -277,10 +326,16 @@ def run_configured(store, config, *, now, scan_id):
     timeout = config["timeout_seconds"]
     commands = config["commands"]
     if config["mode"] == "production":
-        scan_text, _scan_err, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
-        manage_text, _manage_err, manage_code, manage_fault = _spawn(commands["manage"], timeout)
-        status_text, status_err, status_code, status_fault = _spawn(commands["status"], timeout)
-        del manage_text
+        scan_env = scanner_env(store.root) if config.get("role") == "mac" else None
+        scan_cwd = str(PACKAGE_ROOT) if config.get("role") == "mac" else None
+        scan_text, _scan_err, scan_code, scan_fault = _spawn(commands["scanner"], timeout, env=scan_env, cwd=scan_cwd)
+        if commands.get("manage") is None:
+            manage_code, manage_fault = 0, None
+            manage_ran = False
+        else:
+            _manage_text, _manage_err, manage_code, manage_fault = _spawn(commands["manage"], timeout)
+            manage_ran = True
+        status_text, status_err, status_code, status_fault = _spawn(commands["status"], timeout, cwd=scan_cwd)
         prefilter = adapt_prefilter(scan_text, scan_code, scan_fault)
         snapshot = adapt_status_json(status_text, status_err, status_code, status_fault, manage_code, manage_fault)
         manage_exit = 0 if manage_fault is None and manage_code == 0 else 1
@@ -289,9 +344,10 @@ def run_configured(store, config, *, now, scan_id):
             "manage": manage_fault or (None if manage_code == 0 else "exit_{0}".format(manage_code)),
             "status": status_fault or (None if status_code == 0 else "exit_{0}".format(status_code)),
         }
-        executed = True
+        executed = config.get("role") != "mac"
         mode = "production"
     else:
+        manage_ran = True
         scan_text, _scan_err, scan_code, scan_fault = _spawn(commands["scanner"], timeout)
         manage_text, _manage_err, manage_code, manage_fault = _spawn(commands["manage"], timeout)
         status_text, _status_err, status_code, status_fault = _spawn(commands["status"], timeout)
@@ -342,6 +398,19 @@ def run_configured(store, config, *, now, scan_id):
     decision["processing_ack"] = False
     decision["limit_older_than_2h_implemented"] = False
     decision["command_errors"] = command_errors
+    decision["manage_ran"] = manage_ran
+    decision["watch_unchanged"] = config.get("role") == "mac"
+    decision["live_connected"] = False
+    decision["post_authorized"] = False
+    decision["status_from_state_snapshot"] = False
+    decision["scan_interval_seconds"] = config.get("interval_seconds")
+    decision["opportunity_scan"] = "hourly"
+    decision["position_ai_event_path"] = "not_implemented"
+    decision["hard_watch_seconds"] = 60
+    decision["hard_watch_modified"] = False
+    decision["protection_ai_skipped"] = decision.get("reason") == "quiet_flat_book"
+    decision["new_entry_ai"] = bool(decision.get("candidate_fingerprints"))
+    decision["unknown_treated_as_flat"] = False
     if decision.get("event_id") and decision.get("evaluation_id"):
         from .autoscan import freshness as freshness_of
         from .production_transport import bind_envelope, build_envelope
@@ -359,7 +428,11 @@ def run_configured(store, config, *, now, scan_id):
             "mode", "ready", "switch_allowed", "executed_live", "account_verified", "routine_stopped",
             "formal_channel", "old_ai_poll", "ai_suggestion", "cycle_needs_ai", "reason",
             "protection_complete", "scan_blocked", "evaluation_id", "event_id", "delivered",
-            "processing_ack", "command_errors",
+            "processing_ack", "command_errors", "manage_ran", "watch_unchanged",
+            "live_connected", "post_authorized", "status_from_state_snapshot",
+            "scan_interval_seconds", "opportunity_scan", "position_ai_event_path",
+            "hard_watch_seconds", "hard_watch_modified", "protection_ai_skipped",
+            "new_entry_ai", "unknown_treated_as_flat",
         )
     })
     return decision
@@ -369,10 +442,12 @@ def install_schedule(dest, state_dir, repo, python, config_path=None):
     if _unsafe_schedule_dest(dest):
         raise ValueError("refused_schedule_dest")
     refuse_foreign_state_dir(state_dir)
-    interval = 900
+    interval = HOURLY_SCAN_SECONDS
     command = [python, "-m", "src.phase1.runner", "run", "--state-dir", state_dir, "--config", config_path or os.path.join(state_dir, "runner.json"), "--shadow"]
     if config_path:
         loaded = _load_config(config_path)
+        if loaded.get("role") == "mac":
+            raise ValueError("mac_schedule_not_installed")
         interval = loaded["interval_seconds"]
         if loaded["mode"] == "production":
             command = command[:-1]
@@ -548,6 +623,14 @@ def check_config(config_path, state_dir=None):
         "routine_stopped": False,
         "spawned": False,
         "quantboy_root": loaded.get("quantboy_root"),
+        "role": loaded.get("role"),
+        "scan_interval_seconds": loaded["interval_seconds"],
+        "opportunity_scan": "hourly",
+        "position_ai_event_path": "not_implemented",
+        "hard_watch_seconds": 60,
+        "hard_watch_modified": False,
+        "live_connected": False,
+        "post_authorized": False,
     }
 
 
@@ -582,7 +665,11 @@ def _emit(decision, code):
             "formal_channel", "old_ai_poll", "ai_suggestion", "cycle_needs_ai", "reason",
             "protection_complete", "scan_blocked", "evaluation_id", "event_id", "delivered",
             "processing_ack", "registered", "command_errors", "spawned", "notifier_verified",
-            "interval_seconds", "runnable",
+            "interval_seconds", "runnable", "manage_ran", "watch_unchanged",
+            "live_connected", "post_authorized", "status_from_state_snapshot",
+            "scan_interval_seconds", "opportunity_scan", "position_ai_event_path",
+            "hard_watch_seconds", "hard_watch_modified", "protection_ai_skipped",
+            "new_entry_ai", "unknown_treated_as_flat",
         )
     }
     print(json.dumps(shown, ensure_ascii=False))

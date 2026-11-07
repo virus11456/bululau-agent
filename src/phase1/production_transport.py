@@ -399,6 +399,41 @@ def verify_context(document, now):
     }
 
 
+def prepare_handoff(state_dir, event_id, evaluation_id, dest):
+    """寫出要交給 box 的上下文清單。不 POST，不代寫判斷。"""
+    export_context(state_dir, event_id, evaluation_id, dest)
+    manifest = {
+        "schema_version": 1,
+        "event_type": "mac_box_handoff",
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+        "context_file": os.path.basename(dest),
+        "transport_implemented": False,
+        "post_authorized": False,
+        "proposed_post_budget": {"new_ids": 1, "max_posts": 2, "approved": False},
+        "prior_budget_exhausted": {"ids": 2, "posts": 3},
+        "box_runs_scanner": False,
+        "box_calls_binance": False,
+        "program_fills_judgment": False,
+        "judgment_path_on_return": "judgments/{0}.json".format(event_id),
+        "apply_host": "mac_producer",
+        "physical_store_proven": False,
+        "replacement_allowed": False,
+        "scan_interval_seconds": 3600,
+        "scan_interval_reverts_to_15m": False,
+    }
+    side = os.path.splitext(dest)[0] + ".handoff.json"
+    raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(side, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(raw)
+        handle.write(b"\n")
+    return manifest, side
+
+
 def verify_same_store(state_dir, document):
     """只比對可被整份複製的邏輯 ID。不是原來那塊磁碟的證明。"""
     refuse_foreign_state_dir(state_dir)
@@ -616,6 +651,14 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
             print(json.dumps({"exported": False, "automatic_transport": False, "reason": str(exc)}, ensure_ascii=False))
             return 1
         print(json.dumps({"exported": True, "automatic_transport": False, "ai_execution_proven": False}, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["prepare-handoff"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--out" in found:
+        try:
+            manifest, _side = prepare_handoff(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"])
+        except ValueError as exc:
+            print(json.dumps({"exported": False, "post_authorized": False, "transport_implemented": False, "reason": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps(manifest, ensure_ascii=False))
         return 0
     if argv[:1] == ["verify-context"] and found and "--file" in found and "--now" in found:
         try:

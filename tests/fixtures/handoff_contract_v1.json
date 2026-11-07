@@ -1,0 +1,587 @@
+{
+  "schema_version": "handoff-contract-v1",
+  "data_class": "全部數字均為合成測試資料；不是行情或績效。",
+  "scope": "通用契約fixture；未執行repo回測或產品測試",
+  "target_cloud_agent": "bc-06874210-430f-5740-b8ff-eb34b3ce515c",
+  "cases": [
+    {
+      "id": "T01",
+      "area": "瘸師弟",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "position_qty": "10",
+        "initial_risk_quote": "100",
+        "observed_R": "1.5"
+      },
+      "events": [
+        "threshold_reached",
+        "repeat_tick"
+      ],
+      "expect": {
+        "close_target_qty": "10",
+        "logical_exit_intents": 1,
+        "reduce_only": true
+      }
+    },
+    {
+      "id": "T02",
+      "area": "布鹿流",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "position_qty": "10",
+        "observed_R": "1.5",
+        "half_exit_done": false
+      },
+      "events": [
+        "threshold_reached",
+        "fill_qty_5",
+        "restart",
+        "repeat_tick"
+      ],
+      "expect": {
+        "total_half_exit_filled_qty": "5",
+        "remaining_qty": "5",
+        "half_exit_done": true,
+        "new_half_exit_intents_after_restart": 0
+      }
+    },
+    {
+      "id": "T03",
+      "area": "部分成交",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "position_qty": "10",
+        "half_exit_target_qty": "5"
+      },
+      "events": [
+        "submit_exit_5",
+        "fill_2",
+        "timeout",
+        "restart",
+        "reconcile_order_open_remaining_3",
+        "fill_3"
+      ],
+      "expect": {
+        "logical_exit_intents": 1,
+        "total_exit_fills": "5",
+        "new_order_while_existing_unresolved": false,
+        "protection_qty_after_first_fill": "8",
+        "protection_qty_after_final_fill": "5"
+      }
+    },
+    {
+      "id": "T04",
+      "area": "保本移損",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "actual_position_qty": "5",
+        "old_protection": "old",
+        "new_price": "101"
+      },
+      "events": [
+        "submit_new_protection_qty_5",
+        "exchange_ack_and_query_valid",
+        "cancel_old"
+      ],
+      "expect": {
+        "required_order": [
+          "new_confirmed",
+          "old_cancel"
+        ],
+        "protected_qty": "5",
+        "new_price_is_strategy_default": false
+      }
+    },
+    {
+      "id": "T05",
+      "area": "保護失敗",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "actual_position_qty": "5",
+        "old_protection": "old"
+      },
+      "events": [
+        "new_protection_rejected"
+      ],
+      "expect": {
+        "old_cancel_allowed": false,
+        "status": "blocked",
+        "alert_required": true
+      }
+    },
+    {
+      "id": "T06",
+      "area": "watch墓碑",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "strategy": "布鹿流",
+        "cancelled_ladder": [
+          "2R"
+        ],
+        "persistent_tombstone": true
+      },
+      "events": [
+        "watch_tick",
+        "restart",
+        "watch_tick"
+      ],
+      "expect": {
+        "recreate_2R_count": 0
+      }
+    },
+    {
+      "id": "T07",
+      "area": "孤兒單",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "order": "orphan_candidate",
+        "position_query": "unknown",
+        "open_orders_query": "ok",
+        "lock_acquired": true
+      },
+      "events": [
+        "attempt_cancel"
+      ],
+      "expect": {
+        "cancel_count": 0,
+        "status": "blocked"
+      }
+    },
+    {
+      "id": "T08",
+      "area": "孤兒單",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "position_qty": "0",
+        "open_orders": [
+          "owned_orphan",
+          "foreign_order"
+        ],
+        "lock_acquired": true,
+        "recheck_same_generation": true
+      },
+      "events": [
+        "reconcile",
+        "cancel_owned_orphan"
+      ],
+      "expect": {
+        "cancel_targets": [
+          "owned_orphan"
+        ],
+        "foreign_cancel_count": 0
+      }
+    },
+    {
+      "id": "T09",
+      "area": "併發鎖",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "workers": [
+          "A",
+          "B"
+        ],
+        "position_qty": "10"
+      },
+      "events": [
+        "A_acquires_lock",
+        "B_lock_denied",
+        "A_submits",
+        "B_restarts_and_reconciles"
+      ],
+      "expect": {
+        "logical_exit_intents": 1,
+        "B_submit_before_reconcile": false
+      }
+    },
+    {
+      "id": "T10",
+      "area": "timeout已受理",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "client_intent_id": "synthetic-exit-A"
+      },
+      "events": [
+        "submit",
+        "exchange_accepts",
+        "response_timeout",
+        "query_by_persistent_identity_finds_order",
+        "restart"
+      ],
+      "expect": {
+        "logical_exit_intents": 1,
+        "blind_resubmit_count": 0
+      }
+    },
+    {
+      "id": "T11",
+      "area": "受理未知",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "client_intent_id": "synthetic-exit-B"
+      },
+      "events": [
+        "submit_timeout",
+        "query_timeout",
+        "rate_limit",
+        "restart"
+      ],
+      "expect": {
+        "new_identity_submit_count": 0,
+        "status": "reconcile_pending",
+        "existing_protection_retained": true
+      }
+    },
+    {
+      "id": "T12",
+      "area": "精度",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "actual_qty": "0.007",
+        "requested_exit_qty": "0.0035",
+        "qty_step": "0.001",
+        "min_qty": "0.001"
+      },
+      "events": [
+        "normalize_quantity"
+      ],
+      "expect": {
+        "max_exit_qty": "0.003",
+        "rounding": "down",
+        "remainder_reported": true,
+        "never_exceed_actual": true
+      }
+    },
+    {
+      "id": "T13",
+      "area": "最小量",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "requested_exit_qty": "0.0005",
+        "qty_step": "0.001",
+        "min_qty": "0.001"
+      },
+      "events": [
+        "normalize_quantity"
+      ],
+      "expect": {
+        "submit_count": 0,
+        "status": "blocked",
+        "reason": "below_minimum_no_round_up"
+      }
+    },
+    {
+      "id": "T14",
+      "area": "限流與API失敗",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "intent": "synthetic-protect-A"
+      },
+      "events": [
+        "429",
+        "5xx",
+        "disconnect",
+        "restart",
+        "reconcile"
+      ],
+      "expect": {
+        "bounded_backoff_required": true,
+        "respect_documented_retry_after": true,
+        "blind_duplicate_count": 0,
+        "unknown_acceptance_blocks_new_intent": true
+      }
+    },
+    {
+      "id": "T15",
+      "area": "摘要",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "instrument": "synthetic_linear_quote_settled",
+        "side": "long",
+        "entry_fills": [
+          {
+            "qty": "10",
+            "price": "100",
+            "fee_quote": "1"
+          }
+        ],
+        "exit_fills": [
+          {
+            "qty": "5",
+            "price": "115",
+            "fee_quote": "0.5"
+          },
+          {
+            "qty": "5",
+            "price": "120",
+            "fee_quote": "0.5"
+          }
+        ],
+        "initial_risk_quote": "100",
+        "planned_exit_price": "114"
+      },
+      "events": [
+        "aggregate_actual_fills"
+      ],
+      "expect": {
+        "gross_pnl_quote": "175",
+        "fee_quote": "2",
+        "net_pnl_quote": "173",
+        "net_R": "1.73",
+        "exit_vwap": "117.5",
+        "adverse_slippage_quote": "-35",
+        "slippage_sign": "positive_is_adverse"
+      }
+    },
+    {
+      "id": "T16",
+      "area": "摘要缺值",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "fills": [
+          {
+            "qty": "1",
+            "price": "100",
+            "fee_asset": "SYNTH",
+            "fee_amount": "0.01"
+          }
+        ],
+        "fee_fx": null,
+        "planned_price": null,
+        "initial_risk_quote": null
+      },
+      "events": [
+        "summarize"
+      ],
+      "expect": {
+        "net_pnl_quote": null,
+        "net_R": null,
+        "slippage": null,
+        "display": "未取得",
+        "must_not_estimate_as_actual": true
+      }
+    },
+    {
+      "id": "T17",
+      "area": "未成交",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "submitted_qty": "5",
+        "fills": []
+      },
+      "events": [
+        "summarize"
+      ],
+      "expect": {
+        "realized_trade_count": 0,
+        "realized_pnl": null,
+        "display": "未取得"
+      }
+    },
+    {
+      "id": "T18",
+      "area": "未定策略",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "daily_ma_period": null,
+        "v_reversal_no_reclaim_exit": null,
+        "fixed_R_small_senior": null
+      },
+      "events": [
+        "evaluate_strategy_gate"
+      ],
+      "expect": {
+        "status": "blocked",
+        "automatic_pass": false
+      }
+    },
+    {
+      "id": "T19",
+      "area": "無AI保護",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "ai_available": false,
+        "valid_exchange_protection": true
+      },
+      "events": [
+        "AI_offline",
+        "local_monitor_restart"
+      ],
+      "expect": {
+        "exchange_protection_still_active": true,
+        "AI_required_for_protection": false
+      }
+    },
+    {
+      "id": "A01",
+      "area": "空快照",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "previous_candidates": [
+          "old"
+        ],
+        "scan_interval_seconds": 900
+      },
+      "events": [
+        "scan_returns_empty",
+        "atomic_replace_snapshot"
+      ],
+      "expect": {
+        "candidates": [],
+        "AI_wake_count": 0,
+        "old_candidates_retained": false
+      }
+    },
+    {
+      "id": "A02",
+      "area": "新鮮度",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "max_age_seconds": 900
+      },
+      "events": [
+        "consume_age_899",
+        "consume_age_900",
+        "consume_age_901",
+        "consume_negative_age"
+      ],
+      "expect": {
+        "valid": [
+          true,
+          true,
+          false,
+          false
+        ],
+        "negative_age": "blocked_clock_skew",
+        "age_basis": "scan_completed_at"
+      }
+    },
+    {
+      "id": "A03",
+      "area": "指紋",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "symbol": "SYNTHUSDT",
+        "setup": "synthetic-setup",
+        "bar_time": "2026-11-07T09:00:00+08:00",
+        "ladder": [
+          {
+            "level": "L1",
+            "price": "100",
+            "qty": "1"
+          }
+        ]
+      },
+      "events": [
+        "same_canonical_payload_twice",
+        "change_ladder_price",
+        "change_bar_time"
+      ],
+      "expect": {
+        "same_payload_same_fingerprint": true,
+        "ladder_change_new_fingerprint": true,
+        "bar_change_new_fingerprint": true
+      }
+    },
+    {
+      "id": "A04",
+      "area": "通知失敗與重啟",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "outbox": [
+          "fp-A"
+        ],
+        "notify": true
+      },
+      "events": [
+        "send_fails",
+        "next_snapshot_notify_false",
+        "producer_restart",
+        "retry",
+        "consumer_durable_inbox",
+        "process",
+        "ack"
+      ],
+      "expect": {
+        "lost_candidates": 0,
+        "logical_process_count": 1,
+        "pending_until_processing_ack": true
+      }
+    },
+    {
+      "id": "A05",
+      "area": "重複與ack遺失",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "fingerprint": "fp-A"
+      },
+      "events": [
+        "receive",
+        "persist_inbox",
+        "process_commit",
+        "ack_lost",
+        "duplicate_delivery",
+        "consumer_restart",
+        "duplicate_delivery"
+      ],
+      "expect": {
+        "logical_process_count": 1,
+        "ack_reissued": true,
+        "inbox_unique_key": "fingerprint"
+      }
+    },
+    {
+      "id": "A06",
+      "area": "過期排隊事件",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "fingerprint": "fp-A",
+        "candidate_age_seconds": 901
+      },
+      "events": [
+        "receive_delayed_event"
+      ],
+      "expect": {
+        "evaluation_count": 0,
+        "terminal_ack_status": "stale",
+        "new_fresh_scan_required": true
+      }
+    },
+    {
+      "id": "A07",
+      "area": "消費中崩潰",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "fingerprint": "fp-B"
+      },
+      "events": [
+        "persist_inbox",
+        "claim_lease",
+        "crash_before_commit",
+        "lease_expires",
+        "resume_with_same_evaluation_identity"
+      ],
+      "expect": {
+        "lost_candidates": 0,
+        "logical_commit_count": 1,
+        "side_effect_idempotency_required": true
+      }
+    },
+    {
+      "id": "A08",
+      "area": "跨主機入口",
+      "data_class": "synthetic_test_only_not_market_or_performance",
+      "given": {
+        "snapshot_path": "local_only",
+        "verified_transport": null
+      },
+      "events": [
+        "webhook_wakes_bot_without_snapshot_access"
+      ],
+      "expect": {
+        "status": "blocked",
+        "evaluate_count": 0,
+        "reason": "must_verify_allowlisted_payload_or_supported_snapshot_transport"
+      }
+    }
+  ]
+}

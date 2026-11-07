@@ -21,6 +21,7 @@ FILES = (
     "src/phase1/manage_job.py",
     "src/phase1/qty.py",
     "src/phase1/summary.py",
+    "tests/__init__.py",
     "tests/test_cycle_ack.py",
     "tests/test_cycle.py",
     "tests/test_wake_gate.py",

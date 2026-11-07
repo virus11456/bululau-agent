@@ -718,6 +718,8 @@ def main(argv):
         return _deploy_check_main(argv[1:])
     if argv[:1] == ["review-round"]:
         return _review_round_main(argv[1:])
+    if argv[:1] == ["orchestrate"]:
+        return _orchestrate_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -827,6 +829,46 @@ def _now_ms(text):
     if moment.tzinfo is None:
         raise ValueError("clock_invalid")
     return int(moment.timestamp() * 1000)
+
+
+def _orchestrate_main(argv):
+    """未啟用的 1800 秒入口。不執行 manage --live，不注入平台 AI。"""
+    from .orchestrator import load_orchestrator_config, run_orchestrator
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "config" not in found or "now" not in found or "scan_id" not in found:
+        print(json.dumps({
+            "enabled": False, "manage_executed": False, "wakes_saved": False, "reason": "orchestrator_disabled",
+        }, ensure_ascii=False))
+        return 2
+    try:
+        with open(found["config"], encoding="utf-8") as handle:
+            load_orchestrator_config(json.load(handle))
+        store = Store(found["state_dir"])
+        result = run_orchestrator(store, now=found["now"], scan_id=found["scan_id"])
+    except ValueError as exc:
+        print(json.dumps({
+            "enabled": False, "manage_executed": False, "platform_ai_executed": False,
+            "wakes_saved": False, "reason": str(exc),
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps({
+        "reason": result["reason"],
+        "quiet": result["quiet"],
+        "duplicate": result["duplicate"],
+        "order": result["order"],
+        "fallback_called": result["fallback_called"],
+        "orders_placed": False,
+        "platform_ai_executed": False,
+        "manage_executed": False,
+        "schedule_installed": False,
+        "routine_replaced": False,
+        "watch_modified": False,
+        "wakes_saved": False,
+        "http_sent": False,
+        "review_round_equivalent": False,
+        "gaps": result["gaps"],
+    }, ensure_ascii=False))
+    return 0
 
 
 def _review_round_main(argv):

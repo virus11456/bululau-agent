@@ -1,0 +1,20 @@
+{
+  "enabled": false,
+  "execute": false,
+  "execute_manage": false,
+  "live_callbacks": false,
+  "live_http": false,
+  "schedule_installed": false,
+  "replaces_routine": false,
+  "interval_seconds": 1800,
+  "watch_seconds": 60,
+  "watch_modified": false,
+  "open_live_enabled": false,
+  "gateway_enabled": false,
+  "notifier_verified": false,
+  "paper_program_modified": false,
+  "autoscan_orders_allowed": false,
+  "manage_argv": ["python3", "/Users/frank/quantboy-live/live_trader.py", "manage", "--live"],
+  "status_argv": ["python3", "/Users/frank/quantboy-live/live_trader.py", "status"],
+  "open_live_argv": ["python3", "/Users/frank/quantboy-live/live_trader.py", "open", "--live"]
+}

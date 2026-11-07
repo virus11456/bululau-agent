@@ -6,6 +6,10 @@ stdout：一個 JSON。結束碼：10＝有候選、要交給代理判斷；0＝
 """
 import sys, json, time, datetime, argparse, os
 from common import *
+try:
+    from phase1.timeparse import parse_instant
+except ImportError:
+    from src.phase1.timeparse import parse_instant
 
 AVOID = {"INITUSDT", "EWZUSDT"}                 # hacked / manual avoid list (edit filters below)
 MIN_QV = 5e6                         # 24h quote volume floor (liquidity)
@@ -148,7 +152,7 @@ def run(args):
     t0 = time.time()
     end = None
     if args.asof:
-        end = int(datetime.datetime.fromisoformat(args.asof).replace(tzinfo=TZ).timestamp() * 1000)
+        end = int(parse_instant(args.asof).replace(tzinfo=TZ).timestamp() * 1000)
     info = get("/fapi/v1/exchangeInfo")
     perps = {s["symbol"]: s for s in info["symbols"] if s.get("contractType") == "PERPETUAL" and s["quoteAsset"] == "USDT" and s["status"] == "TRADING"}
     tick = {t["symbol"]: t for t in get("/fapi/v1/ticker/24hr")}

@@ -28,12 +28,31 @@ SOURCE = textwrap.dedent("""\
             fcntl.flock(self.f, fcntl.LOCK_UN)
             self.f.close()
 
+    def load_state():
+        return json.load(open(STATE)) if os.path.exists(STATE) else {}
+    def save_state(s):
+        tmp = STATE + ".tmp"; json.dump(s, open(tmp, "w"), ensure_ascii=False, indent=1); os.replace(tmp, STATE)
+    def day_state(acc):
+        s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
+        if s.get("day") != today:
+            s = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
+                     halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+            save_state(s)
+        return s
+    def cmd_watch(a):
+        st = load_state(); pend = st.get("pending", {})
+        if not pend: return
+        cmd_manage(a)
     def main():
         with Lock():
             try:
                 {'status': 0, 'open': 0, 'manage': 0, 'watch': 0, 'flatten': 0}[cmd]()
             except BinanceError:
                 raise SystemExit('幣安錯誤')
+        open(HALT_FLAG, "w")
+        st.get("pending")
+        st.setdefault("meta", {})
+        if live: save_state(st)
     """)
 
 
@@ -54,10 +73,18 @@ class LegacyRootTest(unittest.TestCase):
             self.assertTrue(report["path_is_legacy_home"])
             self.assertTrue(report["bindings_match"])
             self.assertTrue(report["lock_protocol_match"])
+            self.assertTrue(report["state_interface_match"])
+            self.assertTrue(report["day_rollover_drops_pending"])
             self.assertFalse(report["known_sha_match"])
+            self.assertFalse(report["manage_command_authorized"])
+            self.assertIsNone(report["scanner_command"])
+            self.assertFalse(report["box_scanner"])
+            self.assertFalse(report["binance_from_box"])
+            self.assertFalse(report["transport_implemented"])
+            self.assertEqual(report["ack_apply_host"], "mac_producer")
             self.assertFalse(report["legacy_source_accepted"])
             self.assertEqual(report["reason"], "sha_mismatch")
-            self.assertFalse(report["state_schema_proven"])
+            self.assertTrue(report["state_schema_proven"])
             self.assertFalse(report["share_live_state"])
             self.assertFalse(report["manage_allowed"])
             self.assertFalse(report["flock_taken"])
@@ -115,6 +142,41 @@ class LegacyRootTest(unittest.TestCase):
             self.assertFalse(body["manage_allowed"])
             self.assertFalse(body["share_live_state"])
             self.assertFalse(body["package_data_shared"])
+
+    def test_snapshot_reads_without_writing_or_creating_data(self):
+        from src.phase1.legacy_snapshot import snapshot_file
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            missing = snapshot_file(os.path.join(tmp, "state.json"), "2026-11-07T07:21:55Z")
+            self.assertFalse(missing["ok"])
+            self.assertEqual(missing["reason"], "missing_state")
+            self.assertIsNone(missing["positions"])
+            self.assertEqual(missing["writes"], 0)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "data")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "state.json")))
+            path = os.path.join(tmp, "state.json")
+            payload = {
+                "day": "2026-11-06", "day_start_equity": 123.45, "slice_margin": 1,
+                "halted_new": False, "killed": False, "created": "2026-11-06T00:00:01+08:00",
+                "pending": {"ETHUSDT": {"orderId": 1, "stop": "1", "target": "2", "setup": "布鹿流"}},
+                "meta": {},
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            before = open(path, "rb").read()
+            report = snapshot_file(path, "2026-11-07T07:21:55Z")
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["day_rollover_due"])
+            self.assertTrue(report["day_rollover_drops_pending"])
+            self.assertEqual(report["pending_count"], 1)
+            self.assertIsNone(report["positions"])
+            self.assertFalse(report["status_trusted"])
+            self.assertFalse(report["account_queried"])
+            self.assertNotIn("day_start_equity", report)
+            self.assertNotIn("123.45", json.dumps(report))
+            self.assertEqual(open(path, "rb").read(), before)
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".lock")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "data")))
 
 
 if __name__ == "__main__":

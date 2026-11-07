@@ -5,6 +5,10 @@ import os, sys, json, time, hmac, hashlib, argparse, fcntl, urllib.request, urll
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from config import data_dir, events_path, load_api_keys
+try:
+    from phase1.timeparse import parse_instant
+except ImportError:
+    from src.phase1.timeparse import parse_instant
 
 BASE = "https://fapi.binance.com"
 HOME = data_dir()
@@ -184,7 +188,7 @@ def upcoming_event():
     if not os.path.exists(EVENTS): return None
     n = now_tpe(); w = timedelta(minutes=CFG["event_window_min"])
     for ev in json.load(open(EVENTS)):
-        t = datetime.fromisoformat(ev["time_tpe"])
+        t = parse_instant(ev["time_tpe"])
         if t.tzinfo is None: t = t.replace(tzinfo=TPE)
         if t - w <= n <= t + w: return ev
     return None

@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from .qty import try_decimal, dec_str
+from .timeparse import parse_instant
 
 TPE = timezone(timedelta(hours=8))
 MAX_AGE_SECONDS = 900
@@ -11,10 +12,7 @@ FINGERPRINT_VERSION = 1
 
 
 def parse_time(value):
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(str(value))
+    dt = parse_instant(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=TPE)
     return dt

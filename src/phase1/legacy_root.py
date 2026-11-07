@@ -18,6 +18,34 @@ BINDINGS = {
     "LOCK": "os.path.join(HOME,'.lock')",
 }
 DISPATCH = ("status", "open", "manage", "watch", "flatten")
+INTERFACE_SNIPPETS = (
+    'return json.load(open(STATE)) if os.path.exists(STATE) else {}',
+    'tmp = STATE + ".tmp"',
+    "os.replace(tmp, STATE)",
+    'if s.get("day") != today:',
+    's = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),',
+    "halted_new=False, killed=False, created=",
+    'st.get("pending"',
+    'st.setdefault("meta"',
+    "if live: save_state(st)",
+    "if not pend: return",
+    'open(HALT_FLAG, "w")',
+)
+CANNOT = (
+    "新套件的 data/ 不是舊 state",
+    "不改寫舊 manage 與 watch",
+    "此套件不啟動 manage --live",
+    "box 不跑 scanner、不打幣安",
+    "舊 main 沒有 status-json",
+    "邏輯 ID 不是原來的磁碟",
+    "自動跨機傳送還沒有接上",
+)
+ROLLBACK = (
+    "只刪版本化安裝目錄",
+    "不要刪 ~/quantboy-live",
+    "不要刪 state.json、.lock、events.json 或 HALT 旗標",
+    "不要動 com.quantboy.livewatch",
+)
 
 
 def legacy_home_path():
@@ -68,6 +96,11 @@ def bindings_match(text):
     if duplicated or set(found) != set(BINDINGS):
         return False
     return all(found[name] == _compact(BINDINGS[name]) for name in BINDINGS)
+
+
+def state_interface_match(text):
+    compact = _compact(text)
+    return all(_compact(snippet) in compact for snippet in INTERFACE_SNIPPETS)
 
 
 def lock_protocol_match(text):
@@ -131,8 +164,9 @@ def check_legacy_install(root, home=None):
         digest = _sha256(trader)
     matched_bindings = bool(text) and bindings_match(text)
     matched_lock = bool(text) and lock_protocol_match(text)
+    matched_interface = bool(text) and state_interface_match(text)
     sha_ok = digest == KNOWN_LIVE_FLAT_SHA
-    accepted = path_ok and matched_bindings and matched_lock and sha_ok
+    accepted = path_ok and matched_bindings and matched_lock and sha_ok and matched_interface
     if not path_ok:
         reason = "unknown_path"
     elif not sha_ok:
@@ -141,8 +175,10 @@ def check_legacy_install(root, home=None):
         reason = "bindings_mismatch"
     elif not matched_lock:
         reason = "lock_protocol_mismatch"
+    elif not matched_interface:
+        reason = "state_interface_mismatch"
     else:
-        reason = "state_schema_unproven"
+        reason = "existing_manage_not_spawned"
     files = {}
     for name in ("state.json", "events.json", ".lock", "HALT_REPORT_USER.flag"):
         files[name] = _kind(os.path.join(root_text, name)) if path_ok else {"kind": "not_checked", "errno": None, "error": None}
@@ -154,16 +190,30 @@ def check_legacy_install(root, home=None):
         "bindings_match": matched_bindings,
         "lock_protocol_match": matched_lock,
         "known_sha_match": sha_ok,
+        "state_interface_match": matched_interface,
         "legacy_source_accepted": accepted,
-        "state_schema_proven": False,
+        "day_rollover_drops_pending": matched_interface,
+        "state_schema_proven": matched_interface,
         "share_live_state": False,
         "manage_allowed": False,
+        "manage_command": ["python3", os.path.join(root_text, "live_trader.py"), "manage", "--live"] if text else None,
+        "manage_command_authorized": False,
+        "snapshot_command": ["python3", "-m", "src.phase1.legacy_snapshot", "--state", os.path.join(root_text, "state.json"), "--now", "TIME"],
+        "scanner_command": None,
+        "box_scanner": False,
+        "box_market_data": False,
+        "binance_from_box": False,
+        "transport_implemented": False,
+        "ack_apply_host": "mac_producer",
+        "physical_store_proven": False,
         "package_data_shared": False,
         "watch_modified": False,
         "spawned": False,
         "flock_taken": False,
         "state_bytes_read": False,
         "files": files,
+        "rollback": list(ROLLBACK),
+        "cannot": list(CANNOT),
         "reason": reason,
     }
 
@@ -173,5 +223,5 @@ def production_block_reason(report):
     if not report.get("path_is_legacy_home") and report.get("layout") != "flat":
         return None
     if report.get("legacy_source_accepted"):
-        return "state_schema_unproven"
+        return "existing_manage_not_spawned"
     return report.get("reason") or "unknown_path"

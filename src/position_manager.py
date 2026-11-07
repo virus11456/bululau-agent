@@ -5,6 +5,10 @@ RULES 是 2026-10 紙上參數，和 2026-11-03 實盤出場不一致。實盤�
 """
 import sys, json, os, time, datetime, argparse, shutil
 from common import *
+try:
+    from phase1.timeparse import parse_instant
+except ImportError:
+    from src.phase1.timeparse import parse_instant
 POS = os.path.join(DATA_DIR, "positions.json"); DEC = os.path.join(DATA_DIR, "decisions.jsonl")
 RULES = {  # be_at_r: move stop to entry at this R; time_bars: 15m bars to reach be_at_r else exit; max_bars: hard exit
     "瘸師弟": dict(be_at_r=0.5, time_bars=4, max_bars=8),
@@ -14,7 +18,7 @@ RULES = {  # be_at_r: move stop to entry at this R; time_bars: 15m bars to reach
 }
 PENDING_EXPIRY_BARS = 16  # 4h for unfilled limit plans unless pos has 'expires'
 
-def iso_ms(s): return int(datetime.datetime.fromisoformat(s).timestamp() * 1000)
+def iso_ms(s): return int(parse_instant(s).timestamp() * 1000)
 def ms_iso(m): return datetime.datetime.fromtimestamp(m / 1000, TZ).isoformat(timespec="seconds")
 
 def manage(p, events):

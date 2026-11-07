@@ -1,5 +1,9 @@
 # Python 3.9.6 sandbox 診斷
 
+`578931c3` 的單測已經把原因留在 stdout：`Invalid isoformat string: '2026-11-07T07:21:55Z'`。那是 runner 產生的 UTC 時間。Python 3.9 的 `fromisoformat` 不接受結尾 `Z`，`src/phase1/autoscan.py` 的 `parse_time` 當時直接交給它。3.12 會接受，所以只在 3.12 跑過不能算相容。現在正式時間先經 `src/phase1/timeparse.py`，把結尾 `Z` 換成 `+00:00`。`tests/test_timeparse.py` 會把 3.9 的拒絕裝回去再解析這一個字串。
+
+# 先前的診斷紀錄
+
 這份說明對的是 commit `b5c476dd81b06b5469526fb064eed7daaca94718` 的測試構造，以及下一包失敗時會多印出的欄位。它不解釋那次結束碼 1 的原因。Mac 上的 sandbox 沒有改，也沒有重跑。
 
 ## 已能從那次紀錄確定的事

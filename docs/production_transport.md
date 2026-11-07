@@ -2,6 +2,8 @@
 
 這不是五欄 `trade_candidate_test`，也不使用 `~/.config/bululau-sender-test/`。POST 預算不共用。本文件不執行發送。
 
+實盤與撈資料都留在 Mac。box 只做開發、測試、協調和受控判斷。交易金鑰、`state.json` 與資料目錄不搬到 box。box 不跑 scanner，也不打幣安。GM 轉述 box 的公開 fapi time 是 HTTP 451；這裡沒有重測，也不繞過。Mac 到 box 的自動傳送還沒有接上。`verify-same-store` 的邏輯 ID 在複製目錄後仍會相同，不是原來的磁碟。ACK 要在原來的 Mac producer 目錄 apply，再從那個目錄讀回。
+
 ## 通知與上下文分開
 
 八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 producer 狀態目錄的 `envelopes/<event_id>.json`。發布時先寫暫存檔並 fsync，再在同一把 `envelopes/publish.lock` 裡用 hard link 掛上最終檔名，並在這把鎖裡重讀 outbox、寫入 `envelope_sha256`。hard link 不會覆蓋已存在的檔。同事件不同內容只有先發布的那一份成功，另一份回 `immutable_conflict`。同內容再跑一次是冪等。不同事件都會留下。行程被殺掉時，這把鎖由作業系統釋放，不會死鎖。這不是斷電測試。
@@ -138,7 +140,7 @@ python3 -m src.phase1.runner check-root --quantboy-root /既有/quantboy
 python3 -m src.phase1.runner check-install --quantboy-root ~/quantboy-live
 ```
 
-路徑不是 `~/quantboy-live` 就是 `unknown_path`，而且不 stat 那裡的 state。SHA、綁定或鎖形狀不符就拒絕。即使四項都符合，原因仍是 `state_schema_unproven`，結束碼 1，不會啟動 manage，也不會 flock。`check-root` 的 `same_lock_proven` 要 SHA、綁定與鎖形狀三者同時符合；只有路徑相同不夠。
+路徑不是 `~/quantboy-live` 就是 `unknown_path`，而且不 stat 那裡的 state。SHA、綁定、鎖形狀與 state 介面都要符合。介面符合時 `state_interface_match` 是 true：`load_state` 缺檔得到 `{}`，`save_state` 用固定的 `state.json.tmp` 再換上，`day_state` 在日期不同時整份換成新的 dict，`pending` 與 `meta` 不會留下。這是舊行為，新程式不執行它。只讀快照是 `python3 -m src.phase1.legacy_snapshot --state ~/quantboy-live/state.json --now TIME`。它不建 `data/`、不寫 state、不開鎖、不查帳戶，缺檔的 reason 是 `missing_state`，倉位是 null。即使 SHA 與介面都符合，`manage_command_authorized` 仍是 false，原因是 `existing_manage_not_spawned`：此套件不啟動舊的 `manage --live`。舊 watch 繼續跑既有程式。回退只刪版本化安裝目錄，不動 `~/quantboy-live`、state、鎖或 `com.quantboy.livewatch`。
 
 版本化安裝只解到新目錄，不覆蓋 `/Users/frank/quantboy-live`，不複製 `.env`，不啟動 watch 或 manage，不雙寫：
 

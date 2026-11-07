@@ -13,6 +13,10 @@ try:
     from .ack_store import AckStore
 except ImportError:
     from ack_store import AckStore
+try:
+    from .timeparse import parse_instant
+except ImportError:
+    from timeparse import parse_instant
 
 ACCEPTED_FIELDS = ("kind", "event_id", "schema_valid", "status")
 PROCESSED_FIELDS = ("kind", "event_id", "evaluation_id", "processed_at")
@@ -34,8 +38,7 @@ def cycle_key(evaluation_id):
 def _parse_time(value):
     if not isinstance(value, str):
         raise ValueError("rejected_ack_time")
-    text = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(text)
+    parsed = parse_instant(value)
     if parsed.tzinfo is None:
         raise ValueError("rejected_ack_time")
     return parsed.astimezone(timezone.utc)

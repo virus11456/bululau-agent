@@ -84,7 +84,7 @@ GM 交過的非秘密 endpoint 是 `https://bululau-return-isolated-8qi96wkvs-vi
 
 ## 下一步：30 分鐘 routine 等效接線（未啟用）
 
-現有 routine 已是 `*/30`、彈性 ±7，prompt 與 60 秒 watch 都不要動。下一步不是把那條命令直接換成 `review-round`。要等效，還得同時保住 manage、持倉保護、候選 AI，以及失敗時留原 AI。不另裝第二條排程，也不改 watch。啟用前仍要本人批准：打開 `live_fetch`（會讀已核平鋪檔、打三個只讀簽名 GET，並按 setup 拉公開 K 線）、接受 `req` 錯誤會寫日誌、gateway 的 installation／key 與有界試跑，以及日均線繼續未定、不能由程式宣佈通過。這份文件不執行上述任何一項。K 線必須排序、去重，並是指定週期的連續已收盤窗。publisher 用同一張 setup 表重驗週期、根數與完整 OHLCV。context 上限在 notifier 前用完整 delivery 的 UTF-8 位元組計算，省略不是無上限，超限留原 AI，不裁 K 線、不叫 notifier。
+現有 routine 已是 `*/30`、彈性 ±7，prompt 與 60 秒 watch 都不要動。下一步不是把那條命令直接換成 `review-round`。離線順序在 [route_contract.md](route_contract.md)，可跑 `python3 -m src.phase1.route_contract`。原 prompt 與執行器未知，不能說已經等效。要等效，還得同時保住 manage、持倉保護、候選 AI，以及失敗時留原 AI。不另裝第二條排程，也不改 watch。啟用前仍要本人批准：打開 `live_fetch`（會讀已核平鋪檔、打三個只讀簽名 GET，並按 setup 拉公開 K 線）、接受 `req` 錯誤會寫日誌、gateway 的 installation／key 與有界試跑，以及日均線繼續未定、不能由程式宣佈通過。這份文件不執行上述任何一項。K 線必須排序、去重，並是指定週期的連續已收盤窗。publisher 用同一張 setup 表重驗週期、根數與完整 OHLCV。context 上限在 notifier 前用完整 delivery 的 UTF-8 位元組計算，省略不是無上限，超限留原 AI，不裁 K 線、不叫 notifier。
 
 Ledger 只保證正常設定與行程崩潰：呼叫端不能改 ledger 路徑或 method→stage；空檔、壞檔、缺檔不會重開 `approved_at`；寫入用替換，中斷不會把檔案截成空的再當新期限。有磁碟管理權限的人若刪掉 ledger 再 `init-ledger`，次數會歸零，期限仍是授權裡的 `approved_at`。不宣稱擋得住刪檔。
 

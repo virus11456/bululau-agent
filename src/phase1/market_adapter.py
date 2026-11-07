@@ -313,7 +313,7 @@ def bar_ohlcv_ok(bar, interval):
 
 
 def candidate_requirements(candidates):
-    """跟取數同一張 setup 表。有已知候選才加 BTC 的 15m。"""
+    """跟取數同一張 setup 表。有已知候選才加 BTC 的 15m。未知 setup 不在這裡發明根數。"""
     requirements = {}
     known = False
     for item in candidates or []:
@@ -328,6 +328,24 @@ def candidate_requirements(candidates):
     if known:
         _merge_bars(_BTC_BARS, requirements.setdefault("BTCUSDT", {}))
     return requirements
+
+
+def uncovered_candidates(candidates):
+    """每個 (symbol, setup) 都要有已知需求。同 symbol 的另一個 setup 不能被蓋掉。"""
+    uncovered = []
+    seen = set()
+    for item in candidates or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol") if isinstance(item.get("symbol"), str) else ""
+        setup = item.get("setup") if isinstance(item.get("setup"), str) else ""
+        key = (symbol, setup)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _symbol_ok(symbol) or setup not in _SETUP_BARS:
+            uncovered.append({"symbol": symbol, "setup": setup})
+    return uncovered
 
 
 def series_meets(bars, interval, count, now_ms):
@@ -351,7 +369,9 @@ def sent_at_ms(sent_at):
 
 
 def review_covers_setup(candidates, klines, now_ms):
-    """sufficient 必須覆蓋每個已知 setup 的週期與根數，不能只留一段非空連續 K。"""
+    """sufficient 必須覆蓋每一筆候選。未知 setup 不能靠同 symbol 的已知子集通過。"""
+    if uncovered_candidates(candidates):
+        return False
     requirements = candidate_requirements(candidates)
     if not requirements or not isinstance(klines, dict):
         return False
@@ -527,10 +547,8 @@ def fetch_strategy_market(private_get, public_get, candidates, now_ms):
         named = [item for item in candidates or [] if isinstance(item, dict)]
         requirements = candidate_requirements(named)
         unknown = []
-        for item in named:
-            symbol = item.get("symbol")
-            if not _symbol_ok(symbol) or item.get("setup") not in _SETUP_BARS:
-                unknown.append(symbol if isinstance(symbol, str) else "")
+        for item in uncovered_candidates(named):
+            unknown.append("unknown_setup:{0}:{1}".format(item["symbol"], item["setup"]))
         for pos in preview["positions"]:
             known = [name for name in _setup_names(pos["symbol"], named) if name in _SETUP_BARS]
             if not known:
@@ -554,8 +572,11 @@ def fetch_strategy_market(private_get, public_get, candidates, now_ms):
                 series[symbol][interval] = closed
                 if not series_meets(closed, interval, count, now_ms):
                     strategy_missing.append("klines:{0}:{1}".format(symbol, interval))
-        for symbol in unknown:
-            strategy_missing.append("unknown_setup:" + (symbol or ""))
+        for item in unknown:
+            if str(item).startswith("unknown_setup:"):
+                strategy_missing.append(item)
+            else:
+                strategy_missing.append("unknown_setup:" + (item or ""))
     except Exception:
         failed = build_review(None, None, None, {}, candidates or [], now_ms, queries_present=False)
         failed["missing"] = ["query_failed"]

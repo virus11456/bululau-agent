@@ -105,6 +105,7 @@ class ProductionTransportTest(unittest.TestCase):
                 self.assertFalse(redirected["processing_ack"])
             finally:
                 httpd.shutdown()
+                httpd.server_close()
             del blocked
 
     def test_refuses_test_sender_dir_and_judgment_gate(self):

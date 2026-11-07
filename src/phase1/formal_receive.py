@@ -1,12 +1,20 @@
 """未啟用的正式接收核對。不建立 routine、不發 HTTP、不填判斷。
 
+執行器超時沒有接上。這裡不證明 timeout。
+
+
 五欄 trade_candidate_test 是舊測試入口，不是正式 wake 授權。
 可驗收的是這個 handler。平台上的 prompt 要人自己存。有界 PUT／GET／POST 仍待批准。
 """
+import fcntl
 import json
+import os
+import secrets
 
+from .ack_contract import cycle_key
 from .box_receiver import assert_wake_bound
-from .production_transport import CONTEXT_MAX_BYTES, verify_context
+from .production_transport import CONTEXT_MAX_BYTES, _outside_window, _moment
+from .review_context import _recomputed_context, parent_package_ready
 from .sender_setup import validate_event
 
 LEGACY_TEST_ROUTINE = {
@@ -66,11 +74,11 @@ def classify_legacy_test(document):
     return verdict
 
 
-def verify_formal_delivery(document, now, seen=None):
-    """離線核對 {wake, context}。不呼叫父 AI，也不把 HTTP 200 當成 ACK。"""
+def _checked_delivery(document, now):
+    """沿用 publisher 的完整 context 驗證。摘要一致不能代替 snapshot／行情契約。"""
     legacy = classify_legacy_test(document)
     if legacy is not None:
-        return legacy
+        return None, legacy
     raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(raw) > CONTEXT_MAX_BYTES:
         raise ValueError("context_too_large")
@@ -79,13 +87,27 @@ def verify_formal_delivery(document, now, seen=None):
     if document.get("schema_version") != 1 or document.get("event_type") != "evaluation_delivery":
         raise ValueError("rejected_context")
     context = document.get("context")
-    verified = verify_context(context, now)
+    digest, problem = _recomputed_context(context)
+    if problem:
+        raise ValueError(problem)
+    if _outside_window(_moment(context.get("sent_at")), now):
+        raise ValueError("expired")
     assert_wake_bound(document.get("wake"), context)
-    event_id = verified["event_id"]
-    digest = verified["envelope_sha256"]
+    return {
+        "event_id": context["event_id"],
+        "evaluation_id": context["evaluation_id"],
+        "envelope_sha256": digest,
+    }, None
+
+
+def verify_formal_delivery(document, now, seen=None):
+    """離線核對 {wake, context}。不呼叫父 AI，也不把 HTTP 200 當成 ACK。"""
+    checked, legacy = _checked_delivery(document, now)
+    if legacy is not None:
+        return legacy
     duplicate = False
-    if isinstance(seen, dict) and event_id in seen:
-        if seen[event_id] != digest:
+    if isinstance(seen, dict) and checked["event_id"] in seen:
+        if seen[checked["event_id"]] != checked["envelope_sha256"]:
             raise ValueError("immutable_conflict")
         duplicate = True
     verdict = _base("delivery_schema_accepted")
@@ -93,10 +115,126 @@ def verify_formal_delivery(document, now, seen=None):
         "class": "evaluation_delivery",
         "accepted": True,
         "duplicate": duplicate,
-        "event_id": event_id,
-        "evaluation_id": verified["evaluation_id"],
-        "envelope_sha256": digest,
+        "event_id": checked["event_id"],
+        "evaluation_id": checked["evaluation_id"],
+        "envelope_sha256": checked["envelope_sha256"],
         "live_send": False,
         "trade_authorized": False,
+        "durable": False,
+        "ack": False,
+        "timeout_executor": False,
     })
     return verdict
+
+
+def _inbox_lock(root, event_id):
+    cycle_key(event_id)
+    path = os.path.join(str(root), "formal-" + event_id + ".claim")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _unlock(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def read_formal(store, event_id):
+    with store.exclusive():
+        store.reload()
+        row = (store.state.get("formal_inbox") or {}).get(event_id)
+    return row if isinstance(row, dict) else None
+
+
+def _row_verdict(row, *, duplicate, parent_called, claim_held=False):
+    status = row.get("status") if isinstance(row, dict) else "pending"
+    verdict = _base("publish_ready" if status == "publish_ready" else "parent_pending")
+    verdict.update({
+        "class": "evaluation_delivery",
+        "accepted": True,
+        "duplicate": duplicate,
+        "claim_held": claim_held,
+        "status": status,
+        "event_id": row.get("event_id") if isinstance(row, dict) else None,
+        "evaluation_id": row.get("evaluation_id") if isinstance(row, dict) else None,
+        "envelope_sha256": row.get("digest") if isinstance(row, dict) else None,
+        "parent_called": parent_called,
+        "ack": status == "publish_ready",
+        "live_send": False,
+        "trade_authorized": False,
+        "durable": True,
+        "timeout_executor": False,
+    })
+    return verdict
+
+
+def receive_delivery(store, document, now, parent=None):
+    """寫進 Store。沒有父 callback 不假 ACK。程式不生成 judgment。"""
+    checked, legacy = _checked_delivery(document, now)
+    if legacy is not None:
+        return legacy
+    fd = _inbox_lock(store.root, checked["event_id"])
+    if fd is None:
+        row = read_formal(store, checked["event_id"]) or {
+            "status": "pending", "event_id": checked["event_id"],
+            "evaluation_id": checked["evaluation_id"], "digest": checked["envelope_sha256"],
+        }
+        verdict = _row_verdict(row, duplicate=False, parent_called=False, claim_held=True)
+        verdict["ack"] = False
+        return verdict
+    try:
+        with store.exclusive():
+            store.reload()
+            inbox = store.state.setdefault("formal_inbox", {})
+            prior = inbox.get(checked["event_id"])
+            if isinstance(prior, dict) and prior.get("digest") != checked["envelope_sha256"]:
+                raise ValueError("immutable_conflict")
+            if not isinstance(prior, dict):
+                inbox[checked["event_id"]] = {
+                    "status": "pending",
+                    "event_id": checked["event_id"],
+                    "evaluation_id": checked["evaluation_id"],
+                    "digest": checked["envelope_sha256"],
+                    "parent_invoked": False,
+                }
+                store.save()
+                prior = inbox[checked["event_id"]]
+                duplicate = False
+            else:
+                duplicate = True
+            status = prior.get("status")
+            invoked = prior.get("parent_invoked") is True
+        if status == "publish_ready" or invoked or not callable(parent):
+            return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=False)
+        with store.exclusive():
+            store.reload()
+            row = store.state["formal_inbox"][checked["event_id"]]
+            if row.get("parent_invoked") is True or row.get("status") == "publish_ready":
+                return _row_verdict(row, duplicate=True, parent_called=False)
+            row["parent_invoked"] = True
+            store.save()
+        returned = parent(document)
+        ready = False
+        if isinstance(returned, dict):
+            package = parent_package_ready(returned.get("judgment"), returned.get("trace"), document.get("context"))
+            ready = package.get("ready") is True
+        if ready:
+            with store.exclusive():
+                store.reload()
+                row = store.state["formal_inbox"][checked["event_id"]]
+                if row.get("digest") == checked["envelope_sha256"] and row.get("status") == "pending":
+                    row["status"] = "publish_ready"
+                    store.save()
+        return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
+    finally:
+        _unlock(fd)

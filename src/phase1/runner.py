@@ -720,6 +720,8 @@ def main(argv):
         return _review_round_main(argv[1:])
     if argv[:1] == ["orchestrate"]:
         return _orchestrate_main(argv[1:])
+    if argv[:1] == ["receive"]:
+        return _receive_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -735,7 +737,7 @@ def _parse(argv):
             found["shadow"] = True
             index += 1
             continue
-        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter", "--entry-config") or index + 1 >= len(argv):
+        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter", "--entry-config", "--file") or index + 1 >= len(argv):
             return None
         found[key[2:].replace("-", "_")] = argv[index + 1]
         index += 2
@@ -829,6 +831,44 @@ def _now_ms(text):
     if moment.tzinfo is None:
         raise ValueError("clock_invalid")
     return int(moment.timestamp() * 1000)
+
+
+def _receive_main(argv):
+    """離線接收。不叫父 AI，不把 pending 當成完成，不發 HTTP。"""
+    from .formal_receive import read_formal, receive_delivery
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "file" not in found or "now" not in found:
+        print(json.dumps({
+            "accepted": False, "ack": False, "http_sent": False, "reason": "receive_disabled",
+            "timeout_executor": False, "program_fills_judgment": False,
+        }, ensure_ascii=False))
+        return 2
+    try:
+        with open(found["file"], encoding="utf-8") as handle:
+            document = json.load(handle)
+        store = Store(found["state_dir"])
+        result = receive_delivery(store, document, found["now"])
+        stored = read_formal(store, result.get("event_id")) if result.get("event_id") else None
+    except ValueError as exc:
+        print(json.dumps({
+            "accepted": False, "ack": False, "http_sent": False, "reason": str(exc),
+            "timeout_executor": False, "program_fills_judgment": False,
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps({
+        "accepted": result.get("accepted") is True,
+        "duplicate": result.get("duplicate") is True,
+        "status": None if not isinstance(stored, dict) else stored.get("status"),
+        "ack": False,
+        "parent_called": False,
+        "http_sent": False,
+        "http_200_is_ack": False,
+        "program_fills_judgment": False,
+        "formal_wake_authorized": False,
+        "timeout_executor": False,
+        "orders_placed": False,
+    }, ensure_ascii=False))
+    return 0
 
 
 def _orchestrate_main(argv):

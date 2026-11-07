@@ -4,9 +4,9 @@
 
 三層不要混：
 
-- 可驗收的 handler：`src/phase1/formal_receive.py` 的 `verify_formal_delivery`。只在離線核對檔案。
+- 可驗收的 handler：`python3 -m src.phase1.runner receive --state-dir DIR --file delivery.json --now TIME`。它把合格送達寫進 Store，狀態是 `pending`。沒有父 callback 就不 ACK。父層之後交來的 judgment／trace 通過既有 publisher 驗證，才變成 `publish_ready`。pending 不是完成。重啟或第二個 worker 不把同一份 context 再交給父 AI。
 - 平台人工保存的 prompt：這份草稿。程式沒有把它寫進 webhook。
-- 真服務的有界試跑：尚未批准，這輪不做。
+- 真服務的有界試跑：尚未批准，這輪不做。執行器超時也沒有接上，不能把同步例外當成已經有超時器。
 
 ## 舊測試入口不是正式授權
 

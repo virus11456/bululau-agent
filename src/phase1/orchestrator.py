@@ -190,7 +190,11 @@ def _begin(store, scan_id):
         return "fresh", event_id
 
 
-def _finish(store, scan_id, event_id, reason):
+def _finish(store, scan_id, event_id, result):
+    """fallback 沒接上或失敗時維持 running。不能把 pending 寫成 recovered。"""
+    reason = result.get("reason")
+    if reason == "incomplete_restart" and result.get("fallback_settled") is not True:
+        return
     status = "recovered" if reason == "incomplete_restart" else "completed"
     with store.exclusive():
         store.reload()
@@ -209,11 +213,14 @@ def _recover(callbacks, event_id, scan_id):
     gaps = ["incomplete_restart"]
     payload = {"event_id": event_id, "evaluation_id": scan_id, "orders_placed": False, "live": False, "resume": True}
     fallback = _invoke("fallback", callbacks.get("fallback"), payload, order, gaps)
-    if fallback.get("called") is not True:
-        gaps.append("original_ai_callback_unwired")
-    return _result(
+    settled = fallback.get("called") is True and fallback.get("ok") is True
+    if not settled:
+        gaps.append("original_ai_callback_unwired" if fallback.get("called") is not True else "fallback_not_settled")
+    result = _result(
         "incomplete_restart", order, gaps, quiet=False, event_id=event_id, fallback_called=fallback.get("called") is True,
     )
+    result["fallback_settled"] = settled
+    return result
 
 
 def _execute(callbacks, notifier, event_id, scan_id):
@@ -307,7 +314,7 @@ def run_orchestrator(store, *, now, scan_id, callbacks=None, notifier=None):
         result = _recover(callbacks, event_id, scan_id) if phase == "incomplete" else _execute(
             callbacks, notifier, event_id, scan_id,
         )
-        _finish(store, scan_id, event_id, result["reason"])
+        _finish(store, scan_id, event_id, result)
         return result
     finally:
         _release_claim(fd)

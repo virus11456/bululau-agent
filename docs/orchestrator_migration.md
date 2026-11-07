@@ -8,7 +8,7 @@
 
 注入的函式才會被呼叫：`manage` → `status` → `prefilter`。quiet 之前，`positions`、`open_orders`、`algo_orders` 都要在，而且是非布林的 int、大於等於 0，三個都是 0，候選是空清單，`halted` 必須剛好是 false。缺欄、None、False 或負數都是未知，改叫 fallback，不開新倉。任何一個明寫的 count 大於 0 就先保護，再 fallback；不因為別的欄未知，或 status 整體失敗，就把那個數字丟掉。`halted` 是 true 時不開新倉，有倉或有單仍先保護。
 
-同一個 `scan_id` 先記 `running`。執行中的第二個 worker 拿不到 claim，不另叫 AI。行程在 manage callback 中途退出後，新的行程看到 `running` 只做 fallback，不重跑 manage，也不把它當成已經成功。做完才記 `completed` 或 `recovered`。
+同一個 `scan_id` 先記 `running`。執行中的第二個 worker 拿不到 claim，不另叫 AI。行程在 manage callback 中途退出後，新的行程看到 `running` 只補 fallback，不重跑 manage。fallback 沒接上或失敗就維持 `running`，不能記成 `recovered`。fallback 成功之後才記 `recovered`。
 
 `TimeoutError` 只在同步 callback 自己丟出時算超時。沒有執行器層的超時。`gateway_enabled` 或 `notifier_verified` 設成 true 會直接拒絕，但這不表示每一個可能的 live 旗標都已列舉。
 

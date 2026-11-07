@@ -5,7 +5,8 @@
 import json
 
 from .legacy_root import BINDINGS, DISPATCH, KNOWN_LIVE_FLAT_SHA
-from .review_context import _num, _order, _position, exact_schema_version
+from .market_adapter import _symbol_ok
+from .review_context import _num, _order, exact_schema_version
 from .status_contract import SECRET_KEYS, require_account, require_order_list
 
 QUERY_NAMES = ("account", "open_orders", "open_algo_orders")
@@ -56,6 +57,8 @@ def _base(**extra):
             "taken": False,
         },
         "files_invented": False,
+        "symbol_listing_verified": False,
+        "symbol_check": "market_adapter._symbol_ok",
         "not_equivalent": list(NOT_EQUIVALENT),
     }
     body.update(extra)
@@ -77,7 +80,17 @@ def _schema_rejected(document):
     return False
 
 
+def _amount(row, *keys):
+    if not isinstance(row, dict):
+        return None
+    for key in keys:
+        if key in row:
+            return _num(row.get(key))
+    return None
+
+
 def _account_detail(account):
+    """先驗 symbol 語法，再看數量。零倉也不能跳過壞 symbol。語法通過不是交易所上市證明。"""
     try:
         require_account(account)
     except ValueError:
@@ -86,37 +99,54 @@ def _account_detail(account):
     bad = False
     mapped = 0
     for row in account["positions"]:
-        amount = _num(row.get("positionAmt")) if isinstance(row, dict) else None
+        symbol_ok = isinstance(row, dict) and _symbol_ok(row.get("symbol"))
+        amount = _amount(row, "positionAmt")
+        if not symbol_ok:
+            bad = True
+            if amount is not None and amount != 0:
+                exposure = True
+            continue
         if amount is None:
             bad = True
             continue
         if amount == 0:
             continue
         exposure = True
-        if _position(row):
-            mapped += 1
-        else:
-            bad = True
+        mapped += 1
     if bad:
         return "unknown", None, exposure
     return "success", mapped, exposure
 
 
 def _order_detail(raw):
+    """掛單每一列也先過同一套 symbol 語法。非零數量即使 symbol 不合格仍算曝險。"""
     try:
         require_order_list(raw)
     except ValueError:
         return "unknown", None, False
-    exposure = len(raw) > 0
+    exposure = False
     bad = False
+    mapped = 0
     for row in raw:
-        item = _order(row)
-        symbol = item.get("symbol") if isinstance(item, dict) else None
-        if not isinstance(symbol, str) or not symbol.endswith("USDT"):
+        symbol_ok = isinstance(row, dict) and _symbol_ok(row.get("symbol"))
+        qty = _amount(row, "origQty", "quantity")
+        if not symbol_ok:
             bad = True
+            if qty is not None and qty != 0:
+                exposure = True
+            continue
+        item = _order(row)
+        if not isinstance(item, dict) or item.get("side") not in ("BUY", "SELL"):
+            bad = True
+            if qty is not None and qty != 0:
+                exposure = True
+            continue
+        if qty is not None and qty != 0:
+            exposure = True
+        mapped += 1
     if bad:
         return "unknown", None, exposure
-    return "success", len(raw), exposure
+    return "success", mapped, exposure
 
 
 def _from_details(document):

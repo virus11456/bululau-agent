@@ -79,6 +79,7 @@ FILES = (
     "tests/test_run48_deadline_commit.py",
     "tests/test_run49_claim_map.py",
     "tests/test_run50_claim_required.py",
+    "tests/test_run51_symbol_syntax.py",
     "tests/fixtures/mac_query_map/exposure_unknown.json",
     "tests/fixtures/mac_query_map/all_flat.json",
     "tests/fixtures/mac_query_map/all_unknown.json",

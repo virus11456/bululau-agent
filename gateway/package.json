@@ -1,0 +1,15 @@
+{
+  "name": "bululau-judgment-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vercel/blob": "2.8.2"
+  }
+}

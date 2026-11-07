@@ -70,6 +70,8 @@ context 裡的持倉與掛單是筆數，沒有幣種、方向、數量、停損
 
 Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及帶 `call_ai`、`n_candidates`、候選清單和有限正價格 `btc.last` 的掃描。`btc` 裡其他數字也必須有限。NaN、正負無限、0、負數，以及 JSON 的 `NaN`／`Infinity` 都留原 AI，而且會叫 notifier。
 
+可部署的入口在 `gateway/`，不是這個 Python 檔。部署根、`npm ci`、`nodejs22.x` 與環境變數名稱寫在 `gateway/DEPLOY.md`。原子建立是 Blob `put` 的 `allowOverwrite: false`（`x-allow-overwrite: 0`，服務端 `If-None-Match: *`）。Python 的 `os.link` 只留給離線測試，不是 Blob 的原子性。還沒有建立 project 或 Blob。Hobby 用途與額度仍未知。
+
 真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
 
 ## 還沒有的無人值守通道

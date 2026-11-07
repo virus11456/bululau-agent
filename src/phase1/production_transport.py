@@ -5,6 +5,7 @@
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from datetime import datetime, timezone
@@ -184,23 +185,60 @@ def envelope_path(state_dir, event_id):
     return directory, os.path.join(directory, event_id + ".json")
 
 
+def _fsync_dir(directory):
+    dir_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    fd = os.open(directory, dir_flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_regular(path):
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("rejected_symlink")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read()
+
+
+def _store_id(store):
+    """狀態目錄身份。不是金鑰，也不能用路徑字串代替。"""
+    current = store.state.get("producer_store_id")
+    if isinstance(current, str) and len(current) == 32 and all(ch in "0123456789abcdef" for ch in current):
+        return current
+    store.state["producer_store_id"] = secrets.token_hex(16)
+    store.save()
+    return store.state["producer_store_id"]
+
+
 def bind_envelope(store, envelope, crash=None):
-    """先寫獨立暫存檔並 fsync，再換上最終檔名。這只模擬行程在換檔前中斷，不是斷電。"""
+    """同一把跨程序鎖裡發布檔案並寫 outbox 摘要。hard link 不覆蓋既有檔。
+
+    crash=before_replace 只表示行程在發布前中斷，鎖會隨行程結束釋放。不是斷電測試。
+    """
+    from .ack_store import directory_lock
     refuse_foreign_state_dir(store.root)
     raw = _canonical(envelope)
     digest = hashlib.sha256(raw).hexdigest()
     key = cycle_key(envelope["evaluation_id"])
-    item = store.state.get("outbox", {}).get(key)
-    if not isinstance(item, dict) or item.get("event_id") != envelope["event_id"]:
+    preview = store.state.get("outbox", {}).get(key)
+    if not isinstance(preview, dict) or preview.get("event_id") != envelope["event_id"]:
         raise ValueError("binding_mismatch")
     directory, path = envelope_path(store.root, envelope["event_id"])
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    if os.path.islink(directory) or (os.path.lexists(path) and os.path.islink(path)):
+    if os.path.islink(directory):
         raise ValueError("rejected_symlink")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    tmp = os.path.join(directory, ".{0}.{1}.tmp".format(envelope["event_id"], os.getpid()))
+    tmp = os.path.join(directory, ".{0}.{1}.{2}.tmp".format(envelope["event_id"], os.getpid(), secrets.token_hex(4)))
     fd = os.open(tmp, flags, 0o600)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -208,31 +246,40 @@ def bind_envelope(store, envelope, crash=None):
             handle.write(b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if crash == "before_replace":
-            raise OSError("crash_before_replace")
-        if os.path.isfile(path):
-            with open(path, "rb") as handle:
-                existing = handle.read().strip()
-            os.unlink(tmp)
-            if hashlib.sha256(existing).hexdigest() != digest:
-                raise ValueError("immutable_conflict")
-        else:
-            os.replace(tmp, path)
-            dir_flags = os.O_RDONLY
-            if hasattr(os, "O_DIRECTORY"):
-                dir_flags |= os.O_DIRECTORY
-            dir_fd = os.open(directory, dir_flags)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+        with directory_lock(directory, "publish.lock"):
+            if crash == "before_replace":
+                raise OSError("crash_before_replace")
+            if os.path.lexists(path):
+                file_digest = hashlib.sha256(_read_regular(path).strip()).hexdigest()
+            else:
+                try:
+                    os.link(tmp, path)
+                except FileExistsError:
+                    file_digest = hashlib.sha256(_read_regular(path).strip()).hexdigest()
+                else:
+                    _fsync_dir(directory)
+                    file_digest = hashlib.sha256(_read_regular(path).strip()).hexdigest()
+            if os.path.lexists(tmp) and not os.path.islink(tmp):
+                os.unlink(tmp)
+            with store.exclusive():
+                store.reload()
+                current = store.state.get("outbox", {}).get(key)
+                if not isinstance(current, dict) or current.get("event_id") != envelope["event_id"]:
+                    raise ValueError("binding_mismatch")
+                _store_id(store)
+                recorded = current.get("envelope_sha256")
+                if recorded not in (None, "", file_digest):
+                    raise ValueError("immutable_conflict")
+                if recorded != file_digest:
+                    current["envelope_sha256"] = file_digest
+                    store.save()
+                if file_digest != digest:
+                    raise ValueError("immutable_conflict")
+        return digest
     except Exception:
         if crash != "before_replace" and os.path.lexists(tmp) and not os.path.islink(tmp):
             os.unlink(tmp)
         raise
-    item["envelope_sha256"] = digest
-    store.save()
-    return digest
 
 
 def read_envelope(state_dir, event_id, evaluation_id):
@@ -252,6 +299,118 @@ def read_envelope(state_dir, event_id, evaluation_id):
     if document.get("event_id") != event_id or document.get("evaluation_id") != evaluation_id:
         raise ValueError("binding_mismatch")
     return document
+
+
+CONTEXT_FIELDS = (
+    "schema_version", "event_type", "event_id", "evaluation_id", "envelope_sha256",
+    "sent_at", "producer_store_id", "envelope", "automatic_transport",
+)
+
+
+def _secret_in(value):
+    from .status_contract import SECRET_KEYS
+    if isinstance(value, dict):
+        if any(key in SECRET_KEYS for key in value):
+            return True
+        return any(_secret_in(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_secret_in(item) for item in value)
+    return False
+
+
+def export_context(state_dir, event_id, evaluation_id, dest):
+    """寫出一份可帶走的上下文。不開網路、不讀金鑰。自動跨機傳送沒有實作。"""
+    refuse_foreign_state_dir(state_dir)
+    refuse_foreign_state_dir(os.path.dirname(os.path.abspath(dest)) or ".")
+    envelope = read_envelope(state_dir, event_id, evaluation_id)
+    if _secret_in(envelope):
+        raise ValueError("rejected_context")
+    store = Store(state_dir)
+    with store.exclusive():
+        store.reload()
+        store_id = _store_id(store)
+        item = store.state.get("outbox", {}).get(cycle_key(evaluation_id))
+    if not isinstance(item, dict) or item.get("envelope_sha256") != hashlib.sha256(_canonical(envelope)).hexdigest():
+        raise ValueError("digest_mismatch")
+    payload = {
+        "schema_version": 1,
+        "event_type": "immutable_context",
+        "event_id": event_id,
+        "evaluation_id": evaluation_id,
+        "envelope_sha256": item["envelope_sha256"],
+        "sent_at": envelope.get("sent_at"),
+        "producer_store_id": store_id,
+        "envelope": envelope,
+        "automatic_transport": False,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    directory = os.path.dirname(os.path.abspath(dest))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = os.path.join(directory, ".context.{0}.{1}.tmp".format(os.getpid(), secrets.token_hex(4)))
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, dest)
+        os.chmod(dest, 0o600)
+    except Exception:
+        if os.path.lexists(tmp) and not os.path.islink(tmp):
+            os.unlink(tmp)
+        raise
+    return payload
+
+
+def verify_context(document, now):
+    """只核對帶走的檔。不寫 store，不把路徑字串當成同一個 store。"""
+    if not isinstance(document, dict) or set(document) != set(CONTEXT_FIELDS):
+        raise ValueError("rejected_context")
+    if document.get("schema_version") != 1 or document.get("event_type") != "immutable_context":
+        raise ValueError("rejected_context")
+    if document.get("automatic_transport") is not False:
+        raise ValueError("automatic_transport_not_implemented")
+    envelope = document.get("envelope")
+    if not isinstance(envelope, dict) or _secret_in(envelope):
+        raise ValueError("rejected_context")
+    if envelope.get("event_id") != document.get("event_id") or envelope.get("evaluation_id") != document.get("evaluation_id"):
+        raise ValueError("binding_mismatch")
+    digest = hashlib.sha256(_canonical(envelope)).hexdigest()
+    if digest != document.get("envelope_sha256"):
+        raise ValueError("digest_mismatch")
+    if _outside_window(_moment(document.get("sent_at")), now):
+        raise ValueError("expired")
+    store_id = document.get("producer_store_id")
+    if not isinstance(store_id, str) or len(store_id) != 32:
+        raise ValueError("rejected_context")
+    return {
+        "verified": True,
+        "event_id": document["event_id"],
+        "evaluation_id": document["evaluation_id"],
+        "envelope_sha256": digest,
+        "producer_store_id": store_id,
+        "automatic_transport": False,
+        "same_store": False,
+        "ai_execution_proven": False,
+    }
+
+
+def verify_same_store(state_dir, document):
+    """比對 store 身份。兩個目錄即使路徑最後一段相同也不是同一個 store。"""
+    refuse_foreign_state_dir(state_dir)
+    incoming = document.get("producer_store_id") if isinstance(document, dict) else None
+    local = Store(state_dir).state.get("producer_store_id")
+    same = isinstance(local, str) and local == incoming
+    return {
+        "same_store": same,
+        "path_ignored": True,
+        "automatic_transport": False,
+        "ai_execution_proven": False,
+        "reason": "same_store" if same else "different_store",
+    }
 
 
 def _moment(value):
@@ -328,7 +487,7 @@ def judgment_path(state_dir, event_id):
 
 
 def commit_judgment(state_dir, event_id, evaluation_id, now):
-    """每筆判斷各寫一個檔。布林值不能證明 AI 真的跑過。過期直接拒絕。"""
+    """讀 judgments/<event_id>.json。本程式不代寫判斷。basis 只核對與 envelope 一致。"""
     refuse_foreign_state_dir(state_dir)
     path = judgment_path(state_dir, event_id)
     try:
@@ -403,7 +562,7 @@ def _parse(argv):
     index = 0
     while index < len(argv):
         key = argv[index]
-        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id", "--now") or index + 1 >= len(argv):
+        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id", "--now", "--out", "--file") or index + 1 >= len(argv):
             return None
         found[key] = argv[index + 1]
         index += 2
@@ -444,9 +603,37 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
         except ValueError as exc:
             print(json.dumps({"processed": False, "old_ai_poll": "keep", "reason": str(exc)}, ensure_ascii=False))
             return 1
-        print(json.dumps({"processed_file": os.path.basename(path), "old_ai_poll": "keep", "orders_allowed": False}, ensure_ascii=False))
+        print(json.dumps({"processed_file": os.path.basename(path), "old_ai_poll": "keep", "orders_allowed": False, "ai_execution_proven": False}, ensure_ascii=False))
         return 0
-    print("用法: python3 -m src.phase1.production_transport configure | send-wake --config-dir DIR --state-dir DIR | read-envelope --state-dir DIR --event-id ID --evaluation-id ID | commit-judgment --state-dir DIR")
+    if argv[:1] == ["export-context"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--out" in found:
+        try:
+            export_context(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"])
+        except ValueError as exc:
+            print(json.dumps({"exported": False, "automatic_transport": False, "reason": str(exc)}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"exported": True, "automatic_transport": False, "ai_execution_proven": False}, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["verify-context"] and found and "--file" in found and "--now" in found:
+        try:
+            with open(found["--file"], encoding="utf-8") as handle:
+                report = verify_context(json.load(handle), found["--now"])
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "rejected_context"
+            print(json.dumps({"verified": False, "automatic_transport": False, "same_store": False, "reason": reason}, ensure_ascii=False))
+            return 1
+        print(json.dumps(report, ensure_ascii=False))
+        return 0
+    if argv[:1] == ["verify-same-store"] and found and "--state-dir" in found and "--file" in found:
+        try:
+            with open(found["--file"], encoding="utf-8") as handle:
+                report = verify_same_store(found["--state-dir"], json.load(handle))
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "rejected_context"
+            print(json.dumps({"same_store": False, "automatic_transport": False, "reason": reason}, ensure_ascii=False))
+            return 1
+        print(json.dumps(report, ensure_ascii=False))
+        return 0 if report["same_store"] else 1
+    print("用法: python3 -m src.phase1.production_transport configure | send-wake --config-dir DIR --state-dir DIR | read-envelope --state-dir DIR --event-id ID --evaluation-id ID | export-context --state-dir DIR --event-id ID --evaluation-id ID --out FILE | verify-context --file FILE --now TIME | verify-same-store --state-dir DIR --file FILE | commit-judgment --state-dir DIR --event-id ID --evaluation-id ID --now TIME")
     return 2
 
 

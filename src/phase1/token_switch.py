@@ -134,6 +134,8 @@ def _decision(exit_code, ai_wake, fingerprints, notify, reason):
         "watch_replaced": False,
         "reason": reason,
         "poll_interval_changed": False,
+        "ai_execution_proven": False,
+        "ai_judged_once": False,
     }
 
 

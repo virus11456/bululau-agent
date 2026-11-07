@@ -4,7 +4,9 @@
 
 ## 通知與上下文分開
 
-八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 `$CYCLE_DIR/envelopes/<event_id>.json`。寫入先落在同目錄的暫存檔並 fsync，再換上最終檔名。換檔前中斷不會把半成品當成可信 envelope，也不會蓋掉已有的有效摘要。這是行程中斷測試，不是斷電測試。新的 scan 不會改掉舊 pending 的檔。
+八欄 wake 只通知接收端有一筆評估。它沒有快照、候選或時效。每一筆的上下文寫在 producer 狀態目錄的 `envelopes/<event_id>.json`。發布時先寫暫存檔並 fsync，再在同一把 `envelopes/publish.lock` 裡用 hard link 掛上最終檔名，並在這把鎖裡重讀 outbox、寫入 `envelope_sha256`。hard link 不會覆蓋已存在的檔。同事件不同內容只有先發布的那一份成功，另一份回 `immutable_conflict`。同內容再跑一次是冪等。不同事件都會留下。行程被殺掉時，這把鎖由作業系統釋放，不會死鎖。這不是斷電測試。
+
+`CYCLE_DIR` 只是本機路徑字串。Mac 上的 producer 與 box 上的 consumer 不共用檔案系統，路徑相同也不代表同一個 store。store 身份是 `phase1_state.json` 裡的 `producer_store_id`。正式自動跨機傳送沒有實作。這包不另開網路服務，也不搬交易金鑰。
 
 `event_id` 在 `wake_gate._enqueue_cycle` 產生，形狀 `c-` 加 32 個十六進位，寫進 `phase1_state.json` 的 outbox 後不覆寫。`evaluation_id` 就是通過 `^[A-Za-z0-9_-]{1,128}$` 的 `scan_id`。outbox 鍵是 `cycle:<evaluation_id>`。`sent_at` 是 runner 產生的 UTC 時間。
 
@@ -53,11 +55,38 @@ python3 -m src.phase1.production_transport read-envelope --state-dir "$CYCLE_DIR
 
 只讀 `$CYCLE_DIR/envelopes/<event_id>.json`，並核對該 outbox 項的 `envelope_sha256`。目錄裡若有實盤 `state.json` 或測試用 `ack_state.json`，拒絕。`limit_older_than_2h_implemented` 固定 false：有掛單已經會留 AI，這不是已實作的老單訊號。
 
+## 跨機接線（本包只做到本機檔，不自動傳送）
+
+producer 在自己的狀態目錄發布 envelope。consumer 要看的是一份不含秘密的 `immutable_context` 檔，不是 producer 的路徑。
+
+```bash
+python3 -m src.phase1.production_transport export-context --state-dir PRODUCER_DIR --event-id EVENT --evaluation-id EVAL --out context.json
+python3 -m src.phase1.production_transport verify-context --file context.json --now TIME
+python3 -m src.phase1.production_transport verify-same-store --state-dir PRODUCER_DIR --file context.json
+```
+
+`export-context` 只在本機寫檔。檔裡有 event_id、evaluation_id、envelope_sha256、sent_at、producer_store_id 和 envelope 本體。`automatic_transport` 固定 false。`verify-context` 核對摘要、事件、評估與時效，並且 `same_store` 固定 false：單看這份檔不能變成 producer 的 store。`verify-same-store` 才比對身份；路徑最後一段相同也會是 `different_store`。
+
+誰負責：
+
+- producer：不可變 envelope、outbox 摘要、export 檔。不寫判斷。
+- 搬運：父側自己把 export 檔送到 box，之後把判斷檔送回 producer。這包不做這段。
+- consumer：做實際 AI 判斷，留下 trace 與理由，再寫判斷檔。basis 只會被 producer 拿來對 envelope，不能代替 trace。這包不代填 JSON，也不把 `ai_execution_proven` 設成 true。
+- 回流：判斷檔必須放回當初 export 的那個 producer 目錄的 `judgments/<event_id>.json`，再在那個目錄 commit，然後 apply。另一台機器上的目錄不能 apply 這筆。
+
+producer 的候選去重只表示沒有再排一次 wake。`ai_judged_once` 與 `ai_execution_proven` 都是 false。去重不是模型只判斷過一次。
+
 ## 消費
 
-收到 wake 不能寫 processed。布林 `judgment_completed=true` 也不能證明模型真的跑過；本程式不核對父側的 consumer 身分。父側若要可信完成收據，須另定簽章（至少覆蓋 event_id、evaluation_id、envelope_sha256、completed_at）。在那之前 `ai_execution_proven` 必須是 false，processed 只表示這份可稽核判斷被接受。
+收到 wake 不能寫 processed。判斷檔是 `judgments/<event_id>.json`，不再使用單一的 `dry_run_judgment.json`。本程式只讀它，不建立它。一次 commit 只處理指定的 event_id。`basis` 必須和該事件 envelope 的 reason、as_of、positions、orders、freshness、候選數一致；這只是一致性，不是 AI 執行證明。
 
-每筆判斷各寫 `$CYCLE_DIR/judgments/<event_id>.json`。一次 commit 只處理指定的 event_id，不會清掉另一筆 pending，也不會拿 A 的摘要去配 B。本地能寫狀態目錄的人可以做出符合欄位的判斷檔；這是信任邊界。`ai_execution_proven` 必須維持 false，本程式不另造執行證明。正式 consumer 由父側控制。
+崩潰時 producer 的約定：
+
+- consumer 還沒寫完判斷：producer 沒有判斷檔，commit 拒絕，outbox 仍是 pending。可以稍後再送同一份判斷。這不表示模型已經判斷過。
+- 判斷已寫好但還沒 commit：沒有 `ack-inbox/processed-<event_id>.json`，outbox 仍是 pending。時效內可以 commit。過期就拒絕，不寫 processed。
+- 已 commit 但還沒 apply：processed 檔留在 producer 的 ack-inbox，outbox 仍是 pending。apply 成功後再 apply 是 duplicate，`process_count` 停在 1。
+
+`ai_execution_proven` 必須是 false。本地能寫狀態目錄的人仍可做出符合欄位的判斷檔；這是信任邊界。正式 consumer 由父側控制。父側若要可信完成收據，須另定簽章（至少覆蓋 event_id、evaluation_id、envelope_sha256、completed_at）。目前沒有這段簽章。
 
 判斷檔：
 
@@ -70,11 +99,15 @@ python3 -m src.phase1.production_transport read-envelope --state-dir "$CYCLE_DIR
 然後：
 
 ```bash
-python3 -m src.phase1.production_transport commit-judgment --state-dir "$CYCLE_DIR" --now NOW
+python3 -m src.phase1.production_transport commit-judgment --state-dir PRODUCER_DIR --event-id EVENT --evaluation-id EVAL --now NOW
 python3 -m src.phase1.cycle apply --state-dir "$CYCLE_DIR" --file "$CYCLE_DIR/ack-inbox/processed-EVENT.json" --expect EVENT --sent-at SENT_AT --now NOW
 ```
 
 `processed_at` 不得早於 `sent_at`，也不得比 apply 的 now 早超過 15 分鐘或晚超過 60 秒。對不上、判斷沒完成、或寫檔失敗，都不寫 processed，`old_ai_poll` 維持 keep。
+
+## 這包能做的，以及要父側接上的
+
+這包能做：本機 envelope 發布與衝突拒絕、本機 export/verify、判斷檔一致性與時效、commit、apply 去重、`check-root` 只讀核對。不能做：自動把檔案送到 box、在 consumer 上跑模型、代寫判斷、把 producer 去重當成 AI 已判斷、共用舊 root 的 state 或 `.lock`、讀寫 `.env`、啟動 `watch --live`。這些都不新增權限。
 
 ## 有界 dry-run 驗收
 
@@ -97,4 +130,27 @@ production 改走只讀的 `status-json`。三個查詢的原始回傳都要先�
 python3 -m src.phase1.runner check-root --quantboy-root /既有/quantboy
 ```
 
-這只讀原始碼，不執行查詢。舊目錄沒有 `STATUS_JSON_REVISION = "status-json-2"` 就不是已支援。把 root 指到一個目錄不會變成部署完成。套件內含 `src/prefilter.py`、`src/common.py` 與 `src/live_trader.py`，仍不含金鑰。
+這只讀原始碼和檔名，不讀 `.env`、不讀 `state.json`、不建立 `data/`。父側 15:03 的唯讀 metadata：`/Users/frank/quantboy-live` 是平鋪的 `live_trader.py`，沒有 `src/` 和 `COMMIT`，SHA256 是 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`，沒有 `status-json-2`。`/usr/bin/python3` 是 3.9.6。`com.quantboy.livewatch` 每 60 秒執行該檔的 `watch --live`，cwd 是舊 root，而且 plist 與 launchd 全域都沒有 `QUANTBOY_DATA_DIR`、`QUANTBOY_EVENTS_FILE`。舊 root 看得到 `state.json`、`.lock`、`events.json`，沒有 HALT 旗標。`.env` 和 state 內容沒有讀，程式如何決定資料路徑也還沒有證據。
+
+因此這包的預設 `<root>/data` 不能當成那個平鋪目錄。`check-root` 對平鋪 root 回 `layout=flat`、`root_supports_status_json=false`、`same_lock_proven=false`、`share_live_state=false`。這包的實盤鎖是 `<data_dir>/.lock` 的 `fcntl.flock`，phase1 用的是另一個 `phase1_state.lock`，而且狀態目錄裡若已有 `state.json`、`.lock` 或 HALT 旗標就拒絕。在看到下面的非秘密證據之前，不宣稱可以共用舊鎖或舊 state，也不把新程式指到舊 root。
+
+版本化安裝只解到新目錄，不覆蓋 `/Users/frank/quantboy-live`，不複製 `.env`，不啟動 watch 或 manage，不雙寫：
+
+```bash
+INSTALL="$HOME/bululau-cycle-ack/COMMIT"
+mkdir -p "$INSTALL"
+tar -xzf bululau-cycle-ack.tar.gz -C "$INSTALL" --strip-components=1
+python3 -m src.phase1.runner check-root --quantboy-root /Users/frank/quantboy-live
+python3 -m src.phase1.runner check-root --quantboy-root "$INSTALL"
+```
+
+`CYCLE_DIR` 等父側選定安裝位置之後再核對。這輪不填真實路徑，也不假設它就是舊 root。
+
+若要判斷舊程式的資料目錄能不能在以後對上，請父側補這些非秘密資料，不要貼 `.env` 或 state 內容：
+
+- `live_trader.py`、`config.py`（若有）的 SHA256，以及設定 `HOME`、`STATE`、`LOCK`、`EVENTS` 的那幾行。值裡若有金鑰請塗掉。
+- `state.json`、`.lock`、`events.json`、`HALT_REPORT_USER.flag`、`data/state.json`、`.env` 各自的存在、型別、大小、mtime、inode、是否為 symlink。`.env` 只報 mode，不報內容。
+- `launchctl print` 的環境變數名稱，加上 `QUANTBOY_DATA_DIR` 與 `QUANTBOY_EVENTS_FILE` 的路徑值（若程序環境裡有）。不要帶其他秘密。
+- 正在跑的 watch 行程打開的 `.lock` 與 `state.json` 路徑。
+
+這台建置環境是 Python 3.12.3，沒有 3.9.6，所以沒有在 3.9.6 上跑測試。套件原始碼沒有 `match`，時間字串的 `Z` 會先換成 `+00:00` 再解析。Mac 上仍要以 `/usr/bin/python3` 重跑套件測試才算 3.9.6 通過。

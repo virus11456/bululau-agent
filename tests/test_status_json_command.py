@@ -141,6 +141,32 @@ class StatusJsonCommandTest(unittest.TestCase):
             self.assertTrue(old["prefilter_present"])
             self.assertFalse(old["root_supports_status_json"])
             self.assertFalse(old["deploy_complete"])
+            self.assertFalse(old["same_lock_proven"])
+            self.assertFalse(old["share_live_state"])
+        with tempfile.TemporaryDirectory() as live:
+            os.makedirs(os.path.join(live, "CYCLE_DIR"))
+            with open(os.path.join(live, "live_trader.py"), "w", encoding="utf-8") as handle:
+                handle.write("def cmd_status():\n    return None\n")
+            with open(os.path.join(live, ".env"), "w", encoding="utf-8") as handle:
+                handle.write("BINANCE_API_SECRET=supersecretvalue\n")
+            for name in ("state.json", ".lock", "events.json"):
+                with open(os.path.join(live, name), "w", encoding="utf-8") as handle:
+                    handle.write("{}\n")
+            report = inspect_quantboy_root(live)
+            self.assertEqual(report["layout"], "flat")
+            self.assertFalse(report["known_live_flat_sha"])
+            self.assertFalse(report["root_supports_status_json"])
+            self.assertTrue(report["files_present"]["state.json"])
+            self.assertTrue(report["files_present"][".lock"])
+            self.assertTrue(report["files_present"]["events.json"])
+            self.assertFalse(report["files_present"]["HALT_REPORT_USER.flag"])
+            self.assertTrue(report["env_file_present"])
+            self.assertFalse(report["env_file_copied"])
+            self.assertTrue(report["foreign_state_in_root"])
+            self.assertFalse(report["package_default_matches_live_root"])
+            self.assertFalse(report["same_lock_proven"])
+            self.assertFalse(report["share_live_state"])
+            self.assertNotIn("supersecretvalue", json.dumps(report))
 
 
 if __name__ == "__main__":

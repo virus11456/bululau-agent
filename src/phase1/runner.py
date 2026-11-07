@@ -2,6 +2,7 @@
 
 不讀金鑰、不 POST、不把五欄 sender 當正式通道。舊 AI 無條件保持。
 """
+import hashlib
 import json
 import os
 import re
@@ -430,24 +431,82 @@ SWITCH_BLOCKERS = (
 )
 
 
+KNOWN_LIVE_FLAT_SHA = "65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b"
+LIVE_LAYOUT_FILES = (
+    "state.json", ".lock", "events.json", "HALT_REPORT_USER.flag",
+    "data/state.json", ".env", "config.py", "src/config.py", "COMMIT",
+)
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        chunk = handle.read(65536)
+        while chunk:
+            digest.update(chunk)
+            chunk = handle.read(65536)
+    return digest.hexdigest()
+
+
 def inspect_quantboy_root(root):
-    """只讀原始碼。不執行 status-json，不讀金鑰。有目錄不等於已支援新契約。"""
-    trader = os.path.join(root, "src", "live_trader.py")
+    """只讀檔名與原始碼。不讀 .env、不讀 state.json、不執行查詢、不建立 data/。"""
+    flat = os.path.join(root, "live_trader.py")
+    packaged = os.path.join(root, "src", "live_trader.py")
+    flat_ok = os.path.isfile(flat) and not os.path.islink(flat)
+    src_ok = os.path.isfile(packaged) and not os.path.islink(packaged)
+    if flat_ok and src_ok:
+        layout = "mixed"
+        trader = None
+    elif flat_ok:
+        layout = "flat"
+        trader = flat
+    elif src_ok:
+        layout = "src"
+        trader = packaged
+    else:
+        layout = None
+        trader = None
     text = ""
-    if os.path.isfile(trader) and not os.path.islink(trader):
-        with open(trader, encoding="utf-8") as handle:
+    digest = None
+    if trader:
+        with open(trader, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
+        digest = _file_sha256(trader)
     revision = "status-json-2" if 'STATUS_JSON_REVISION = "status-json-2"' in text and "def cmd_status_json" in text else None
+    present = {}
+    for name in LIVE_LAYOUT_FILES:
+        path = os.path.join(root, name)
+        present[name] = os.path.lexists(path) and not os.path.isdir(path)
+    env_path = os.path.join(root, ".env")
+    env_present = os.path.isfile(env_path) and not os.path.islink(env_path)
+    env_mode = oct(os.lstat(env_path).st_mode & 0o777) if env_present else None
+    foreign = any(os.path.lexists(os.path.join(root, name)) for name in ("state.json", ".lock", "HALT_REPORT_USER.flag"))
     return {
         "quantboy_root": root,
+        "layout": layout,
+        "live_trader_sha256": digest,
+        "known_live_flat_sha": digest == KNOWN_LIVE_FLAT_SHA,
         "prefilter_present": os.path.isfile(os.path.join(root, "src", "prefilter.py")) and not os.path.islink(os.path.join(root, "src", "prefilter.py")),
-        "common_present": os.path.isfile(os.path.join(root, "src", "common.py")),
+        "common_present": os.path.isfile(os.path.join(root, "src", "common.py")) and not os.path.islink(os.path.join(root, "src", "common.py")),
         "status_json_revision": revision,
-        "root_supports_status_json": revision == "status-json-2",
+        "root_supports_status_json": layout == "src" and revision == "status-json-2",
+        "files_present": present,
+        "env_file_present": env_present,
+        "env_file_mode": env_mode,
+        "env_file_copied": False,
+        "data_dir_env_set_in_this_process": "QUANTBOY_DATA_DIR" in os.environ,
+        "events_file_env_set_in_this_process": "QUANTBOY_EVENTS_FILE" in os.environ,
+        "package_default_data_dir": "data",
+        "package_default_matches_live_root": False,
+        "same_lock_proven": False,
+        "share_live_state": False,
+        "cycle_dir_must_be_separate": True,
+        "foreign_state_in_root": foreign,
         "deploy_complete": False,
         "spawned": False,
         "account_verified": False,
         "switch_allowed": False,
+        "dual_write": False,
     }
 
 

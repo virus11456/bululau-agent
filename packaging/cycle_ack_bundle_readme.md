@@ -2,6 +2,8 @@
 
 把 `run_cycle` 登記的 outbox 和 processed 回條放在同一個 `phase1_state.json`。不 POST，不讀 sender 設定，不碰實盤 `data/`，也不碰獨立 ACK 目錄裡的 `ack_state.json`。
 
+不要解到 `/Users/frank/quantboy-live`。那個目錄是平鋪的舊程式，沒有這包的 `status-json`。不要複製 `.env`。`CYCLE_DIR` 不是跨機共用 store；Mac 與 box 不共用檔案系統。自動跨機傳送沒有實作。判斷檔是 `judgments/<event_id>.json`，由 consumer 寫，這包不代填。
+
 ```bash
 mkdir -p "$HOME/bululau-cycle-ack"
 tar -xzf bululau-cycle-ack.tar.gz -C "$HOME/bululau-cycle-ack" --strip-components=1

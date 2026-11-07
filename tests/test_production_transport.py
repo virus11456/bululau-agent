@@ -1,4 +1,5 @@
 """正式傳輸。本地 HTTPS，不打外網，不讀測試 sender 或金鑰。"""
+import hashlib
 import json
 import os
 import ssl
@@ -6,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from src.phase1.ack_contract import cycle_key
 from src.phase1.production_transport import (
     HttpsTransport,
     bind_envelope,
@@ -408,6 +411,216 @@ class ProductionTransportTest(unittest.TestCase):
             finally:
                 httpd.shutdown()
                 httpd.server_close()
+
+    def _pending(self, state, event_id, evaluation_id):
+        store = Store(state)
+        store.state["outbox"][cycle_key(evaluation_id)] = {
+            "event_id": event_id, "evaluation_id": evaluation_id, "status": "pending", "processing_ack": False,
+        }
+        store.save()
+        return store
+
+    def _race(self, state, event_id, evaluation_id, positions, ready, result, go):
+        worker = (
+            "import json,os,sys,time\n"
+            "sys.path.insert(0, os.environ['BIND_ROOT'])\n"
+            "open(os.environ['BIND_READY'], 'w').close()\n"
+            "while not os.path.exists(os.environ['BIND_GO']):\n"
+            "    time.sleep(0.01)\n"
+            "from src.phase1.production_transport import bind_envelope, build_envelope\n"
+            "from src.phase1.session import Store\n"
+            "envelope = build_envelope(\n"
+            "    {'status':'ok','as_of':'2026-11-07T12:19:30+08:00','positions':int(os.environ['BIND_POS']),'orders':0,'manage_error':False,'manage_complete':True,'status_trusted':True},\n"
+            "    {'candidates':[]}, {'valid':True,'status':'fresh','age_seconds':1},\n"
+            "    event_id=os.environ['BIND_EVENT'], evaluation_id=os.environ['BIND_EVAL'], sent_at=os.environ['BIND_SENT'], reason='positions_open')\n"
+            "try:\n"
+            "    digest = bind_envelope(Store(os.environ['BIND_STATE']), envelope)\n"
+            "    body = {'ok': True, 'digest': digest}\n"
+            "except ValueError as exc:\n"
+            "    body = {'ok': False, 'reason': str(exc)}\n"
+            "with open(os.environ['BIND_RESULT'], 'w', encoding='utf-8') as handle:\n"
+            "    json.dump(body, handle)\n"
+        )
+        env = os.environ.copy()
+        env.update({
+            "BIND_ROOT": str(ROOT), "BIND_READY": ready, "BIND_GO": go, "BIND_RESULT": result,
+            "BIND_STATE": state, "BIND_EVENT": event_id, "BIND_EVAL": evaluation_id,
+            "BIND_POS": str(positions), "BIND_SENT": SENT,
+        })
+        proc = subprocess.Popen([PYTHON, "-c", worker], cwd=str(ROOT), env=env)
+        return proc
+
+    def test_two_processes_one_envelope_cannot_both_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._pending(tmp, EVENT, "s1")
+            ready_a = os.path.join(tmp, "ready-a")
+            ready_b = os.path.join(tmp, "ready-b")
+            go = os.path.join(tmp, "go")
+            left = self._race(tmp, EVENT, "s1", 1, ready_a, os.path.join(tmp, "result-a"), go)
+            right = self._race(tmp, EVENT, "s1", 7, ready_b, os.path.join(tmp, "result-b"), go)
+            for path in (ready_a, ready_b):
+                for _ in range(200):
+                    if os.path.exists(path):
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "result-a")))
+            open(go, "w").close()
+            self.assertEqual(left.wait(timeout=15), 0)
+            self.assertEqual(right.wait(timeout=15), 0)
+            results = [json.loads(Path(tmp, name).read_text(encoding="utf-8")) for name in ("result-a", "result-b")]
+            self.assertEqual(sorted(item["ok"] for item in results), [False, True])
+            self.assertEqual([item for item in results if not item["ok"]][0]["reason"], "immutable_conflict")
+            winner = [item for item in results if item["ok"]][0]["digest"]
+            raw = Path(tmp, "envelopes", EVENT + ".json").read_bytes().strip()
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), winner)
+            fresh = Store(tmp)
+            self.assertEqual(fresh.state["outbox"]["cycle:s1"]["envelope_sha256"], winner)
+            read = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "read-envelope", "--state-dir", tmp, "--event-id", EVENT, "--evaluation-id", "s1"],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(read.returncode, 0, read.stderr)
+            body = json.loads(read.stdout)
+            self.assertEqual(hashlib.sha256(_canonical_dump(body)).hexdigest(), winner)
+            self.assertIn(body["snapshot"]["positions"], (1, 7))
+
+    def test_same_content_is_idempotent_and_other_events_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            second = "c-" + "cd" * 16
+            self._pending(tmp, EVENT, "s1")
+            self._pending(tmp, second, "s2")
+            ready_a = os.path.join(tmp, "ready-a")
+            ready_b = os.path.join(tmp, "ready-b")
+            go = os.path.join(tmp, "go")
+            left = self._race(tmp, EVENT, "s1", 1, ready_a, os.path.join(tmp, "result-a"), go)
+            right = self._race(tmp, EVENT, "s1", 1, ready_b, os.path.join(tmp, "result-b"), go)
+            for path in (ready_a, ready_b):
+                for _ in range(200):
+                    if os.path.exists(path):
+                        break
+                    time.sleep(0.01)
+            open(go, "w").close()
+            self.assertEqual(left.wait(timeout=15), 0)
+            self.assertEqual(right.wait(timeout=15), 0)
+            results = [json.loads(Path(tmp, name).read_text(encoding="utf-8")) for name in ("result-a", "result-b")]
+            self.assertTrue(all(item["ok"] for item in results))
+            self.assertEqual(results[0]["digest"], results[1]["digest"])
+            other = build_envelope(
+                {"status": "ok", "as_of": "2026-11-07T12:19:30+08:00", "positions": 2, "orders": 1, "manage_error": False, "manage_complete": True, "status_trusted": True},
+                {"candidates": []}, {"valid": True, "status": "fresh", "age_seconds": 1},
+                event_id=second, evaluation_id="s2", sent_at=SENT, reason="orders_open",
+            )
+            bind_envelope(Store(tmp), other)
+            saved = Store(tmp).state["outbox"]
+            self.assertEqual(saved["cycle:s1"]["envelope_sha256"], results[0]["digest"])
+            self.assertTrue(saved["cycle:s2"]["envelope_sha256"])
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "envelopes", EVENT + ".json")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "envelopes", second + ".json")))
+
+    def test_killed_lock_holder_does_not_deadlock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._pending(tmp, EVENT, "s1")
+            directory = os.path.join(tmp, "envelopes")
+            os.makedirs(directory)
+            held = os.path.join(tmp, "held")
+            holder = subprocess.Popen([PYTHON, "-c", (
+                "import os,sys,time\n"
+                "sys.path.insert(0, os.environ['BIND_ROOT'])\n"
+                "from src.phase1.ack_store import directory_lock\n"
+                "with directory_lock(os.environ['BIND_DIR'], 'publish.lock'):\n"
+                "    open(os.environ['BIND_HELD'], 'w').close()\n"
+                "    time.sleep(30)\n"
+            )], cwd=str(ROOT), env=dict(os.environ, BIND_ROOT=str(ROOT), BIND_DIR=directory, BIND_HELD=held))
+            for _ in range(200):
+                if os.path.exists(held):
+                    break
+                time.sleep(0.01)
+            self.assertTrue(os.path.exists(held))
+            holder.kill()
+            holder.wait(timeout=5)
+            digest = bind_envelope(Store(tmp), _envelope())
+            self.assertTrue(digest)
+            self.assertEqual(Store(tmp).state["outbox"]["cycle:s1"]["envelope_sha256"], digest)
+
+    def test_context_export_is_not_a_shared_directory_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            left = os.path.join(tmp, "mac", "CYCLE_DIR")
+            right = os.path.join(tmp, "box", "CYCLE_DIR")
+            os.makedirs(left)
+            self._pending(left, EVENT, "s1")
+            bind_envelope(Store(left), _envelope())
+            exported = os.path.join(tmp, "context.json")
+            proc = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "export-context", "--state-dir", left, "--event-id", EVENT, "--evaluation-id", "s1", "--out", exported],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            text = Path(exported).read_text(encoding="utf-8")
+            self.assertNotIn("authorization", text)
+            self.assertNotIn("BINANCE_API", text)
+            self.assertNotIn("automatic_transport\":true", text.replace(" ", ""))
+            checked = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "verify-context", "--file", exported, "--now", NOW],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertFalse(json.loads(checked.stdout)["same_store"])
+            self.assertFalse(json.loads(checked.stdout)["ai_execution_proven"])
+            same = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "verify-same-store", "--state-dir", left, "--file", exported],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(same.returncode, 0, same.stderr)
+            os.makedirs(right)
+            Store(right)
+            other = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "verify-same-store", "--state-dir", right, "--file", exported],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(other.returncode, 1)
+            self.assertEqual(json.loads(other.stdout)["reason"], "different_store")
+            self.assertFalse(os.path.exists(os.path.join(left, "judgments")))
+            stale = json.loads(text)
+            stale["sent_at"] = "2026-11-07T02:00:00Z"
+            stale["envelope"]["sent_at"] = stale["sent_at"]
+            stale["envelope_sha256"] = hashlib.sha256(_canonical_dump(stale["envelope"])).hexdigest()
+            stale_path = os.path.join(tmp, "stale.json")
+            Path(stale_path).write_text(json.dumps(stale), encoding="utf-8")
+            expired = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "verify-context", "--file", stale_path, "--now", NOW],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(json.loads(expired.stdout)["reason"], "expired")
+
+    def test_consumer_crash_points_leave_pending_until_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _seed(tmp)
+            missing = subprocess.run(
+                [PYTHON, "-m", "src.phase1.production_transport", "commit-judgment", "--state-dir", tmp, "--event-id", EVENT, "--evaluation-id", "s1", "--now", NOW],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(json.loads(missing.stdout)["reason"], "rejected_judgment")
+            self.assertEqual(Store(tmp).state["outbox"]["cycle:s1"]["status"], "pending")
+            os.makedirs(os.path.join(tmp, "judgments"))
+            envelope = json.loads(Path(tmp, "envelopes", EVENT + ".json").read_text(encoding="utf-8"))
+            with open(os.path.join(tmp, "judgments", EVENT + ".json"), "w", encoding="utf-8") as handle:
+                json.dump(_judgment(envelope), handle)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "ack-inbox")))
+            self.assertEqual(Store(tmp).state["outbox"]["cycle:s1"]["status"], "pending")
+            committed = commit_judgment(tmp, EVENT, "s1", NOW)
+            self.assertTrue(os.path.isfile(committed))
+            self.assertEqual(Store(tmp).state["outbox"]["cycle:s1"]["status"], "pending")
+            from src.phase1.ack_contract import apply_processed_ack, load_ack
+            first = apply_processed_ack(Store(tmp), load_ack(committed), expected_event_id=EVENT, sent_at=SENT, now=NOW)
+            second = apply_processed_ack(Store(tmp), load_ack(committed), expected_event_id=EVENT, sent_at=SENT, now=NOW)
+            self.assertEqual(first["reason"], "processed")
+            self.assertEqual(second["reason"], "duplicate")
+            self.assertEqual(second["process_count"], 1)
+
+
+def _canonical_dump(document):
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 if __name__ == "__main__":

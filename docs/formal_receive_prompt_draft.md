@@ -37,24 +37,26 @@
 
 - context／delivery 的 UTF-8 上限是 `CONTEXT_MAX_BYTES`，即 `64 * 1024`（65536）。超過拒絕，不裁切。
 - 時效沿 `_outside_window`：比現在晚超過 60 秒，或早於現在超過 `MAX_ACK_AGE`（15 分鐘），拒絕。
+- 父判斷截止沿用同一個 `MAX_ACK_AGE`，從第一次寫進 Store 的可信時鐘起算。剛好 15 分鐘仍可補交，多 1 秒才是 `parent_deadline_expired`。這個秒數不是已批准的試跑期限，`{{TRIAL_DEADLINE_PENDING_APPROVAL}}` 仍空白。payload 的 `now` 不能把這條截止往後推。
 - 判斷檔欄位沿 `gateway_client._JUDGMENT_FIELDS`：`schema_version`、`event_type`、`event_id`、`evaluation_id`、`envelope_sha256`、`decision`、`basis`、`completed_at`、`orders_placed`、`ai_execution_proven`。缺一欄就不 ready。
 - `decision` 只允許 `keep_original_ai` 或 `no_trade`。`orders_placed` 與 `ai_execution_proven` 都必須是 false。
 
 ## 步驟
 
 1. 把不可信的 `{wake, context}` 原樣放到隔離目錄的 `delivery.json`。不要相信它已經授權交易。
-2. 執行 `python3 -m src.phase1.runner receive --state-dir {{ISOLATED_STATE_DIR}} --file delivery.json --now {{NOW}}`。合格才是 `pending`。`pending` 不是完成，也不是 ACK。
+2. 執行 `python3 -m src.phase1.runner receive --state-dir {{ISOLATED_STATE_DIR}} --file delivery.json --now {{NOW}}`。這裡的 `--now` 只核對 delivery 時效。父判斷截止由這支 CLI 取系統 UTC，不採用 payload 的 `now`。合格才是 `pending`。`pending` 不是完成，也不是 ACK。
 3. 你親自讀 `{{ISOLATED_STATE_DIR}}/formal-files/<event_id>/context.json` 的完整 context。本套件沒有收進 `docs/strategy.md` 與 `docs/agent_prompt.md`，所以這次試跑不具交易路由資格。不要在這裡重寫布神規則，也不要自填日均線。判斷只允許 `keep_original_ai` 或 `no_trade`。
-4. 你自己寫 `judgment.json` 與 `trace.json`。程式不代寫。然後執行 `python3 -m src.phase1.runner receive-submit --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --judgment judgment.json --trace trace.json --now {{NOW}}`。這一步不重新呼叫你。
+4. 你自己寫 `judgment.json` 與 `trace.json`。程式不代寫。然後執行 `python3 -m src.phase1.runner receive-submit --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --judgment judgment.json --trace trace.json --now {{NOW}}`。這一步不重新呼叫你。命令上的 `--now` 會被丟棄，不能用來延長父判斷截止。未過截止才可補交既有結果。已持久成功的檔不覆寫。
 5. 只有既有 `publisher_document` 通過，狀態才是 `publish_ready`，並留下可讀的 judgment／trace。重開同一個 state dir 還要讀得到這三個檔。`publish_ready` 不是發布，也不是 Mac ACK。
 6. 讀回只用 `python3 -m src.phase1.runner receive-readback --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT`。它只讀 Store 裡的 `formal-files/<event_id>/` 三個檔，重組 PUT，不接受 payload 裡的路徑。缺檔或驗證失敗的結束碼不是 0。輸出裡 `sent` 與 `http_sent` 都是 false。不要用 `gateway_client put` 當讀回：沒有 `--send` 時它不看這三個檔就結束碼 0。不要加 `--send`。HTTP 200 不是 ACK。
+7. 離線狀態用 `python3 -m src.phase1.runner receive-status --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT`。它不改列。到期用 `python3 -m src.phase1.runner receive-expire --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT`。這兩支都不接受 `--now`，時鐘是系統 UTC。本包沒有 scheduler，到期不會自己準時發生，要等平台或人觸發 `receive-expire`。本地變成 `parent_deadline_expired` 只表示這份 Store 不再收補交，不等於平台 AI process 真的被殺。
 
 ## 失敗時誰負責
 
 | 情況 | 狀態 | 動作 | 告警 |
 | --- | --- | --- | --- |
 | 缺資料或驗證失敗 | 維持 `pending` | 不 ACK，不開倉，留原 AI | 你把原因告訴 GM Grok Bot |
-| callback 執行器超時 | 不開新倉，改叫有界 fallback | fallback 再失敗就維持 `running`，下次只補 fallback，不重跑 manage | 同上 |
+| 本地 argv callback 超時 | 這是 process group 的本地 deadline，不是平台父 AI 的期限，也不代表平台 AI process 已被殺 | 不開新倉，改叫有界 fallback。fallback 再失敗就維持 `running`，下次只補 fallback，不重跑 manage | 同上。平台父 AI 沒有接上這條執行器 |
 | gateway 若將來回 401 | 維持 `pending` | 不換 secret、不重試成成功 | 同上。本草稿不打這支呼叫 |
 | `publisher_document` 或 `receive-submit` 失敗 | 維持 `pending` | 不 ACK。你可以再補一次檔，不重新把 context 交給另一輪 AI | 同上 |
 
@@ -62,12 +64,31 @@
 
 ## 重啟
 
-同一個 event 的 claim 還在時，第二個 worker 不得再喚 AI。行程中斷後看到 `running` 或 `pending`，只做 fallback 或 `receive-submit`，不重送 context、不重跑 manage。`publish_ready` 之後再送同一份是 duplicate。
+同一個 event 的活躍 flock 還在時，第二個 worker 不得搶鎖，也不得再喚 AI。
+
+行程中斷後分三支，都不重跑 manage：
+
+- 已有持久成功結果：`publish_ready` 的 judgment／trace 留在原檔。重收、重啟、`receive-expire` 都不覆寫。
+- 中斷但還沒有結果，而且未過父判斷截止：只做 `receive-submit` 補交既有檔，不重送 context，不重新喚 AI。
+- 沒有結果而且已過截止：狀態改為 `parent_deadline_expired`，留下去敏本地告警。告警沒有送出，原 AI fallback 沒有呼叫。此後不得再喚 AI，也不得靠重收或重啟把 deadline 往後延。
+
+`publish_ready` 之後再送同一份是 duplicate，不是新的發布。
 
 ## 交易
 
-payload 不授權交易。正式交易路由還沒驗之前只做 dry-run。不執行 `open --live` 或 `manage --live`。不改現有 30 分鐘 routine，也不改 60 秒 watch。
+payload 不授權交易。這次只做隔離 dry-run，不執行 `open --live` 或 `manage --live`。隔離試跑不影響舊的 manage，也不改現有 30 分鐘 routine，也不改 60 秒 watch。
 
 ## 舊測試入口
 
 暫停中的「交易候選接收測試（不下單）」，automation `automation-1794023232755`，不是這份正式 wake。它的五欄 `trade_candidate_test` 只做過 hash／ACK。預算已用完。台北時間 2026-11-08 00:00 到期。不要重開它。
+
+## 下一步未接的平台父 AI
+
+下面每一項都還沒有契約實作。不要假設已有呼叫網址、方法或欄位。本地 handler 不能代替這些接點。
+
+- 喚起：沒有平台父 AI 的喚起接點。`receive` 寫了 `pending` 不會把 context 送到平台。
+- 完整 context 讀：context 只在本機 `formal-files/<event_id>/context.json`。沒有平台讀取接點。
+- 持久 submit：`receive-submit` 只寫本機 Store。沒有平台代交接點。
+- 有界 deadline 觸發：沒有 scheduler。`receive-expire` 要平台或人呼叫才會跑，不會自己準時發生。
+- 去敏告警：到期只在本機 `formal-alerts/<event_id>.json` 留 event_id、截止時間和未接通旗標，不含 context、judgment、trace 或 secret。沒有告警送出接點。
+- 原 AI 回退：沒有接回原 AI 的接點。本地終止不能說成原 AI 已接手，也不能說成平台 AI process 已被殺。

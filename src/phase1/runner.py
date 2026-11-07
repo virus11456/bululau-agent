@@ -726,6 +726,10 @@ def main(argv):
         return _receive_submit_main(argv[1:])
     if argv[:1] == ["receive-readback"]:
         return _receive_readback_main(argv[1:])
+    if argv[:1] == ["receive-status"]:
+        return _receive_status_main(argv[1:])
+    if argv[:1] == ["receive-expire"]:
+        return _receive_expire_main(argv[1:])
     if argv[:1] != ["run"]:
         print("用法: python3 -m src.phase1.runner run --state-dir DIR --config FILE [--now TIME --scan-id ID] [--shadow]")
         return 2
@@ -891,6 +895,7 @@ def _receive_submit_main(argv):
         with open(found["trace"], encoding="utf-8") as handle:
             trace = json.load(handle)
         store = Store(found["state_dir"])
+        # found["now"] 是 payload 時鐘，submit 會丟棄，不能用來延長父判斷截止。
         result = submit_parent_files(store, found["event_id"], judgment, trace, found["now"])
         stored = read_formal(store, found["event_id"])
         files = read_parent_files(store, found["event_id"])
@@ -933,6 +938,71 @@ def _receive_readback_main(argv):
         }, ensure_ascii=False))
         return 1
     print(json.dumps(document, ensure_ascii=False))
+    return 0
+
+
+def _payload_clock_rejected(argv):
+    if "--now" not in argv:
+        return False
+    print(json.dumps({
+        "accepted": False,
+        "ack": False,
+        "http_sent": False,
+        "mutated": False,
+        "reason": "payload_clock_rejected",
+        "clock_source": "rejected_payload",
+        "scheduler_present": False,
+        "platform_ai_process_killed": False,
+        "expiry_requires_platform_trigger": True,
+    }, ensure_ascii=False))
+    return True
+
+
+def _receive_status_main(argv):
+    """離線讀父判斷狀態。不改列。不接受 payload --now。生產用系統 UTC。"""
+    from .formal_receive import formal_status
+    if _payload_clock_rejected(argv):
+        return 1
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "event_id" not in found:
+        print(json.dumps({
+            "ack": False, "http_sent": False, "reason": "receive_disabled", "mutated": False,
+        }, ensure_ascii=False))
+        return 2
+    try:
+        result = formal_status(Store(found["state_dir"]), found["event_id"])
+    except ValueError as exc:
+        print(json.dumps({
+            "ack": False, "http_sent": False, "reason": str(exc), "mutated": False,
+            "platform_ai_process_killed": False,
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def _receive_expire_main(argv):
+    """明示到期檢查。沒有 scheduler，不會自己準時跑。不接受 payload --now。"""
+    from .formal_receive import expire_parent
+    if _payload_clock_rejected(argv):
+        return 1
+    found = _parse(argv)
+    if not found or "state_dir" not in found or "event_id" not in found:
+        print(json.dumps({
+            "ack": False, "http_sent": False, "reason": "receive_disabled", "mutated": False,
+        }, ensure_ascii=False))
+        return 2
+    try:
+        result = expire_parent(Store(found["state_dir"]), found["event_id"])
+    except ValueError as exc:
+        print(json.dumps({
+            "ack": False, "http_sent": False, "reason": str(exc), "mutated": False,
+            "platform_ai_process_killed": False, "scheduler_present": False,
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    if result.get("reason") == "claim_held":
+        return 1
     return 0
 
 

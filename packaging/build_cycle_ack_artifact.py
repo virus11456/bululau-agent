@@ -74,6 +74,7 @@ FILES = (
     "tests/test_run44_submit.py",
     "tests/test_run45_timeout.py",
     "tests/test_run46_gaps.py",
+    "tests/test_run47_parent_deadline.py",
     "gateway/client.example.json",
     "gateway/package.json",
     "gateway/package-lock.json",

@@ -1,7 +1,7 @@
 """未啟用的正式接收核對。不建立 routine、不發 HTTP、不填判斷。
 
-執行器超時沒有接上。這裡不證明 timeout。
-
+父判斷截止是本地狀態。沒有 scheduler，不會自己準時跳。
+本地終止不代表平台 AI process 已被殺，也不送告警、不呼叫原 AI。
 
 五欄 trade_candidate_test 是舊測試入口，不是正式 wake 授權。
 可驗收的是這個 handler。平台上的 prompt 要人自己存。有界 PUT／GET／POST 仍待批准。
@@ -9,8 +9,9 @@
 import fcntl
 import json
 import os
+from datetime import datetime, timezone
 
-from .ack_contract import cycle_key
+from .ack_contract import MAX_ACK_AGE, cycle_key
 from .box_receiver import assert_wake_bound
 from .production_transport import CONTEXT_MAX_BYTES, _outside_window, _moment
 from .review_context import _recomputed_context, exact_schema_version
@@ -33,6 +34,18 @@ LAYERS = {
     "handler_verifiable": True,
     "prompt_saved_by_platform": False,
     "bounded_trial_approved": False,
+}
+
+# 沿用既有 MAX_ACK_AGE。不另編試跑秒數，也不把它當成已批准的平台 AI 期限。
+PARENT_JUDGMENT_DEADLINE = MAX_ACK_AGE
+
+PLATFORM_PARENT_AI = {
+    "wake_connected": False,
+    "context_read_connected": False,
+    "persistent_submit_connected": False,
+    "bounded_deadline_trigger_connected": False,
+    "desensitized_alert_delivery_connected": False,
+    "original_ai_fallback_connected": False,
 }
 
 
@@ -155,9 +168,87 @@ def read_formal(store, event_id):
     return row if isinstance(row, dict) else None
 
 
+def trusted_judgment_clock(injected=None):
+    """生產不傳 injected，用系統 UTC。測試才傳入受控時鐘。payload 的 now 不進這裡。"""
+    if injected is None:
+        moment = datetime.now(timezone.utc)
+        source = "system"
+    else:
+        moment = _moment(injected)
+        source = "injected"
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), source
+
+
+def _deadline_text(clock_text):
+    moment = _moment(clock_text) + PARENT_JUDGMENT_DEADLINE
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _past_deadline(deadline_text, clock_text):
+    if not isinstance(deadline_text, str):
+        return True
+    return _moment(clock_text) > _moment(deadline_text)
+
+
+def _alert_path(root, event_id):
+    return os.path.join(str(root), "formal-alerts", event_id + ".json")
+
+
+def _alert_body(event_id, deadline_text, clock_text):
+    return {
+        "schema_version": 1,
+        "event_type": "local_parent_deadline_alert",
+        "event_id": event_id,
+        "status": "parent_deadline_expired",
+        "judgment_deadline": deadline_text,
+        "checked_at": clock_text,
+        "alert_delivered": False,
+        "platform_ai_process_killed": False,
+        "original_ai_fallback_called": False,
+        "http_sent": False,
+        "scheduler_present": False,
+        "contains_context": False,
+        "contains_judgment": False,
+        "contains_secret": False,
+    }
+
+
+def _mark_expired(store, event_id, clock_text):
+    """只在已過持久截止且尚未成功時寫終止。不改 deadline，不覆寫 publish_ready。"""
+    with store.exclusive():
+        store.reload()
+        row = (store.state.get("formal_inbox") or {}).get(event_id)
+        if not isinstance(row, dict):
+            raise ValueError("not_received")
+        if row.get("status") in ("publish_ready", "parent_deadline_expired"):
+            return row
+        if not _past_deadline(row.get("judgment_deadline"), clock_text):
+            return row
+        row["status"] = "parent_deadline_expired"
+        row["expired_at"] = clock_text
+        store.save()
+        deadline_text = row.get("judgment_deadline")
+    path = _alert_path(store.root, event_id)
+    if not os.path.isfile(path):
+        _write_json(path, _alert_body(event_id, deadline_text, clock_text))
+    with store.exclusive():
+        store.reload()
+        row = store.state["formal_inbox"][event_id]
+        if row.get("status") == "parent_deadline_expired" and not row.get("local_alert"):
+            row["local_alert"] = os.path.join("formal-alerts", event_id + ".json")
+            store.save()
+    return read_formal(store, event_id)
+
+
 def _row_verdict(row, *, duplicate, parent_called, claim_held=False, accepted=True):
     status = row.get("status") if isinstance(row, dict) else "pending"
-    verdict = _base("publish_ready" if status == "publish_ready" else "parent_pending")
+    if status == "publish_ready":
+        reason = "publish_ready"
+    elif status == "parent_deadline_expired":
+        reason = "parent_deadline_expired"
+    else:
+        reason = "parent_pending"
+    verdict = _base(reason)
     verdict.update({
         "class": "evaluation_delivery",
         "accepted": accepted and not claim_held,
@@ -168,11 +259,16 @@ def _row_verdict(row, *, duplicate, parent_called, claim_held=False, accepted=Tr
         "evaluation_id": row.get("evaluation_id") if isinstance(row, dict) else None,
         "envelope_sha256": row.get("digest") if isinstance(row, dict) else None,
         "parent_called": parent_called,
+        "judgment_deadline": row.get("judgment_deadline") if isinstance(row, dict) else None,
         "ack": status == "publish_ready",
         "live_send": False,
         "trade_authorized": False,
         "durable": True,
         "timeout_executor": False,
+        "platform_ai_process_killed": False,
+        "scheduler_present": False,
+        "expiry_requires_platform_trigger": True,
+        "platform_parent_ai": dict(PLATFORM_PARENT_AI),
     })
     return verdict
 
@@ -244,11 +340,16 @@ def _publish_files(store, event_id):
     )
 
 
-def receive_delivery(store, document, now, parent=None):
-    """寫進 Store。沒有父 callback 不假 ACK。程式不生成 judgment。"""
+def receive_delivery(store, document, now, parent=None, judgment_clock=None):
+    """寫進 Store。沒有父 callback 不假 ACK。程式不生成 judgment。
+
+    now 只核對 delivery 時效。父判斷截止用 judgment_clock；生產省略它，改取系統 UTC。
+    重收不改已寫入的截止，也不在截止後再喚父 AI。
+    """
     checked, legacy = _checked_delivery(document, now)
     if legacy is not None:
         return legacy
+    clock_text, clock_source = trusted_judgment_clock(judgment_clock)
     fd = _inbox_lock(store.root, checked["event_id"])
     if fd is None:
         return _busy_delivery(store, checked)
@@ -268,6 +369,8 @@ def receive_delivery(store, document, now, parent=None):
                     "evaluation_id": checked["evaluation_id"],
                     "digest": checked["envelope_sha256"],
                     "parent_invoked": False,
+                    "judgment_deadline": _deadline_text(clock_text),
+                    "judgment_clock_source": clock_source,
                 }
                 store.save()
                 _write_json(_formal_paths(store.root, checked["event_id"])["context"], document["context"])
@@ -277,17 +380,32 @@ def receive_delivery(store, document, now, parent=None):
                 duplicate = True
             status = prior.get("status")
             invoked = prior.get("parent_invoked") is True
-        if status == "publish_ready" or invoked or not callable(parent):
+            stored_deadline = prior.get("judgment_deadline")
+        if status == "pending" and _past_deadline(stored_deadline, clock_text):
+            _mark_expired(store, checked["event_id"], clock_text)
+            return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=False)
+        if status in ("publish_ready", "parent_deadline_expired") or invoked or not callable(parent):
             return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=False)
         with store.exclusive():
             store.reload()
             row = store.state["formal_inbox"][checked["event_id"]]
-            if row.get("parent_invoked") is True or row.get("status") == "publish_ready":
-                return _row_verdict(row, duplicate=True, parent_called=False)
-            row["parent_invoked"] = True
-            store.save()
+            if row.get("judgment_deadline") != stored_deadline:
+                row["judgment_deadline"] = stored_deadline
+            if row.get("parent_invoked") is True or row.get("status") != "pending" or _past_deadline(row.get("judgment_deadline"), clock_text):
+                expired = row.get("status") == "pending" and _past_deadline(row.get("judgment_deadline"), clock_text)
+            else:
+                expired = False
+                row["parent_invoked"] = True
+                store.save()
+        if expired:
+            _mark_expired(store, checked["event_id"], clock_text)
+            return _row_verdict(read_formal(store, checked["event_id"]), duplicate=True, parent_called=False)
         returned = parent(document) if callable(parent) else None
         if isinstance(returned, dict) and isinstance(returned.get("judgment"), dict) and isinstance(returned.get("trace"), dict):
+            current, _source = trusted_judgment_clock(judgment_clock)
+            if _past_deadline(stored_deadline, current):
+                _mark_expired(store, checked["event_id"], current)
+                return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
             _install_parent_files(store, checked["event_id"], returned["judgment"], returned["trace"])
         return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
     finally:
@@ -346,16 +464,93 @@ def _install_parent_files(store, event_id, judgment, trace):
     return _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
 
 
-def submit_parent_files(store, event_id, judgment, trace, now):
-    """pending 補交父層已經寫好的 judgment／trace。不重新呼叫父 AI，也不假完成。"""
+def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=None):
+    """pending 補交父層已經寫好的 judgment／trace。不重新呼叫父 AI，也不假完成。
+
+    now 是 payload 時鐘，刪掉不用。截止只看持久 deadline 與可信時鐘。
+    已是 publish_ready 則不覆寫。過期則終止並拒絕。
+    """
     del now
     cycle_key(event_id)
     if not isinstance(judgment, dict) or not isinstance(trace, dict):
         raise ValueError("parent_package_not_ready")
+    clock_text, _source = trusted_judgment_clock(judgment_clock)
     fd = _inbox_lock(store.root, event_id)
     if fd is None:
         raise ValueError("claim_held")
     try:
+        row = read_formal(store, event_id)
+        if not isinstance(row, dict):
+            raise ValueError("not_received")
+        if row.get("status") != "publish_ready" and (
+            row.get("status") == "parent_deadline_expired" or _past_deadline(row.get("judgment_deadline"), clock_text)
+        ):
+            _mark_expired(store, event_id, clock_text)
+            raise ValueError("parent_deadline_expired")
+        if row.get("status") == "publish_ready" and _past_deadline(row.get("judgment_deadline"), clock_text):
+            raise ValueError("parent_deadline_expired")
         return _install_parent_files(store, event_id, judgment, trace)
+    finally:
+        _unlock(fd)
+
+
+def formal_status(store, event_id, judgment_clock=None):
+    """離線讀狀態。不改列、不寫告警、不喚 AI。"""
+    cycle_key(event_id)
+    clock_text, source = trusted_judgment_clock(judgment_clock)
+    row = read_formal(store, event_id)
+    if not isinstance(row, dict):
+        raise ValueError("not_received")
+    past = row.get("status") != "publish_ready" and _past_deadline(row.get("judgment_deadline"), clock_text)
+    return {
+        "status": row.get("status"),
+        "parent_invoked": row.get("parent_invoked") is True,
+        "judgment_deadline": row.get("judgment_deadline"),
+        "judgment_clock_source": row.get("judgment_clock_source"),
+        "checked_at": clock_text,
+        "checked_clock_source": source,
+        "past_deadline": past,
+        "mutated": False,
+        "claim_held": False,
+        "ack": False,
+        "http_sent": False,
+        "scheduler_present": False,
+        "expiry_requires_platform_trigger": True,
+        "platform_ai_process_killed": False,
+        "platform_parent_ai": dict(PLATFORM_PARENT_AI),
+    }
+
+
+def expire_parent(store, event_id, judgment_clock=None):
+    """平台或人明示觸發才檢查到期。沒有 scheduler，不會自己準時發生。
+
+    活躍 flock 不搶。已持久成功不覆寫。本地終止不殺平台 AI process。
+    """
+    cycle_key(event_id)
+    clock_text, source = trusted_judgment_clock(judgment_clock)
+    fd = _inbox_lock(store.root, event_id)
+    if fd is None:
+        row = read_formal(store, event_id) or {"status": "pending", "event_id": event_id}
+        verdict = _row_verdict(row, duplicate=False, parent_called=False, claim_held=True, accepted=False)
+        verdict["reason"] = "claim_held"
+        verdict["mutated"] = False
+        verdict["checked_clock_source"] = source
+        return verdict
+    try:
+        before = read_formal(store, event_id)
+        if not isinstance(before, dict):
+            raise ValueError("not_received")
+        if before.get("status") == "publish_ready" or not _past_deadline(before.get("judgment_deadline"), clock_text):
+            verdict = _row_verdict(before, duplicate=False, parent_called=False)
+            verdict["mutated"] = False
+            verdict["checked_clock_source"] = source
+            verdict["ack"] = False
+            return verdict
+        after = _mark_expired(store, event_id, clock_text)
+        verdict = _row_verdict(after, duplicate=False, parent_called=False)
+        verdict["mutated"] = before.get("status") != "parent_deadline_expired" and after.get("status") == "parent_deadline_expired"
+        verdict["checked_clock_source"] = source
+        verdict["local_alert_only"] = True
+        return verdict
     finally:
         _unlock(fd)

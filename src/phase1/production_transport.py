@@ -503,7 +503,8 @@ def hold_dispatch(state_dir, event_id, evaluation_id, dest, max_bytes=None):
     record_path = _dispatch_record_path(state_dir, event_id)
     digest = document["context"]["envelope_sha256"]
     if os.path.isfile(record_path):
-        existing = json.loads(open(record_path, encoding="utf-8").read())
+        with open(record_path, encoding="utf-8") as handle:
+            existing = json.loads(handle.read())
         if existing.get("envelope_sha256") != digest:
             raise ValueError("immutable_conflict")
         return existing
@@ -544,7 +545,8 @@ def send_delivery(config_dir, state_dir, event_id, evaluation_id, transport=None
     record_path = _dispatch_record_path(state_dir, event_id)
     existing = None
     if os.path.isfile(record_path):
-        existing = json.loads(open(record_path, encoding="utf-8").read())
+        with open(record_path, encoding="utf-8") as handle:
+            existing = json.loads(handle.read())
         if existing.get("envelope_sha256") != digest:
             raise ValueError("immutable_conflict")
         if existing.get("status") == "delivered":

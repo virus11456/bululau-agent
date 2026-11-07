@@ -111,9 +111,11 @@ class SupervisedDeliveryTest(unittest.TestCase):
             self.assertFalse(first["http_sent"])
             self.assertFalse(first["unattended"])
             self.assertEqual(second["status"], "held")
-            saved = json.loads(open(os.path.join(tmp, "dispatch", EVENT + ".json"), encoding="utf-8").read())
+            with open(os.path.join(tmp, "dispatch", EVENT + ".json"), encoding="utf-8") as handle:
+                saved = json.loads(handle.read())
             self.assertEqual(saved["attempts"], 0)
-            body = json.loads(open(dest, encoding="utf-8").read())
+            with open(dest, encoding="utf-8") as handle:
+                body = json.loads(handle.read())
             self.assertEqual(set(body["wake"]), set(WAKE_FIELDS))
             self.assertFalse(os.path.isdir(os.path.join(tmp, "judgments")))
 
@@ -154,7 +156,8 @@ class SupervisedDeliveryTest(unittest.TestCase):
                 staged = os.path.join(tmp, "staged.json")
                 with open(staged, "w", encoding="utf-8") as handle:
                     json.dump(_model_judgment(shown, "no_trade"), handle)
-                bad = json.loads(open(staged, encoding="utf-8").read())
+                with open(staged, encoding="utf-8") as handle:
+                    bad = json.loads(handle.read())
                 bad["envelope_sha256"] = "0" * 64
                 bad_path = os.path.join(tmp, "bad.json")
                 with open(bad_path, "w", encoding="utf-8") as handle:

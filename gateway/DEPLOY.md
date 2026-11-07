@@ -24,6 +24,8 @@
 - `PUT /v1/installations/<installation_id>/judgments/<event_id>`
 - `GET /v1/installations/<installation_id>/judgments/<event_id>`
 
+GM 交過的 host 是 `https://bululau-return-isolated-8qi96wkvs-virus11456s-projects.vercel.app`。範例設定 `gateway/client.example.json` 預設 `enabled: false`、`trial.approved: false`，只記下這個非秘密 URL。本包沒有對它發請求。GM 回報 b559ced 隔離 deployment READY、未認證 GET 為 401/`no-store`；OIDC 與 Blob 尚未證明，這裡不把該回報寫成已由本方驗過。
+
 檔案在 `api/v1/...`，所以 Vercel 的實體路徑是 `/api/v1/...`。`vercel.json` 的 rewrite 把公開的 `/v1/...` 轉到那個 Function。兩種路徑都解析成同一組 installation 與 event。客戶端不能傳 pathname 或 callback URL。
 
 ## 原子建立

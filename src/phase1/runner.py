@@ -731,7 +731,7 @@ def _parse(argv):
             found["shadow"] = True
             index += 1
             continue
-        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter") or index + 1 >= len(argv):
+        if key not in ("--state-dir", "--config", "--now", "--scan-id", "--dest", "--repo", "--python", "--quantboy-root", "--snapshot", "--prefilter", "--entry-config") or index + 1 >= len(argv):
             return None
         found[key[2:].replace("-", "_")] = argv[index + 1]
         index += 2
@@ -819,14 +819,34 @@ def deploy_report(config_path):
     }
 
 
+def _now_ms(text):
+    from .timeparse import parse_instant
+    moment = parse_instant(text)
+    if moment.tzinfo is None:
+        raise ValueError("clock_invalid")
+    return int(moment.timestamp() * 1000)
+
+
 def _review_round_main(argv):
-    """預設不取數、不外發、不改現有 routine。quiet 在 wake 之前。"""
-    from .review_context import operate_round
+    """預設不取數、不外發、不改現有 routine。時鐘來自 --now，quiet 在 notifier 之前。"""
+    from .market_adapter import disabled_entry, load_entry_config, run_review_entry
     from .session import Store
+    from .token_switch import UnconfiguredWebhook
     found = _parse(argv)
     if not found or "state_dir" not in found or "now" not in found or "scan_id" not in found or "snapshot" not in found:
-        print(json.dumps({"external_send": False, "routine_stopped": False, "reason": "review_round_disabled"}, ensure_ascii=False))
+        print(json.dumps({
+            "external_send": False, "routine_stopped": False, "wakes_saved": False,
+            "reason": "review_round_disabled", "live_fetch": False,
+        }, ensure_ascii=False))
         return 2
+    try:
+        now_ms = _now_ms(found["now"])
+    except (TypeError, ValueError):
+        print(json.dumps({
+            "quiet": False, "external_send": False, "routine_stopped": False, "wakes_saved": False,
+            "reason": "clock_invalid", "live_fetch": False, "now_ms": None,
+        }, ensure_ascii=False))
+        return 1
     with open(found["snapshot"], encoding="utf-8") as handle:
         snapshot = json.load(handle)
     prefilter_path = found.get("prefilter")
@@ -835,12 +855,21 @@ def _review_round_main(argv):
             prefilter = json.load(handle)
     else:
         prefilter = {}
+    entry_path = found.get("entry_config")
+    if entry_path:
+        with open(entry_path, encoding="utf-8") as handle:
+            entry = load_entry_config(json.load(handle))
+    else:
+        entry = disabled_entry()
     store = Store(found["state_dir"])
-    result = operate_round(store, snapshot, prefilter, now=found["now"], scan_id=found["scan_id"], notifier=None, now_ms=0)
-    result["live_fetch"] = False
+    result = run_review_entry(
+        store, snapshot, prefilter, now=found["now"], scan_id=found["scan_id"], now_ms=now_ms,
+        entry=entry, notifier=UnconfiguredWebhook(),
+    )
     print(json.dumps({key: result.get(key) for key in (
         "quiet", "wake_sent", "external_send", "routine_stopped", "watch_modified", "wakes_saved",
-        "old_ai_poll", "context_sufficient", "discretion_complete", "fetch_review_called", "reason", "live_fetch",
+        "old_ai_poll", "context_sufficient", "discretion_complete", "fetch_review_called", "reason",
+        "live_fetch", "now_ms", "entry_enabled", "routine_replaced", "replaces_scan_entry",
     )}, ensure_ascii=False))
     return 0
 

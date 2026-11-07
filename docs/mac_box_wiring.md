@@ -76,6 +76,12 @@ Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下
 
 真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
 
+GM 交過的非秘密 endpoint 是 `https://bululau-return-isolated-8qi96wkvs-virus11456s-projects.vercel.app`，路徑 `/v1/installations/<installation_id>/judgments/<event_id>`。PUT 給 publisher，GET 給 reader，標頭是 `Bearer key_id:secret`。`gateway/client.example.json` 把這個 URL 寫成預設關閉的 `base_url`。`installation_id` 與 `key_id` 留空，不猜。secret 不進 argv、不進 git、不讀角色 secret 檔。GM 說 b559ced 的隔離 deployment 是 READY，未認證 GET 為 401 且 `no-store`，OIDC 與 Blob 尚未證明。本包沒有對該 URL 發過 PUT、POST 或 GET，也不把 GM 的回報說成自己驗過。
+
+`config/review_entry.example.json` 預設 `enabled`、`live_fetch`、`replaces_scan_entry`、`outbound` 都是 false。`review-round` 可以讀它，但 `runner run` 與 `com.quantboy.livewatch` 沒有改。真取數要等 `live_fetch` 被明確打開，才會呼叫 repo 裡的 `account_status._signed_get(path)` 與 `common.get(path, params=None, retries=2)`。`/Users/frank/quantboy-live/live_trader.py`（SHA256 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`）不在 repo，預期簽名若以後證明是 `req(method, path, params=None, signed=False)`，目前沒有接上。
+
+Ledger 只保證正常設定與行程崩潰：呼叫端不能改 ledger 路徑或 method→stage；空檔、壞檔、缺檔不會重開 `approved_at`；寫入用替換，中斷不會把檔案截成空的再當新期限。有磁碟管理權限的人若刪掉 ledger 再 `init-ledger`，次數會歸零，期限仍是授權裡的 `approved_at`。不宣稱擋得住刪檔。
+
 ## 還沒有的無人值守通道
 
 公開的 artifact 自動傳送規格已向 GM 要，尚未拿到。沒有這份非秘密規格之前，不開服務、不複製 token、也不把 webhook 說成已接通。外部依賴就是這份規格，以及上面那張尚未批准的 Vercel 範圍。目前不能說已經省下喚醒。

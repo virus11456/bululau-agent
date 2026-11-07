@@ -29,7 +29,8 @@ RETRY_REASONS = ("backoff", "not_ready", "timeout", "disconnect")
 
 
 def _digest(document):
-    raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    from .canonical import canonical_json
+    raw = canonical_json(document).encode("utf-8")
     return hashlib.sha256(raw).hexdigest(), raw
 
 

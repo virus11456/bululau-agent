@@ -50,6 +50,58 @@ export function judgmentPath(installationId, eventId) {
   return `returns/${installationId}/${eventId}.json`;
 }
 
+export function rejectUnsafeIntegerTokens(text) {
+  const source = String(text);
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (char === '"') {
+      index += 1;
+      while (index < source.length) {
+        if (source[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        if (source[index] === '"') {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "-" || (char >= "0" && char <= "9")) {
+      const start = index;
+      if (source[index] === "-") index += 1;
+      const digits = index;
+      while (index < source.length && source[index] >= "0" && source[index] <= "9") index += 1;
+      const marker = source[index];
+      if (marker === "." || marker === "e" || marker === "E") {
+        index += 1;
+        while (index < source.length && /[0-9eE+.-]/.test(source[index])) index += 1;
+        continue;
+      }
+      const token = source.slice(start, index);
+      if (digits === index) {
+        throw Object.assign(new Error("unsafe_integer"), { status: 400 });
+      }
+      let wide;
+      let narrow;
+      try {
+        wide = BigInt(token);
+        narrow = BigInt(Number(token));
+      } catch {
+        throw Object.assign(new Error("unsafe_integer"), { status: 400 });
+      }
+      if (wide !== narrow) {
+        throw Object.assign(new Error("unsafe_integer"), { status: 400 });
+      }
+      continue;
+    }
+    index += 1;
+  }
+}
+
 export function canonical(value) {
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -101,8 +153,12 @@ export function validateStored(raw, installationId, eventId) {
   }
   let parsed;
   try {
+    rejectUnsafeIntegerTokens(bytes.toString("utf8"));
     parsed = JSON.parse(bytes.toString("utf8"));
-  } catch {
+  } catch (error) {
+    if (error && (error.message === "unsafe_integer" || error.message === "non_finite")) {
+      throw error;
+    }
     throw Object.assign(new Error("rejected_schema"), { status: 400 });
   }
   rejectSecrets(parsed);

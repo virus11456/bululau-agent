@@ -250,6 +250,8 @@ def parent_package_ready(judgment, trace, context=None):
         return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
     if not _bound_id(trace.get("evaluation_id")) or trace.get("evaluation_id") != judgment.get("evaluation_id"):
         return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
+    if "envelope_sha256" in trace and trace.get("envelope_sha256") != judgment.get("envelope_sha256"):
+        return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
     if context is not None:
         envelope = context.get("envelope") if isinstance(context.get("envelope"), dict) else {}
         event_id = context.get("event_id") or envelope.get("event_id")
@@ -258,6 +260,8 @@ def parent_package_ready(judgment, trace, context=None):
         if event_id != judgment.get("event_id") or evaluation_id != judgment.get("evaluation_id"):
             return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
         if not _bound_id(digest) or judgment.get("envelope_sha256") != digest:
+            return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
+        if trace.get("envelope_sha256") != digest:
             return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
     return {
         "ready": True,

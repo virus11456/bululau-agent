@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from src.phase1.ack_contract import apply_processed_ack, load_ack
-from src.phase1.gateway_client import authorized_exchange, load_gateway_config
+from src.phase1.gateway_client import authorized_exchange, load_gateway_config, provision_ledger
 from src.phase1.production_transport import bind_envelope, build_envelope, commit_judgment, import_staged
 from src.phase1.return_adapter import judgment_put
 from src.phase1.review_context import build_review, fetch_review, parent_package_ready, plan_round
@@ -56,6 +56,7 @@ def _trial(approved=True):
             "approved": approved,
             "dry_run_only": True,
             "event_id": EVENT,
+            "approved_at": 0,
             "new_ids": 1,
             "max_wake_posts": 2,
             "max_judgment_puts": 1,
@@ -105,7 +106,6 @@ class OperateChainTest(unittest.TestCase):
             raise AssertionError("disabled transport was called")
 
         self.assertEqual(authorized_exchange(disabled, boom, "PUT", EVENT, {}, secret="x")["reason"], "gateway_disabled")
-        config = load_gateway_config(_trial())
         calls = []
 
         def transport(method, path, headers, body):
@@ -118,16 +118,23 @@ class OperateChainTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             ledger = os.path.join(tmp, "budget.json")
+            publisher_doc = _trial()
+            publisher_doc["ledger_path"] = ledger
+            config = load_gateway_config(publisher_doc)
+            provision_ledger(config)
             denied = authorized_exchange(config, transport, "PUT", EVENT, {"event_id": EVENT}, secret="publisher-secret", ledger_path=ledger, now_epoch=100)
             self.assertNotIn("SYNTHETIC_SECRET_MARKER", json.dumps(denied))
             self.assertEqual(denied["reason"], "transport_failed")
             self.assertEqual(authorized_exchange(config, transport, "PUT", EVENT, {}, secret="publisher-secret", ledger_path=ledger, now_epoch=100)["reason"], "put_budget_exhausted")
             self.assertEqual(authorized_exchange(config, transport, "PUT", "c-" + "cd" * 16, {}, secret="publisher-secret", ledger_path=ledger, now_epoch=100)["reason"], "event_not_approved")
             self.assertEqual(len(calls), 1)
-        reader = load_gateway_config(_trial())
-        reader["role"] = "reader"
         with tempfile.TemporaryDirectory() as tmp:
-            timed = authorized_exchange(reader, transport, "GET", EVENT, secret="reader-secret", ledger_path=os.path.join(tmp, "gets.json"), now_epoch=100)
+            reader_doc = _trial()
+            reader_doc["role"] = "reader"
+            reader_doc["ledger_path"] = os.path.join(tmp, "gets.json")
+            reader = load_gateway_config(reader_doc)
+            provision_ledger(reader)
+            timed = authorized_exchange(reader, transport, "GET", EVENT, secret="reader-secret", ledger_path=reader["ledger_path"], now_epoch=100)
         self.assertEqual(timed["reason"], "timeout")
         self.assertEqual(timed["old_ai_poll"], "keep")
         self.assertNotIn("SYNTHETIC_SECRET_MARKER", json.dumps(timed))
@@ -197,10 +204,10 @@ class OperateChainTest(unittest.TestCase):
         from src.phase1.gateway_client import apply_gateway_get, canonical_json
         from src.phase1.review_context import operate_round, read_parent_package
         bad = _trial()
+        bad["ledger_path"] = "budget.json"
         bad["trial"]["max_judgment_puts"] = True
         with self.assertRaises(ValueError):
             load_gateway_config(bad)
-        config = load_gateway_config(_trial())
         calls = []
 
         def transport(method, path, headers, body):
@@ -211,6 +218,10 @@ class OperateChainTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             ledger = os.path.join(tmp, "budget.json")
+            publisher_doc = _trial()
+            publisher_doc["ledger_path"] = ledger
+            config = load_gateway_config(publisher_doc)
+            provision_ledger(config)
             rejected = authorized_exchange(config, transport, "PUT", "../other?x=y", {}, secret="s", ledger_path=ledger, now_epoch=50)
             self.assertEqual(rejected["reason"], "rejected_id")
             self.assertEqual(calls, [])
@@ -276,15 +287,18 @@ class OperateChainTest(unittest.TestCase):
             bind_envelope(store, envelope)
             wrong = "c-" + "ff" * 16
             payload = {"schema_version": 1, "event_type": "judgment_put", "event_id": wrong, "evaluation_id": "s1", "judgment": {"event_id": wrong, "evaluation_id": "s1"}}
-            reader = load_gateway_config(_trial())
-            reader["role"] = "reader"
+            reader_doc = _trial()
+            reader_doc["role"] = "reader"
+            reader_doc["ledger_path"] = os.path.join(tmp, "gets.json")
+            reader = load_gateway_config(reader_doc)
+            provision_ledger(reader)
 
             def ok_wrong(method, path, headers, body):
                 return 200, {"Cache-Control": "private, no-store"}, json.dumps(payload).encode("utf-8")
 
             result = apply_gateway_get(
                 reader, ok_wrong, EVENT, producer, "s1", SENT, "2026-11-07T04:22:00Z",
-                secret="reader-secret", ledger_path=os.path.join(tmp, "gets.json"), now_epoch=100,
+                secret="reader-secret", ledger_path=reader["ledger_path"], now_epoch=100,
             )
             self.assertFalse(result["applied"])
             self.assertFalse(result["written"])
@@ -293,9 +307,12 @@ class OperateChainTest(unittest.TestCase):
 
     def test_parallel_puts_share_one_durable_slot(self):
         import threading
-        config = load_gateway_config(_trial())
         with tempfile.TemporaryDirectory() as tmp:
             ledger = os.path.join(tmp, "budget.json")
+            publisher_doc = _trial()
+            publisher_doc["ledger_path"] = ledger
+            config = load_gateway_config(publisher_doc)
+            provision_ledger(config)
             results = []
 
             def transport(method, path, headers, body):

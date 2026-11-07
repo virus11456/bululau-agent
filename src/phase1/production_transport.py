@@ -220,7 +220,8 @@ def build_envelope(snapshot, prefilter, freshness, *, event_id, evaluation_id, s
 
 
 def _canonical(document):
-    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    from .canonical import canonical_json
+    return canonical_json(document).encode("utf-8")
 
 
 def envelope_path(state_dir, event_id):

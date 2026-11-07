@@ -58,7 +58,8 @@
 | 缺資料或驗證失敗 | 維持 `pending` | 不 ACK，不開倉，留原 AI | 你把原因告訴 GM Grok Bot |
 | 本地 argv callback 超時 | 這是 process group 的本地 deadline，不是平台父 AI 的期限，也不代表平台 AI process 已被殺 | 不開新倉，改叫有界 fallback。fallback 再失敗就維持 `running`，下次只補 fallback，不重跑 manage | 同上。平台父 AI 沒有接上這條執行器 |
 | gateway 若將來回 401 | 維持 `pending` | 不換 secret、不重試成成功 | 同上。本草稿不打這支呼叫 |
-| `publisher_document` 或 `receive-submit` 失敗 | 維持 `pending` | 不 ACK。你可以再補一次檔，不重新把 context 交給另一輪 AI | 同上 |
+| `publisher_document` 或 `receive-submit` 驗證失敗，而且還沒過父判斷截止 | 維持 `pending` | 不 ACK。可以再補一次檔，不重新把 context 交給另一輪 AI | 同上 |
+| 已是 `parent_deadline_expired` | 維持終止，不可再補 | 不 ACK，不再喚 AI。重收或重啟都不延長 | 本地去敏告警若沒寫成，下次 `receive-expire` 冪等補建。寫失敗就如實失敗，可再試。`alert_delivered` 仍是 false，不是已送到平台，也不是平台 process 被殺 |
 
 沒有新事件就安靜，不要為了有跑過而送訊息。有結果才送 GM Grok Bot。
 
@@ -72,7 +73,7 @@
 - 中斷但還沒有結果，而且未過父判斷截止：只做 `receive-submit` 補交既有檔，不重送 context，不重新喚 AI。
 - 沒有結果而且已過截止：狀態改為 `parent_deadline_expired`，留下去敏本地告警。告警沒有送出，原 AI fallback 沒有呼叫。此後不得再喚 AI，也不得靠重收或重啟把 deadline 往後延。
 
-`publish_ready` 之後再送同一份是 duplicate，不是新的發布。
+`publish_ready` 之後再送同一份是 duplicate，不是新的發布。截止以把狀態持久寫成 `publish_ready` 之前的那一次可信時鐘為準，不是只看 `receive-submit` 開頭。驗證或落檔若跨過截止 1 秒，不得變成 ready；剛才寫下的 judgment／trace 只是暫存，不能當可發布結果。原本已是 ready 的檔維持不動。這不表示磁碟提交本身耗時為零。
 
 ## 交易
 

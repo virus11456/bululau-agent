@@ -169,7 +169,12 @@ def read_formal(store, event_id):
 
 
 def trusted_judgment_clock(injected=None):
-    """生產不傳 injected，用系統 UTC。測試才傳入受控時鐘。payload 的 now 不進這裡。"""
+    """生產不傳 injected，用系統 UTC。測試才傳入受控時鐘。payload 的 now 不進這裡。
+
+    injected 可以是字串，或每次取時都呼叫的零引數函式，用來讓測試把時鐘往前推。
+    """
+    if callable(injected):
+        injected = injected()
     if injected is None:
         moment = datetime.now(timezone.utc)
         source = "system"
@@ -213,31 +218,68 @@ def _alert_body(event_id, deadline_text, clock_text):
     }
 
 
+def _alert_durable(path, event_id):
+    if not os.path.isfile(path):
+        return False
+    try:
+        body = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(body, dict)
+        and body.get("event_type") == "local_parent_deadline_alert"
+        and body.get("event_id") == event_id
+        and body.get("status") == "parent_deadline_expired"
+        and body.get("alert_delivered") is False
+        and body.get("platform_ai_process_killed") is False
+        and body.get("original_ai_fallback_called") is False
+        and body.get("http_sent") is False
+        and body.get("contains_context") is False
+        and body.get("contains_judgment") is False
+        and body.get("contains_secret") is False
+    )
+
+
+def _ensure_local_alert(store, event_id, deadline_text, checked_at):
+    """終止列要有去敏告警檔。缺檔就補。寫失敗如實拋出，不記成已交付。"""
+    path = _alert_path(store.root, event_id)
+    if not _alert_durable(path, event_id):
+        _write_json(path, _alert_body(event_id, deadline_text, checked_at))
+        if not _alert_durable(path, event_id):
+            raise OSError("alert_not_durable")
+    relative = os.path.join("formal-alerts", event_id + ".json")
+    with store.exclusive():
+        store.reload()
+        row = store.state["formal_inbox"][event_id]
+        if row.get("status") != "parent_deadline_expired":
+            return row
+        if row.get("local_alert") != relative:
+            row["local_alert"] = relative
+            store.save()
+    return read_formal(store, event_id)
+
+
 def _mark_expired(store, event_id, clock_text):
-    """只在已過持久截止且尚未成功時寫終止。不改 deadline，不覆寫 publish_ready。"""
+    """只在已過持久截止且尚未成功時寫終止。不改 deadline，不覆寫 publish_ready。
+
+    已經是終止狀態時仍冪等補建告警。告警寫失敗不把 alert_delivered 改成 true。
+    """
     with store.exclusive():
         store.reload()
         row = (store.state.get("formal_inbox") or {}).get(event_id)
         if not isinstance(row, dict):
             raise ValueError("not_received")
-        if row.get("status") in ("publish_ready", "parent_deadline_expired"):
+        if row.get("status") == "publish_ready":
             return row
-        if not _past_deadline(row.get("judgment_deadline"), clock_text):
-            return row
-        row["status"] = "parent_deadline_expired"
-        row["expired_at"] = clock_text
-        store.save()
-        deadline_text = row.get("judgment_deadline")
-    path = _alert_path(store.root, event_id)
-    if not os.path.isfile(path):
-        _write_json(path, _alert_body(event_id, deadline_text, clock_text))
-    with store.exclusive():
-        store.reload()
-        row = store.state["formal_inbox"][event_id]
-        if row.get("status") == "parent_deadline_expired" and not row.get("local_alert"):
-            row["local_alert"] = os.path.join("formal-alerts", event_id + ".json")
+        if row.get("status") != "parent_deadline_expired":
+            if not _past_deadline(row.get("judgment_deadline"), clock_text):
+                return row
+            row["status"] = "parent_deadline_expired"
+            row["expired_at"] = clock_text
             store.save()
-    return read_formal(store, event_id)
+        deadline_text = row.get("judgment_deadline")
+        checked_at = row.get("expired_at") or clock_text
+    return _ensure_local_alert(store, event_id, deadline_text, checked_at)
 
 
 def _row_verdict(row, *, duplicate, parent_called, claim_held=False, accepted=True):
@@ -406,7 +448,9 @@ def receive_delivery(store, document, now, parent=None, judgment_clock=None):
             if _past_deadline(stored_deadline, current):
                 _mark_expired(store, checked["event_id"], current)
                 return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
-            _install_parent_files(store, checked["event_id"], returned["judgment"], returned["trace"])
+            _install_parent_files(
+                store, checked["event_id"], returned["judgment"], returned["trace"], judgment_clock=judgment_clock,
+            )
         return _row_verdict(read_formal(store, checked["event_id"]), duplicate=duplicate, parent_called=True)
     finally:
         _unlock(fd)
@@ -430,8 +474,19 @@ def _busy_delivery(store, checked):
     return verdict
 
 
-def _install_parent_files(store, event_id, judgment, trace):
-    """呼叫端已持有 claim。不生成 judgment，只驗證並保存父層交來的檔。"""
+def _discard_uncommitted_parent_files(paths):
+    """驗證用的 judgment／trace 還沒變成 publish_ready 時，不能留成可發布結果。"""
+    for name in ("judgment", "trace"):
+        if os.path.isfile(paths[name]):
+            os.remove(paths[name])
+
+
+def _install_parent_files(store, event_id, judgment, trace, judgment_clock=None):
+    """呼叫端已持有 claim。不生成 judgment，只驗證並保存父層交來的檔。
+
+    截止以寫入 publish_ready 之前的那一次可信時鐘為準。這不表示磁碟提交耗時為零。
+    已是 publish_ready 則不寫檔。
+    """
     paths = _formal_paths(store.root, event_id)
     with store.exclusive():
         store.reload()
@@ -445,9 +500,7 @@ def _install_parent_files(store, event_id, judgment, trace):
     try:
         _publish_files(store, event_id)
     except ValueError:
-        for name in ("judgment", "trace"):
-            if os.path.isfile(paths[name]):
-                os.remove(paths[name])
+        _discard_uncommitted_parent_files(paths)
         verdict = _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
         verdict["ack"] = False
         verdict["reason"] = "parent_package_not_ready"
@@ -455,19 +508,30 @@ def _install_parent_files(store, event_id, judgment, trace):
     with store.exclusive():
         store.reload()
         row = store.state["formal_inbox"][event_id]
-        if row.get("status") == "pending":
+        if row.get("status") != "pending":
+            return _row_verdict(row, duplicate=True, parent_called=False)
+        clock_text, _source = trusted_judgment_clock(judgment_clock)
+        if _past_deadline(row.get("judgment_deadline"), clock_text):
+            expired_clock = clock_text
+        else:
+            expired_clock = None
             row["status"] = "publish_ready"
             row["judgment_path"] = paths["judgment"]
             row["trace_path"] = paths["trace"]
             row["context_path"] = paths["context"]
             store.save()
+    if expired_clock is not None:
+        _discard_uncommitted_parent_files(paths)
+        _mark_expired(store, event_id, expired_clock)
+        raise ValueError("parent_deadline_expired")
     return _row_verdict(read_formal(store, event_id), duplicate=False, parent_called=False)
 
 
 def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=None):
     """pending 補交父層已經寫好的 judgment／trace。不重新呼叫父 AI，也不假完成。
 
-    now 是 payload 時鐘，刪掉不用。截止只看持久 deadline 與可信時鐘。
+    now 是 payload 時鐘，刪掉不用。開頭的時鐘只做提早拒絕。
+    能不能 ready，以 _install_parent_files 持久寫入前的可信時鐘為準。
     已是 publish_ready 則不覆寫。過期則終止並拒絕。
     """
     del now
@@ -489,7 +553,7 @@ def submit_parent_files(store, event_id, judgment, trace, now, judgment_clock=No
             raise ValueError("parent_deadline_expired")
         if row.get("status") == "publish_ready" and _past_deadline(row.get("judgment_deadline"), clock_text):
             raise ValueError("parent_deadline_expired")
-        return _install_parent_files(store, event_id, judgment, trace)
+        return _install_parent_files(store, event_id, judgment, trace, judgment_clock=judgment_clock)
     finally:
         _unlock(fd)
 

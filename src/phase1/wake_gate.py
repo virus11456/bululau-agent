@@ -57,7 +57,10 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
     reason = "quiet_flat_book" if quiet else _reason(snapshot, fresh, scan_error, positions, orders, candidates)
     if not quiet:
         _enqueue_cycle(store, evaluation_id, completed or now, reason)
-        sender = notifier.notify({"evaluation_id": evaluation_id, "reason": reason})
+        try:
+            sender = notifier.notify({"evaluation_id": evaluation_id, "reason": reason})
+        except Exception:
+            sender = {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "sender_failed"}
     else:
         sender = {"status": "not_attempted", "delivered": False, "http_sent": False, "reason": "quiet_flat_book"}
     acked = bool(sender.get("processing_ack")) and bool(sender.get("delivered")) and not sender.get("http_sent") is None

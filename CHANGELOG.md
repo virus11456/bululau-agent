@@ -10,7 +10,9 @@ manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小�
 
 狀態感知喚醒：只有新鮮的 0 倉、0 掛單、0 候選且無錯誤才免 AI。有倉的定期複查用週期身份，不用同一根 K 的指紋取消。sender 未配置時舊輪詢維持 blocked。
 
-本機 sender 設定只寫 `~/.config/bululau-agent/sender.json`。單筆測試契約五欄，重送保留同一事件。HTTP 成功仍是 pending。沒有真實發送。未配置的送達路徑會 blocked。
+本機 sender 設定只寫 `~/.config/bululau-sender-test/sender.json`。單筆測試契約五欄，重送保留同一事件。HTTP 成功仍是 pending。沒有真實發送。
+
+一輪閘門：manage 不受候選限制。只有新鮮 0 倉 0 單且沒有新候選才免 AI。HTTP 2xx 不當作處理 ACK。故障時事件留在 outbox。未配置的送達路徑會 blocked。
 
 ## 2026-11-06
 

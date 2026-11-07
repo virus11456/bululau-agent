@@ -188,6 +188,21 @@ def _object(text):
     return loaded if isinstance(loaded, dict) else None
 
 
+def _scan_object(text):
+    """掃描 JSON 拒絕 NaN 與 Infinity 字面值。溢位成無限的數字留給 quiet 價格契約擋下。"""
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    def reject_non_finite(_constant):
+        raise ValueError("non_finite")
+
+    try:
+        loaded = json.loads(text, parse_constant=reject_non_finite)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 def _count(value):
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
@@ -198,7 +213,7 @@ def adapt_prefilter(text, code, fault):
     """prefilter.py：0 無候選，10 是 call_ai，2 是行情失敗。10 不適用 manage/status。"""
     if fault:
         return {"error": fault, "candidates": []}
-    body = _object(text)
+    body = _scan_object(text)
     if code == 2:
         if body is None:
             return {"error": "scan_failed", "candidates": []}

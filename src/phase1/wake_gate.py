@@ -3,6 +3,7 @@
 評估週期身份和候選指紋分開。manage 不經過這個閘門。
 未配置 sender 時，舊 AI 輪詢維持 blocked，不送 HTTP。
 """
+import math
 import secrets
 
 from .ack_contract import cycle_key
@@ -62,8 +63,32 @@ def _exact_zero(value):
     return type(value) is int and value == 0
 
 
+def _positive_price(value):
+    """布林、NaN、無限、0 與負數都不是可用價格。"""
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def _finite_market_tree(node):
+    """quiet 的 btc 物件裡，每個數字都要是有限值。價格鍵另外必須為正。"""
+    if isinstance(node, dict):
+        for key, item in node.items():
+            if key == "last":
+                if not _positive_price(item):
+                    return False
+            elif not _finite_market_tree(item):
+                return False
+        return True
+    if isinstance(node, list):
+        return all(_finite_market_tree(item) for item in node)
+    if isinstance(node, str) or isinstance(node, bool) or node is None:
+        return True
+    if type(node) in (int, float):
+        return math.isfinite(node)
+    return False
+
+
 def _market_ready(prefilter):
-    """空 dict 不是成功掃描。quiet 輸出要有 call_ai、筆數、候選清單與 btc 價格。"""
+    """空 dict 不是成功掃描。quiet 要有 call_ai、筆數、候選清單，以及有限正的 btc.last。"""
     if not isinstance(prefilter, dict) or "candidates" not in prefilter or not isinstance(prefilter.get("candidates"), list):
         return False
     if "error" in prefilter and prefilter.get("error") not in (None, False):
@@ -71,7 +96,6 @@ def _market_ready(prefilter):
     count = prefilter.get("n_candidates")
     call = prefilter.get("call_ai")
     btc = prefilter.get("btc")
-    last = btc.get("last") if isinstance(btc, dict) else None
     if type(count) is not int or count != len(prefilter["candidates"]):
         return False
     if count == 0:
@@ -79,7 +103,7 @@ def _market_ready(prefilter):
             return False
     elif call is not True:
         return False
-    return type(last) in (int, float)
+    return isinstance(btc, dict) and "last" in btc and _finite_market_tree(btc)
 
 
 def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_verified=False, mac_gate=False):

@@ -68,7 +68,7 @@ context 裡的持倉與掛單是筆數，沒有幣種、方向、數量、停損
 
 401／403 會在原目錄寫下 `stopped` 與 `alerted`。重啟後不再 GET、也不再告警。404 不是 processed。429、5xx、逾時和斷線在單事件 10 分鐘內按 5、10、20、40、60 秒加 jitter 退避。`Retry-After` 可以是秒數或 HTTP 日期。每次重試用推進後的時鐘檢查 15 分鐘，不沿用一開始的 now，也不改 `completed_at`。`applied` 要從原 outbox 讀到 acked、`processing_ack` 與 `process_count` 1 才算 duplicate。這不證明模型只跑了一次，`ai_execution_proven` 仍是 false。
 
-Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及帶 `call_ai`、`n_candidates`、候選清單和 `btc.last` 的掃描。`False`、`status_trusted` 缺值、空的 prefilter 都留原 AI，而且會叫 notifier。
+Mac quiet 只接受非布林的整數 0、`status_trusted` 明確 true，以及帶 `call_ai`、`n_candidates`、候選清單和有限正價格 `btc.last` 的掃描。`btc` 裡其他數字也必須有限。NaN、正負無限、0、負數，以及 JSON 的 `NaN`／`Infinity` 都留原 AI，而且會叫 notifier。
 
 真的啟用仍要本人批准：一個隔離的 Vercel project、一個 private Blob、只做判斷回傳的 PUT／GET、box 發布與 Mac 讀取兩組 installation 憑證，以及費用上限。這不是現有連線附帶的權限。月費未知。POST 預算仍是 0。
 

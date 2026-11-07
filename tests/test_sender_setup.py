@@ -1,4 +1,6 @@
 """sender 設定與五欄測試契約。mock transport，不外發。"""
+import contextlib
+import io
 import json
 import os
 import stat
@@ -137,6 +139,33 @@ class SenderSetupTest(unittest.TestCase):
         bad["event_id"] = "bad id"
         with self.assertRaises(ValueError):
             validate_event(bad)
+
+    def test_symlink_and_url_credentials_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, "outside.json")
+            open(outside, "w", encoding="utf-8").write('{"keep":true}\n')
+            link = os.path.join(tmp, "sender.json")
+            os.symlink(outside, link)
+            with self.assertRaises(ValueError):
+                write_config(tmp, SECRET_URL, SECRET_AUTH)
+            self.assertEqual(json.loads(open(outside, encoding="utf-8").read()), {"keep": True})
+            with self.assertRaises(ValueError):
+                write_config(tmp, "https://user:secret@example.test/hook", SECRET_AUTH)
+
+    def test_cli_does_not_echo_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            err = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main(["configure", SECRET_URL, SECRET_AUTH], directory=tmp)
+            self.assertEqual(code, 2)
+            self.assertNotIn(SECRET_URL, out.getvalue() + err.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(tmp, "sender.json")))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main(["configure"], directory=tmp, read_pair=lambda: ("http://bad.example/hook", SECRET_AUTH))
+            self.assertEqual(code, 1)
+            self.assertNotIn(SECRET_AUTH, out.getvalue() + err.getvalue())
+            self.assertNotIn("bad.example", out.getvalue() + err.getvalue())
 
     def test_send_is_a_separate_command(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,8 +5,10 @@
 import json
 import os
 import re
+import stat
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -20,7 +22,7 @@ REDIRECTS = {301, 302, 303, 307, 308}
 
 
 def default_config_dir():
-    return os.path.join(os.path.expanduser("~"), ".config", "bululau-agent")
+    return os.path.join(os.path.expanduser("~"), ".config", "bululau-sender-test")
 
 
 def _reject_crlf(value):
@@ -29,10 +31,11 @@ def _reject_crlf(value):
 
 
 def validate_url(url):
-    if not isinstance(url, str) or not url:
+    if not isinstance(url, str) or not url or any(ch.isspace() for ch in url):
         raise ValueError("rejected_url")
     _reject_crlf(url)
-    if not url.startswith("https://") or url.startswith("https:///") or " " in url:
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or "@" in parts.netloc:
         raise ValueError("rejected_non_https")
 
 
@@ -60,20 +63,38 @@ def validate_event(event):
     return event
 
 
-def _write_private(directory, name, obj):
+def _require_real_dir(directory):
     os.makedirs(directory, mode=0o700, exist_ok=True)
+    info = os.lstat(directory)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("rejected_symlink")
     os.chmod(directory, 0o700)
-    path = os.path.join(directory, name)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+
+def _write_private(directory, name, obj):
+    _require_real_dir(directory)
+    final = os.path.join(directory, name)
+    if os.path.lexists(final) and stat.S_ISLNK(os.lstat(final).st_mode):
+        raise ValueError("rejected_symlink")
+    tmp = os.path.join(directory, ".{0}.{1}.tmp".format(name, os.getpid()))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(obj, handle, ensure_ascii=False, separators=(",", ":"))
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, final)
     except Exception:
-        os.chmod(path, 0o600)
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
         raise
-    os.chmod(path, 0o600)
-    return path
+    os.chmod(final, 0o600)
+    return final
 
 
 def write_config(directory, url, authorization):
@@ -169,24 +190,29 @@ def send_saved_test(directory, transport, now):
 
 
 def configure_interactive(directory, read_pair=None):
-    if read_pair is None:
-        if not sys.stdin.isatty():
-            raise SystemExit("請在本機終端執行。不從聊天或管線讀取。")
-        import getpass
-        url = getpass.getpass("Webhook HTTPS URL（不顯示）: ")
-        authorization = getpass.getpass("Authorization 整欄原樣貼上（不顯示，程式不加前綴）: ")
-    else:
-        url, authorization = read_pair()
-    write_config(directory, url, authorization)
+    try:
+        if read_pair is None:
+            if not sys.stdin.isatty():
+                print("請在本機終端執行。不從聊天或管線讀取。")
+                return False
+            import getpass
+            url = getpass.getpass("Webhook HTTPS URL（不顯示）: ")
+            authorization = getpass.getpass("Authorization 整欄原樣貼上（不顯示，程式不加前綴）: ")
+        else:
+            url, authorization = read_pair()
+        write_config(directory, url, authorization)
+    except Exception:
+        print("設定失敗。沒有寫出網址或認證。尚未發送。")
+        return False
     print("已寫入本機設定，尚未發送。")
+    return True
 
 
 def main(argv, directory=None, read_pair=None, transport=None, now=None):
     directory = directory or default_config_dir()
     now = now or datetime.now(timezone.utc)
     if argv == ["configure"]:
-        configure_interactive(directory, read_pair)
-        return 0
+        return 0 if configure_interactive(directory, read_pair) else 1
     if argv == ["send-test"]:
         result = send_saved_test(directory, transport or UrllibTransport(), now)
         if result.get("error"):

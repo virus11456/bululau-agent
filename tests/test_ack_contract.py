@@ -104,7 +104,7 @@ class AckContractTest(unittest.TestCase):
             self.assertFalse(os.path.exists(path + ".tmp"))
             reloaded.state["outbox"]["cycle:" + EVAL]["marker"] = "saved-with-junk"
             reloaded.save()
-            self.assertEqual(open(junk, encoding="utf-8").read(), "{")
+            self.assertEqual(_text(junk), "{")
             self.assertEqual(AckStore(tmp).state["outbox"]["cycle:" + EVAL]["marker"], "saved-with-junk")
 
     def test_older_than_15_minutes_stays_pending(self):
@@ -135,7 +135,7 @@ class AckContractTest(unittest.TestCase):
     def test_crash_before_and_after_replace_can_save_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = _store(tmp)
-            original = open(store.path, encoding="utf-8").read()
+            original = _text(store.path)
             junk = store.path + ".tmp"
             with open(junk, "w", encoding="utf-8") as handle:
                 handle.write("{")
@@ -144,11 +144,11 @@ class AckContractTest(unittest.TestCase):
             with self.assertRaises(OSError) as caught:
                 store.save()
             self.assertEqual(str(caught.exception), "crash_before_replace")
-            self.assertEqual(open(store.path, encoding="utf-8").read(), original)
-            self.assertEqual(open(junk, encoding="utf-8").read(), "{")
+            self.assertEqual(_text(store.path), original)
+            self.assertEqual(_text(junk), "{")
             private = _private_tmps(tmp)
             self.assertEqual(len(private), 1)
-            crashed = open(os.path.join(tmp, private[0]), encoding="utf-8").read()
+            crashed = _text(os.path.join(tmp, private[0]))
             self.assertIn("not-yet", crashed)
             revived = AckStore(tmp)
             self.assertEqual(revived.state["outbox"]["cycle:" + EVAL]["status"], "pending")
@@ -156,7 +156,7 @@ class AckContractTest(unittest.TestCase):
             revived.state["outbox"]["cycle:" + EVAL]["marker"] = "after-crash"
             revived.save()
             self.assertEqual(AckStore(tmp).state["outbox"]["cycle:" + EVAL]["marker"], "after-crash")
-            self.assertEqual(open(junk, encoding="utf-8").read(), "{")
+            self.assertEqual(_text(junk), "{")
             self.assertEqual(_private_tmps(tmp), private)
             revived.state["outbox"]["cycle:" + EVAL]["marker"] = "replaced"
             revived._crash = "after_replace"
@@ -168,7 +168,7 @@ class AckContractTest(unittest.TestCase):
             landed.state["outbox"]["cycle:" + EVAL]["marker"] = "saved-again"
             landed.save()
             self.assertEqual(AckStore(tmp).state["outbox"]["cycle:" + EVAL]["marker"], "saved-again")
-            self.assertEqual(open(junk, encoding="utf-8").read(), "{")
+            self.assertEqual(_text(junk), "{")
 
     def test_concurrent_updates_do_not_lose_or_double(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -243,6 +243,11 @@ class AckContractTest(unittest.TestCase):
 
 def _z(value):
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _text(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _private_tmps(directory):

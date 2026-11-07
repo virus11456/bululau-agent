@@ -270,13 +270,16 @@ class ReturnAdapterTest(unittest.TestCase):
             self.assertEqual(recovered["reason"], "processed")
             self.assertEqual(blind.calls, [])
             self.assertEqual(Store(resumed).state["outbox"]["cycle:s1"]["status"], "acked")
-            replay = dict(json.load(open(os.path.join(resumed, "return-recovery", EVENT + ".json"), encoding="utf-8")))
+            with open(os.path.join(resumed, "return-recovery", EVENT + ".json"), encoding="utf-8") as handle:
+                replay = dict(json.load(handle))
             replay["phase"] = "committed"
             _save_stage(resumed, EVENT, replay)
             second = download_one(resumed, blind, reader, INSTALL, EVENT, "s1", NOW, SENT)
             self.assertEqual(second["reason"], "duplicate")
             self.assertEqual(second["process_count"], 1)
-            self.assertEqual(json.load(open(os.path.join(resumed, "judgments", EVENT + ".json"), encoding="utf-8"))["completed_at"], NOW)
+            with open(os.path.join(resumed, "judgments", EVENT + ".json"), encoding="utf-8") as handle:
+                saved_judgment = json.load(handle)
+            self.assertEqual(saved_judgment["completed_at"], NOW)
 
 
 if __name__ == "__main__":

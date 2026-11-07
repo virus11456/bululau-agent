@@ -234,15 +234,21 @@ def wake_contract(event, sent_at):
 class CommandNotifier:
     """外部傳輸只證明 delivered。沒有 verified 就 blocked。不 POST。"""
 
-    def __init__(self, spec, timeout, sent_at):
+    def __init__(self, spec, timeout, sent_at, publisher=None):
         self.spec = spec
         self.timeout = timeout
         self.sent_at = sent_at
+        self.publisher = publisher
 
     def notify(self, event):
         blocked = {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "notifier_unverified"}
         if not self.spec or self.spec.get("verified") is not True:
             return blocked
+        if self.publisher:
+            try:
+                self.publisher(event)
+            except ValueError:
+                return {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "sender_failed"}
         try:
             payload = wake_contract(event, self.sent_at)
         except ValueError:
@@ -306,7 +312,17 @@ def run_configured(store, config, *, now, scan_id):
         command_errors = {"scanner": scan_error, "manage": manage_error, "status": status_error}
         executed = False
         mode = "shadow"
-    notifier = CommandNotifier(config.get("notifier"), timeout, now) if config.get("notifier") else None
+    def _publisher(event):
+        from .autoscan import freshness as freshness_of
+        from .production_transport import bind_envelope, build_envelope
+        fresh = freshness_of(snapshot.get("as_of"), now) if snapshot.get("as_of") else {"valid": False, "status": "missing", "age_seconds": None}
+        envelope = build_envelope(
+            snapshot, prefilter, fresh, event_id=event.get("event_id"), evaluation_id=event.get("evaluation_id"),
+            sent_at=now, reason=event.get("reason"),
+        )
+        bind_envelope(store, envelope)
+
+    notifier = CommandNotifier(config.get("notifier"), timeout, now, publisher=_publisher) if config.get("notifier") else None
     decision = run_cycle(store, snapshot, prefilter, now=now, scan_id=scan_id, manage_exit=manage_exit, notifier=notifier)
     decision["mode"] = mode
     decision["ready"] = False
@@ -402,6 +418,18 @@ def rollback_shadow_schedule(dest):
     return {"removed": True, "routine_stopped": False}
 
 
+SWITCH_BLOCKERS = (
+    "real_status_json_three_queries_on_account",
+    "manage_live_observed_without_unexpected_orders",
+    "dry_run_one_id_at_most_two_posts_delivered_not_processed",
+    "judgment_digest_then_restart_duplicate",
+    "watch_schedule_unchanged",
+    "discretion_remains_original_ai",
+    "parent_loaded_schedule",
+    "parent_signoff",
+)
+
+
 def check_config(config_path, state_dir=None):
     """只讀。不建立狀態、不啟動程序、不 load 排程。"""
     loaded = _load_config(config_path)
@@ -413,6 +441,7 @@ def check_config(config_path, state_dir=None):
         "commands": {name: loaded["commands"][name] for name in ("scanner", "manage", "status")},
         "notifier_verified": bool(loaded["notifier"] and loaded["notifier"].get("verified") is True),
         "switch_allowed": False,
+        "switch_blockers": list(SWITCH_BLOCKERS),
         "account_verified": False,
         "routine_stopped": False,
         "spawned": False,

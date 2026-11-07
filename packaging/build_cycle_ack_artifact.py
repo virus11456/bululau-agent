@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     "src/__init__.py",
+    "src/config.py",
+    "src/live_trader.py",
     "src/phase1/__init__.py",
     "src/phase1/cycle.py",
     "src/phase1/runner.py",
@@ -29,6 +31,7 @@ FILES = (
     "tests/test_cycle_ack.py",
     "tests/test_runner.py",
     "tests/test_status_contract.py",
+    "tests/test_status_json_command.py",
     "tests/test_production_transport.py",
     "docs/production_transport.md",
     "tests/test_cycle.py",

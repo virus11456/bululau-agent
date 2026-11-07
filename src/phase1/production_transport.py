@@ -7,7 +7,10 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
+
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .ack_contract import cycle_key, write_processed_file
@@ -21,9 +24,10 @@ from .session import Store, refuse_foreign_state_dir
 from .wake_gate import ALLOWED_WAKE_REASONS
 
 CONFIG_NAME = "transport.json"
-ENVELOPE_NAME = "evaluation_envelope.json"
+ENVELOPE_DIR = "envelopes"
 JUDGMENT_NAME = "dry_run_judgment.json"
 ACK_DIR_NAME = "ack-inbox"
+ALLOWED_DECISIONS = ("keep_original_ai", "no_trade")
 WAKE_FIELDS = (
     "schema_version", "event_type", "event_id", "evaluation_id",
     "sent_at", "reason", "test_channel", "position_channel",
@@ -44,12 +48,24 @@ def _reject_sender_test_dir(directory):
             raise ValueError("refused_test_sender_dir")
 
 
-def write_transport_config(directory, url, authorization):
+def write_transport_config(directory, url, authorization, ca_file=None):
     _reject_sender_test_dir(directory)
-    validate_url(url)
+    _production_url(url)
     validate_authorization(authorization)
     from .sender_setup import _write_private
-    return _write_private(directory, CONFIG_NAME, {"webhook_url": url, "authorization": authorization})
+    payload = {"webhook_url": url, "authorization": authorization}
+    if ca_file:
+        if not os.path.isfile(ca_file):
+            raise ValueError("rejected_ca")
+        payload["ca_file"] = ca_file
+    return _write_private(directory, CONFIG_NAME, payload)
+
+
+def _production_url(url):
+    validate_url(url)
+    parts = urllib.parse.urlsplit(url)
+    if parts.query or parts.fragment:
+        raise ValueError("rejected_url")
 
 
 def load_transport_config(directory):
@@ -57,10 +73,15 @@ def load_transport_config(directory):
     path = os.path.join(directory, CONFIG_NAME)
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
-    if not isinstance(data, dict) or set(data) != {"webhook_url", "authorization"}:
+    if not isinstance(data, dict):
         raise ValueError("rejected_config_fields")
-    validate_url(data["webhook_url"])
+    allowed = {"webhook_url", "authorization", "ca_file"}
+    if set(data) - allowed or "webhook_url" not in data or "authorization" not in data:
+        raise ValueError("rejected_config_fields")
+    _production_url(data["webhook_url"])
     validate_authorization(data["authorization"])
+    if "ca_file" in data and (not isinstance(data["ca_file"], str) or not os.path.isfile(data["ca_file"])):
+        raise ValueError("rejected_ca")
     return data
 
 
@@ -157,8 +178,14 @@ def _canonical(document):
     return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def envelope_path(state_dir, event_id):
+    cycle_key(event_id)
+    directory = os.path.join(str(state_dir), ENVELOPE_DIR)
+    return directory, os.path.join(directory, event_id + ".json")
+
+
 def bind_envelope(store, envelope):
-    """只寫狀態目錄裡的固定檔，並把摘要記在同一個 outbox 項。"""
+    """每筆事件一個不可變檔。已存在且摘要相同則保留，不同就拒絕覆蓋。"""
     refuse_foreign_state_dir(store.root)
     raw = _canonical(envelope)
     digest = hashlib.sha256(raw).hexdigest()
@@ -166,30 +193,46 @@ def bind_envelope(store, envelope):
     item = store.state.get("outbox", {}).get(key)
     if not isinstance(item, dict) or item.get("event_id") != envelope["event_id"]:
         raise ValueError("binding_mismatch")
+    directory, path = envelope_path(store.root, envelope["event_id"])
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if os.path.islink(directory) or (os.path.lexists(path) and os.path.islink(path)):
+        raise ValueError("rejected_symlink")
+    if os.path.exists(path):
+        with open(path, "rb") as handle:
+            existing = handle.read().strip()
+        if hashlib.sha256(existing).hexdigest() != digest:
+            raise ValueError("immutable_conflict")
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            with open(path, "rb") as handle:
+                existing = handle.read().strip()
+            if hashlib.sha256(existing).hexdigest() != digest:
+                raise ValueError("immutable_conflict")
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+                handle.write(b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
     item["envelope_sha256"] = digest
     store.save()
-    path = os.path.join(str(store.root), ENVELOPE_NAME)
-    if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
-        raise ValueError("rejected_symlink")
-    tmp = path + ".{0}.tmp".format(os.getpid())
-    with open(tmp, "wb") as handle:
-        handle.write(raw)
-        handle.write(b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
     return digest
 
 
 def read_envelope(state_dir, event_id, evaluation_id):
     refuse_foreign_state_dir(state_dir)
-    path = os.path.join(str(state_dir), ENVELOPE_NAME)
+    _directory, path = envelope_path(state_dir, event_id)
     store = Store(state_dir)
     item = store.state.get("outbox", {}).get(cycle_key(evaluation_id))
     if not isinstance(item, dict) or item.get("event_id") != event_id or not item.get("envelope_sha256"):
         raise ValueError("binding_mismatch")
-    if os.path.islink(path):
-        raise ValueError("rejected_symlink")
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise ValueError("binding_mismatch")
     with open(path, "rb") as handle:
         raw = handle.read()
     if hashlib.sha256(raw.strip()).hexdigest() != item["envelope_sha256"]:
@@ -200,18 +243,40 @@ def read_envelope(state_dir, event_id, evaluation_id):
     return document
 
 
-def send_wake(config_dir, state_dir, transport):
-    """只 POST 八欄通知。envelope 不進 body。HTTP 成功仍是 pending。"""
+def _moment(value):
+    from .ack_contract import _parse_time
+    return _parse_time(value)
+
+
+def _outside_window(moment, now):
+    from datetime import timedelta
+    from .ack_contract import MAX_ACK_AGE
+    current = _moment(now)
+    if moment > current + timedelta(seconds=60) or current - moment > MAX_ACK_AGE:
+        return True
+    return False
+
+
+def _transport(config, override):
+    if override is not None:
+        return override
+    context = None
+    if config.get("ca_file"):
+        import ssl
+        context = ssl.create_default_context(cafile=config["ca_file"])
+    return HttpsTransport(ssl_context=context)
+
+
+def send_wake(config_dir, state_dir, transport, event_id, evaluation_id, now):
+    """只 POST 指定事件的八欄通知。過期不送。HTTP 成功仍是 pending。"""
     config = load_transport_config(config_dir)
-    store = Store(state_dir)
-    path = os.path.join(str(state_dir), ENVELOPE_NAME)
-    with open(path, encoding="utf-8") as handle:
-        envelope = json.load(handle)
-    read_envelope(state_dir, envelope["event_id"], envelope["evaluation_id"])
+    envelope = read_envelope(state_dir, event_id, evaluation_id)
+    if _outside_window(_moment(envelope["sent_at"]), now):
+        return {"delivered": False, "processing_ack": False, "pending": True, "http_sent": False, "reason": "expired", "old_ai_poll": "keep"}
     document = wake_document(envelope)
     body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     try:
-        status = transport.post(config["webhook_url"], config["authorization"], body)
+        status = _transport(config, transport).post(config["webhook_url"], config["authorization"], body)
     except RedirectBlocked:
         return {"delivered": False, "processing_ack": False, "pending": True, "http_sent": False, "reason": "redirect_blocked", "old_ai_poll": "keep"}
     except Exception:
@@ -232,23 +297,58 @@ def send_wake(config_dir, state_dir, transport):
     }
 
 
-def commit_judgment(state_dir):
-    """只有 dry-run 判斷完成且未下單才寫 processed。收到 wake 不會寫。"""
+def send_wake_stdin(config_dir, state_dir, raw, now, transport=None):
+    """stdin 必須等於該事件 envelope 導出的八欄。錯誤訊息不含 URL 或認證。"""
+    try:
+        incoming = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("rejected_wake")
+    if not isinstance(incoming, dict) or set(incoming) != set(WAKE_FIELDS):
+        raise ValueError("rejected_wake")
+    envelope = read_envelope(state_dir, incoming.get("event_id"), incoming.get("evaluation_id"))
+    if wake_document(envelope) != incoming:
+        raise ValueError("rejected_wake")
+    return send_wake(config_dir, state_dir, transport, incoming["event_id"], incoming["evaluation_id"], now)
+
+
+def commit_judgment(state_dir, now):
+    """可稽核判斷才寫 processed。布林值不能證明 AI 真的跑過。過期直接拒絕。"""
     refuse_foreign_state_dir(state_dir)
     path = os.path.join(str(state_dir), JUDGMENT_NAME)
     with open(path, encoding="utf-8") as handle:
         judgment = json.load(handle)
     required = {
-        "schema_version", "event_type", "event_id", "evaluation_id",
-        "judgment_completed", "orders_placed", "decision", "completed_at",
+        "schema_version", "event_type", "event_id", "evaluation_id", "envelope_sha256",
+        "decision", "basis", "completed_at", "orders_placed", "ai_execution_proven",
     }
     if not isinstance(judgment, dict) or set(judgment) != required or judgment.get("schema_version") != 1:
         raise ValueError("rejected_judgment")
-    if judgment.get("event_type") != "dry_run_judgment" or judgment.get("judgment_completed") is not True:
-        raise ValueError("judgment_not_complete")
-    if judgment.get("orders_placed") is not False or judgment.get("decision") not in ("keep_original_ai", "no_trade"):
+    if judgment.get("event_type") != "dry_run_judgment":
+        raise ValueError("rejected_judgment")
+    if judgment.get("ai_execution_proven") is not False:
+        raise ValueError("ai_not_proven_by_attestation")
+    if judgment.get("orders_placed") is not False or judgment.get("decision") not in ALLOWED_DECISIONS:
         raise ValueError("orders_not_allowed")
     envelope = read_envelope(state_dir, judgment["event_id"], judgment["evaluation_id"])
+    item = Store(state_dir).state["outbox"][cycle_key(judgment["evaluation_id"])]
+    if judgment.get("envelope_sha256") != item.get("envelope_sha256"):
+        raise ValueError("digest_mismatch")
+    basis = judgment.get("basis")
+    if not isinstance(basis, dict):
+        raise ValueError("rejected_basis")
+    expected = {
+        "reason": envelope.get("reason"),
+        "as_of": envelope.get("snapshot", {}).get("as_of"),
+        "positions": envelope.get("snapshot", {}).get("positions"),
+        "orders": envelope.get("snapshot", {}).get("orders"),
+        "freshness_status": envelope.get("freshness", {}).get("status"),
+        "candidate_count": len(envelope.get("candidates") or []),
+    }
+    if set(basis) != set(expected) or any(basis.get(key) != value for key, value in expected.items()):
+        raise ValueError("rejected_basis")
+    completed = _moment(judgment.get("completed_at"))
+    if completed < _moment(envelope["sent_at"]) or _outside_window(completed, now):
+        raise ValueError("expired")
     inbox = os.path.join(str(state_dir), ACK_DIR_NAME)
     os.makedirs(inbox, mode=0o700, exist_ok=True)
     document = {
@@ -284,7 +384,7 @@ def _parse(argv):
     index = 0
     while index < len(argv):
         key = argv[index]
-        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id") or index + 1 >= len(argv):
+        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id", "--now") or index + 1 >= len(argv):
             return None
         found[key] = argv[index + 1]
         index += 2
@@ -295,13 +395,21 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
     if argv == ["configure"]:
         return 0 if configure_interactive(config_dir or default_config_dir(), read_pair) else 1
     found = _parse(argv[1:]) if argv else None
-    if argv[:1] == ["send-wake"] and found and "--config-dir" in found and "--state-dir" in found:
+    if argv[:1] in (["send-wake"], ["send-wake-stdin"]) and found and "--config-dir" in found and "--state-dir" in found:
         try:
-            result = send_wake(found["--config-dir"], found["--state-dir"], transport or HttpsTransport())
+            now = found.get("--now") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if argv[0] == "send-wake-stdin":
+                result = send_wake_stdin(found["--config-dir"], found["--state-dir"], sys.stdin.read(), now, transport)
+            else:
+                if "--event-id" not in found or "--evaluation-id" not in found:
+                    raise ValueError("rejected_wake")
+                result = send_wake(found["--config-dir"], found["--state-dir"], transport, found["--event-id"], found["--evaluation-id"], now)
         except ValueError as exc:
             print(json.dumps({"delivered": False, "processing_ack": False, "pending": True, "old_ai_poll": "keep", "reason": str(exc)}, ensure_ascii=False))
             return 1
-        print(json.dumps({key: result.get(key) for key in ("delivered", "processing_ack", "pending", "reason", "old_ai_poll", "event_id")}, ensure_ascii=False))
+        shown = {key: result.get(key) for key in ("delivered", "processing_ack", "pending", "reason", "old_ai_poll", "event_id")}
+        shown["schema_version"] = 1
+        print(json.dumps(shown, ensure_ascii=False))
         return 0 if result.get("delivered") else 1
     if argv[:1] == ["read-envelope"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found:
         try:
@@ -311,9 +419,9 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
             return 1
         print(json.dumps(document, ensure_ascii=False))
         return 0
-    if argv[:1] == ["commit-judgment"] and found and set(found) == {"--state-dir"}:
+    if argv[:1] == ["commit-judgment"] and found and "--state-dir" in found and "--now" in found and set(found) <= {"--state-dir", "--now"}:
         try:
-            path = commit_judgment(found["--state-dir"])
+            path = commit_judgment(found["--state-dir"], found["--now"])
         except ValueError as exc:
             print(json.dumps({"processed": False, "old_ai_poll": "keep", "reason": str(exc)}, ensure_ascii=False))
             return 1

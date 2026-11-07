@@ -94,6 +94,8 @@ python3 -m unittest tests.test_phase1
 
 `tests/evidence/` 是這次合成情境的請求與成交軌跡，不是績效。日 K 均線等未定項目仍然沒有預設值。
 
+省 token 的最小切換在 [docs/token_switch.md](docs/token_switch.md)。它只決定這輪要不要叫 AI，不取代 `watch` 和 `manage`。
+
 ## 風險聲明
 
 - 重啟實盤之後，真實委託的虧損由使用者承擔。現在還沒有重啟。

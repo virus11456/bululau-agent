@@ -3,29 +3,39 @@
 評估週期身份和候選指紋分開。manage 不經過這個閘門。
 未配置 sender 時，舊 AI 輪詢維持 blocked，不送 HTTP。
 """
+import secrets
+
+from .ack_contract import cycle_key
 from .autoscan import ScanBook, freshness
 from .token_switch import UnconfiguredWebhook, _identity
 
 
 def _enqueue_cycle(store, evaluation_id, completed_at, reason):
-    book = ScanBook(store)
-    key = "cycle:" + evaluation_id
-    outbox = store.state["outbox"]
-    if key in outbox:
-        return False
-    outbox[key] = {
+    """已存在的鍵不覆寫，避免把 pending 清掉。"""
+    try:
+        key = cycle_key(evaluation_id)
+    except ValueError:
+        return None
+    ScanBook(store)
+    outbox = store.state.setdefault("outbox", {})
+    current = outbox.get(key)
+    if isinstance(current, dict):
+        return current
+    item = {
         "event_class": "evaluation_cycle",
         "evaluation_id": evaluation_id,
+        "event_id": "c-" + secrets.token_hex(16),
         "fingerprint": None,
         "reason": reason,
         "status": "pending",
+        "processing_ack": False,
         "scan_completed_at": completed_at,
         "notify_seen": False,
     }
+    outbox[key] = item
     store.state["cycle_wake_count"] = int(store.state.get("cycle_wake_count") or 0) + 1
-    store.trace({"kind": "cycle_wake", "evaluation_id": evaluation_id, "reason": reason})
-    store.save()
-    return book is not None
+    store.trace({"kind": "cycle_wake", "evaluation_id": evaluation_id, "event_id": item["event_id"], "reason": reason})
+    return item
 
 
 def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_verified=False):
@@ -53,24 +63,31 @@ def decide(store, snapshot, prefilter, *, now, scan_id, notifier=None, recovery_
         and orders == 0
     )
     quiet = known and not candidates
-    evaluation_id = "cycle:" + scan_id
+    try:
+        cycle_key(scan_id)
+        evaluation_id = scan_id
+    except ValueError:
+        evaluation_id = None
     reason = "quiet_flat_book" if quiet else _reason(snapshot, fresh, scan_error, positions, orders, candidates)
-    if not quiet:
-        _enqueue_cycle(store, evaluation_id, completed or now, reason)
+    registered = None
+    if not quiet and evaluation_id is not None:
+        registered = _enqueue_cycle(store, evaluation_id, completed or now, reason)
         try:
-            sender = notifier.notify({"evaluation_id": evaluation_id, "reason": reason})
+            sender = notifier.notify({"evaluation_id": evaluation_id, "event_id": registered.get("event_id") if isinstance(registered, dict) else None, "reason": reason})
         except Exception:
             sender = {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "sender_failed"}
+    elif not quiet:
+        sender = {"status": "blocked", "delivered": False, "http_sent": False, "processing_ack": False, "reason": "rejected_id"}
     else:
         sender = {"status": "not_attempted", "delivered": False, "http_sent": False, "reason": "quiet_flat_book"}
     acked = bool(sender.get("processing_ack")) and bool(sender.get("delivered")) and not sender.get("http_sent") is None
-    old_ai = "eligible_to_stop" if quiet and recovery_verified and sender.get("processing_ack") and sender.get("delivered") else "keep"
-    if sender.get("status") == "blocked" or not recovery_verified:
-        old_ai = "keep"
+    old_ai = "keep"
     return {
         "cycle_needs_ai": not quiet,
         "reason": reason,
         "evaluation_id": evaluation_id,
+        "event_id": registered.get("event_id") if isinstance(registered, dict) else None,
+        "registered": bool(isinstance(registered, dict) and registered.get("event_id")),
         "candidate_fingerprints": [item["symbol"] + "|" + item["setup"] + "|" + item["bar_time"] for item in candidates],
         "persistent_event": not quiet,
         "sender": sender,

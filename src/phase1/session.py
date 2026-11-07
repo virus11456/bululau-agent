@@ -1,12 +1,17 @@
 """持倉生命週期、保護單與情境驅動。交易所是 mock，不讀金鑰。"""
 import json
 import os
+import stat
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
+from .ack_store import directory_lock, write_json_atomic
 from .autoscan import MAX_AGE_SECONDS, ScanBook, WebhookGate, freshness, fingerprint, parse_time
 from .qty import D, dec_str, half_baseline, normalize_exit_qty
 from .summary import summarize_position
+
+FOREIGN_STATE_NAMES = ("state.json", ".lock", "HALT_REPORT_USER.flag", "ack_state.json")
 
 FULL_CLOSE_AT = {"瘸師弟": Decimal("1.5")}
 HALF_ONCE_AT = {"布鹿流": Decimal("1.5")}
@@ -87,24 +92,77 @@ def _default_state():
     }
 
 
+def refuse_foreign_state_dir(directory):
+    """實盤檔與獨立 ACK 狀態檔不在這個目錄裡改。"""
+    for name in FOREIGN_STATE_NAMES:
+        if os.path.lexists(os.path.join(str(directory), name)):
+            raise ValueError("refused_foreign_state_dir")
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        info = os.lstat(self.root)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError("rejected_symlink")
+        refuse_foreign_state_dir(self.root)
         self.state_path = self.root / "phase1_state.json"
         self.trace_path = self.root / "trace.jsonl"
         self.snapshot_path = self.root / "snapshot.json"
-        if self.state_path.exists():
-            self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self._locked = False
+        self._fail = False
+        self._crash = None
+        if os.path.lexists(self.state_path):
+            self.reload()
         else:
             self.state = _default_state()
             self.save()
 
+    @contextmanager
+    def exclusive(self):
+        if self._locked:
+            yield
+            return
+        with directory_lock(str(self.root), "phase1_state.lock"):
+            self._locked = True
+            try:
+                yield
+            finally:
+                self._locked = False
+
+    def reload(self):
+        path = str(self.state_path)
+        if not os.path.lexists(path):
+            raise ValueError("rejected_state")
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValueError("rejected_symlink")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError("rejected_state")
+        self.state = loaded
+        return self
+
     def save(self):
-        _atomic(self.state_path, self.state)
+        if self._locked:
+            self._write()
+            return
+        with self.exclusive():
+            self._write()
+
+    def _write(self):
+        write_json_atomic(
+            str(self.root), str(self.state_path), self.state, fail=self._fail, crash=self._crash,
+        )
 
     def write_snapshot(self, snap):
-        _atomic(self.snapshot_path, snap)
+        write_json_atomic(str(self.root), str(self.snapshot_path), snap)
 
     def trace(self, record):
         self.state["trace_seq"] = int(self.state.get("trace_seq") or 0) + 1
@@ -122,12 +180,6 @@ class Store:
             if line.strip():
                 rows.append(json.loads(line))
         return rows
-
-
-def _atomic(path, obj):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 class Session:

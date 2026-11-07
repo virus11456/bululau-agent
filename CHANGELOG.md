@@ -16,6 +16,8 @@ manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小�
 
 處理 ACK 與收件分開。`accepted` 不會變成 `processed`。錯的、過早、未來、超過 15 分鐘、錯 evaluation、路徑字元或儲存失敗都維持 pending，舊 AI 不能停。崩潰留下的 `ack_state.json.tmp` 不刪，也不會讓之後的保存失敗。可搬包含 store 與 discover 測試。
 
+cycle 的 processed 回條寫回同一個 `phase1_state.json`。`python3 -m src.phase1.cycle apply` 才落地。布林值不會當成 processed。舊 pending 鍵不自動刪除。這個結果仍不停舊 routine。
+
 ## 2026-11-06
 
 使用者於 22:23（台北時間）確認策略定稿。這一版只更新文件，沒有改下單程式，沒有部署，也沒有讀取帳戶。實盤維持停止，紙上為現階段。重啟實盤還要等固定監控部署、測試完成，以及使用者確認資金可用。

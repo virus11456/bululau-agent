@@ -76,15 +76,19 @@ class CycleTest(unittest.TestCase):
             store = Store(Path(tmp))
             decision = self._run(store, _snap(positions=1), {"candidates": []}, "s1", notifier=Http200())
             key = "cycle:" + decision["evaluation_id"]
+            self.assertEqual(decision["evaluation_id"], "s1")
+            self.assertEqual(store.state["outbox"][key]["event_id"], decision["event_id"])
             self.assertEqual(store.state["outbox"][key]["status"], "pending")
             self.assertFalse(decision["sender"]["processing_ack"])
+            self.assertEqual(decision["old_ai_poll"], "keep")
+            self.assertFalse(decision["routine_stopped"])
             self.assertFalse(ack_cycle(store, decision["evaluation_id"], processing_ack=False))
+            self.assertFalse(ack_cycle(store, decision["evaluation_id"], processing_ack=True))
             self.assertEqual(store.state["outbox"][key]["status"], "pending")
             again = self._run(store, _snap(positions=1), {"candidates": []}, "s1", notifier=Boom())
             self.assertTrue(again["cycle_needs_ai"])
             self.assertEqual(store.state["outbox"][key]["status"], "pending")
-            self.assertTrue(ack_cycle(store, decision["evaluation_id"], processing_ack=True))
-            self.assertEqual(store.state["outbox"][key]["status"], "acked")
+            self.assertEqual(store.state["outbox"][key]["event_id"], decision["event_id"])
 
     def test_disconnect_does_not_claim_protection_complete(self):
         with tempfile.TemporaryDirectory() as tmp:

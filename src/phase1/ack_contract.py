@@ -27,6 +27,10 @@ def _id(value):
     return value
 
 
+def cycle_key(evaluation_id):
+    return "cycle:" + _id(evaluation_id)
+
+
 def _parse_time(value):
     if not isinstance(value, str):
         raise ValueError("rejected_ack_time")
@@ -118,7 +122,7 @@ def _apply_processed_ack(store, document, *, expected_event_id, sent_at, now):
     if processed_at > current + timedelta(seconds=60) or current - processed_at > MAX_ACK_AGE:
         return _reject("expired_or_future", store, event_id)
     evaluation_id = document["evaluation_id"]
-    key = "cycle:" + evaluation_id
+    key = cycle_key(evaluation_id)
     item = store.state.get("outbox", {}).get(key)
     if item is None or item.get("event_id") != event_id or item.get("evaluation_id") != evaluation_id:
         return _reject("binding_mismatch", store, event_id)

@@ -10,6 +10,69 @@ import stat
 from contextlib import contextmanager
 
 
+@contextmanager
+def directory_lock(directory, lock_name):
+    path = os.path.join(directory, lock_name)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_json_atomic(directory, dest_path, obj, *, fail=False, crash=None):
+    """寫入新的暫存檔再換上。不刪、不讀未知的 .tmp。"""
+    if fail:
+        raise OSError("store_failed")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    tmp = None
+    for _ in range(8):
+        tmp = "{0}.{1}.{2}.tmp".format(dest_path, os.getpid(), secrets.token_hex(8))
+        try:
+            fd = os.open(tmp, flags, 0o600)
+            break
+        except FileExistsError:
+            fd = None
+    if fd is None:
+        raise OSError("store_failed")
+    replaced = False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        if crash == "before_replace":
+            raise OSError("crash_before_replace")
+        os.replace(tmp, dest_path)
+        replaced = True
+        dir_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            dir_flags |= os.O_DIRECTORY
+        dir_fd = os.open(directory, dir_flags)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        os.chmod(dest_path, 0o600)
+        if crash == "after_replace":
+            raise OSError("crash_after_replace")
+    except Exception:
+        if not replaced and tmp and os.path.lexists(tmp) and not stat.S_ISLNK(os.lstat(tmp).st_mode) and crash != "before_replace":
+            os.unlink(tmp)
+        raise
+
+
 class AckStore:
     def __init__(self, directory):
         self.directory = str(directory)
@@ -30,22 +93,12 @@ class AckStore:
         if self._locked:
             yield
             return
-        path = os.path.join(self.directory, "ack_state.lock")
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        with directory_lock(self.directory, "ack_state.lock"):
             self._locked = True
             try:
                 yield
             finally:
                 self._locked = False
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
     def reload(self):
         if not os.path.lexists(self.path):
@@ -73,48 +126,4 @@ class AckStore:
             self._write()
 
     def _write(self):
-        if self._fail:
-            raise OSError("store_failed")
-        fd, tmp = self._open_private_tmp()
-        replaced = False
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self.state, handle, ensure_ascii=False, separators=(",", ":"))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(tmp, 0o600)
-            if self._crash == "before_replace":
-                raise OSError("crash_before_replace")
-            os.replace(tmp, self.path)
-            replaced = True
-            self._fsync_dir()
-            os.chmod(self.path, 0o600)
-            if self._crash == "after_replace":
-                raise OSError("crash_after_replace")
-        except Exception:
-            if not replaced and os.path.lexists(tmp) and not stat.S_ISLNK(os.lstat(tmp).st_mode) and self._crash != "before_replace":
-                os.unlink(tmp)
-            raise
-
-    def _open_private_tmp(self):
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        for _ in range(8):
-            tmp = "{0}.{1}.{2}.tmp".format(self.path, os.getpid(), secrets.token_hex(8))
-            try:
-                return os.open(tmp, flags, 0o600), tmp
-            except FileExistsError:
-                continue
-        raise OSError("store_failed")
-
-    def _fsync_dir(self):
-        flags = os.O_RDONLY
-        if hasattr(os, "O_DIRECTORY"):
-            flags |= os.O_DIRECTORY
-        fd = os.open(self.directory, flags)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        write_json_atomic(self.directory, self.path, self.state, fail=self._fail, crash=self._crash)

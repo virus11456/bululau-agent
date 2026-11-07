@@ -31,7 +31,7 @@ python3 -m src.phase1.token_switch --input /tmp/prefilter.json --state-dir /獨�
 
 1. 原有的 `watch --live` 排程繼續留著。這個倉庫沒有查使用者機器上的排程，不能把它當成已經在跑。
 2. `manage --live` 改由不含模型的固定指令繼續跑，頻率至少和原來的 15 分鐘一樣。這個閘門不會執行它，因為那要交易金鑰，而且可能送單。
-3. 即便帳上看起來是空的，也不能單靠候選指紋結束碼停掉舊 AI。免 AI 只看 `wake_gate`：新鮮快照、0 倉、0 掛單、0 候選、沒有錯誤，四個同時成立。有倉、任何掛單、狀態過期或 manage 出錯，每一輪仍要原 AI。週期身份是 `cycle:<scan_id>`，和 K 線指紋分開，避免同一根 K 把持倉複查吃掉。
+3. 即便帳上看起來是空的，也不能單靠候選指紋結束碼停掉舊 AI。免 AI 只是建議：新鮮快照、0 倉、0 掛單、0 候選、沒有錯誤，四個同時成立時 `ai_suggestion=skip`，`old_ai_poll` 仍是 keep。有倉、任何掛單、狀態過期或 manage 出錯，每一輪仍要原 AI。outbox 鍵是 `cycle:<scan_id>`，`scan_id` 本身是安全字元，和 K 線指紋分開。
 4. 舊輪詢只有在真實 sender 送達、處理 ack、以及故障恢復都通過之後才可以切。現在 URL、key、認證 header 都沒有，結果是 `old_ai_poll=keep`、sender `blocked`。沒有通過不能當成已經切換。
 
 ## Webhook

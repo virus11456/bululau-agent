@@ -182,6 +182,8 @@ _SETUP_BARS = {
     "小師弟": (("15m", 24), ("4h", 6), ("1d", 6)),
     "布鹿流": (("1h", 48), ("4h", 50), ("1d", 6)),
 }
+_BTC_BARS = (("15m", 24),)
+_OHLC_KEYS = ("open", "high", "low", "close", "volume")
 
 
 def kline_request(symbol, interval="15m", limit=20):
@@ -284,6 +286,93 @@ def _series_fresh(bars, interval, now_ms):
     return step <= age < 2 * step
 
 
+def _finite_price(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and abs(value) != float("inf")
+
+
+def bar_ohlcv_ok(bar, interval):
+    """一根已收盤 K 要有齊、有限、高低合法的 OHLCV。缺 close 或非數字都不算。"""
+    if not isinstance(bar, dict) or bar.get("closed") is not True:
+        return False
+    step = _INTERVAL_MS.get(interval)
+    opened = bar.get("open_time")
+    if step is None or type(opened) is not int or opened % step != 0:
+        return False
+    for key in _OHLC_KEYS:
+        if not _finite_price(bar.get(key)):
+            return False
+    high = bar["high"]
+    low = bar["low"]
+    if high < low or high < bar["open"] or high < bar["close"] or low > bar["open"] or low > bar["close"]:
+        return False
+    if bar["volume"] < 0:
+        return False
+    return True
+
+
+def candidate_requirements(candidates):
+    """跟取數同一張 setup 表。有已知候選才加 BTC 的 15m。"""
+    requirements = {}
+    known = False
+    for item in candidates or []:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        spec = _SETUP_BARS.get(item.get("setup"))
+        if not _symbol_ok(symbol) or spec is None:
+            continue
+        known = True
+        _merge_bars(spec, requirements.setdefault(symbol, {}))
+    if known:
+        _merge_bars(_BTC_BARS, requirements.setdefault("BTCUSDT", {}))
+    return requirements
+
+
+def series_meets(bars, interval, count, now_ms):
+    """必需根數的連續已收盤窗，而且每一根 OHLCV 都完整、有限、合法、新鮮。"""
+    if type(now_ms) is not int or not continuous_window(bars, interval, count) or not _series_fresh(bars, interval, now_ms):
+        return False
+    if not isinstance(bars, list) or not all(bar_ohlcv_ok(bar, interval) for bar in bars):
+        return False
+    return continuous_window(bars, interval, len(bars))
+
+
+def sent_at_ms(sent_at):
+    from .timeparse import parse_instant
+    try:
+        parsed = parse_instant(sent_at)
+    except (TypeError, ValueError):
+        return None
+    if getattr(parsed, "tzinfo", None) is None:
+        return None
+    return int(parsed.timestamp() * 1000)
+
+
+def review_covers_setup(candidates, klines, now_ms):
+    """sufficient 必須覆蓋每個已知 setup 的週期與根數，不能只留一段非空連續 K。"""
+    requirements = candidate_requirements(candidates)
+    if not requirements or not isinstance(klines, dict):
+        return False
+    for symbol, intervals in requirements.items():
+        series = klines.get(symbol)
+        if not isinstance(series, dict):
+            return False
+        for interval, count in intervals.items():
+            if not series_meets(series.get(interval), interval, count, now_ms):
+                return False
+    for series in klines.values():
+        if not isinstance(series, dict) or not series:
+            return False
+        for interval, bars in series.items():
+            if interval not in _INTERVAL_MS or not isinstance(bars, list) or not bars:
+                return False
+            if not all(bar_ohlcv_ok(bar, interval) for bar in bars) or not continuous_window(bars, interval, len(bars)):
+                return False
+    return True
+
+
 def resolve_clients(entry, private_get=None, public_get=None):
     """live_fetch 為 false 時不匯入真實客戶端。測試可注入 mock。"""
     if entry.get("enabled") is not True:
@@ -382,25 +471,31 @@ def _envelope_for(snapshot, prefilter, review, *, now, scan_id, event_id, reason
 
 
 def _review_exceeds_context_limit(snapshot, prefilter, review, *, now, scan_id):
-    from .production_transport import context_too_large
+    """notifier 前量的是完整 delivery 的 UTF-8，不是 envelope，也不是字元數。"""
+    from .production_transport import CONTEXT_MAX_BYTES, projected_delivery_bytes
     probe = "c-" + ("ab" * 16)
     try:
         envelope = _envelope_for(
             snapshot, prefilter, review, now=now, scan_id=scan_id, event_id=probe, reason="candidates_present",
         )
+        raw = projected_delivery_bytes(envelope, "ab" * 16)
     except ValueError:
         return True
-    return context_too_large(envelope)
+    return len(raw) > CONTEXT_MAX_BYTES
 
 
 def _bind_review_envelope(store, snapshot, prefilter, review, *, now, scan_id, event_id, reason):
-    from .production_transport import bind_envelope, context_too_large
+    from .production_transport import CONTEXT_MAX_BYTES, bind_envelope, projected_delivery_bytes
     if not event_id:
         return False
     envelope = _envelope_for(
         snapshot, prefilter, review, now=now, scan_id=scan_id, event_id=event_id, reason=reason,
     )
-    if context_too_large(envelope):
+    try:
+        raw = projected_delivery_bytes(envelope, "ab" * 16)
+    except ValueError:
+        return False
+    if len(raw) > CONTEXT_MAX_BYTES:
         return False
     bind_envelope(store, envelope)
     return True
@@ -429,18 +524,13 @@ def fetch_strategy_market(private_get, public_get, candidates, now_ms):
         if account is None or orders is None or algo is None:
             raise ValueError("query_failed")
         preview = build_review(account, orders, algo, {}, candidates or [], now_ms, queries_present=True)
-        requirements = {}
-        unknown = []
         named = [item for item in candidates or [] if isinstance(item, dict)]
+        requirements = candidate_requirements(named)
+        unknown = []
         for item in named:
             symbol = item.get("symbol")
-            spec = _SETUP_BARS.get(item.get("setup"))
-            if not _symbol_ok(symbol) or spec is None:
+            if not _symbol_ok(symbol) or item.get("setup") not in _SETUP_BARS:
                 unknown.append(symbol if isinstance(symbol, str) else "")
-                continue
-            _merge_bars(spec, requirements.setdefault(symbol, {}))
-        if any(item.get("setup") in _SETUP_BARS and _symbol_ok(item.get("symbol")) for item in named):
-            _merge_bars((("15m", 24),), requirements.setdefault("BTCUSDT", {}))
         for pos in preview["positions"]:
             known = [name for name in _setup_names(pos["symbol"], named) if name in _SETUP_BARS]
             if not known:
@@ -462,7 +552,7 @@ def fetch_strategy_market(private_get, public_get, candidates, now_ms):
                     raise ValueError("query_failed")
                 closed = closed_ohlcv(raw, interval, now_ms)
                 series[symbol][interval] = closed
-                if not continuous_window(closed, interval, count) or not _series_fresh(closed, interval, now_ms):
+                if not series_meets(closed, interval, count, now_ms):
                     strategy_missing.append("klines:{0}:{1}".format(symbol, interval))
         for symbol in unknown:
             strategy_missing.append("unknown_setup:" + (symbol or ""))

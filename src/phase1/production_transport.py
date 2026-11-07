@@ -529,12 +529,46 @@ def context_too_large(document, max_bytes=None):
     return len(raw) > context_limit(max_bytes)
 
 
+def delivery_utf8(document):
+    """跟 build_delivery 同一套序列化。數 UTF-8 位元組，不數字元。"""
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def projected_delivery_bytes(envelope, producer_store_id):
+    """把 envelope 裝進實際 context 與 delivery wrapper 後的 UTF-8。store id 長度固定。"""
+    if not isinstance(producer_store_id, str) or len(producer_store_id) != 32:
+        raise ValueError("rejected_context")
+    if not isinstance(envelope, dict):
+        raise ValueError("rejected_context")
+    canonical = _canonical(envelope)
+    digest = hashlib.sha256(canonical).hexdigest()
+    round_tripped = json.loads(canonical.decode("utf-8"))
+    context = {
+        "schema_version": 1,
+        "event_type": "immutable_context",
+        "event_id": round_tripped.get("event_id"),
+        "evaluation_id": round_tripped.get("evaluation_id"),
+        "envelope_sha256": digest,
+        "sent_at": round_tripped.get("sent_at"),
+        "producer_store_id": producer_store_id,
+        "envelope": round_tripped,
+        "automatic_transport": False,
+    }
+    document = {
+        "schema_version": 1,
+        "event_type": "evaluation_delivery",
+        "wake": wake_document(round_tripped),
+        "context": context,
+    }
+    return delivery_utf8(document)
+
+
 def build_delivery(state_dir, event_id, evaluation_id, max_bytes=None):
     """外層是 wake 加 context。wake 本身維持八欄，太大就拒絕，不截斷。"""
     context = build_context(state_dir, event_id, evaluation_id)
     wake = wake_document(context["envelope"])
     document = {"schema_version": 1, "event_type": "evaluation_delivery", "wake": wake, "context": context}
-    raw = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    raw = delivery_utf8(document)
     if len(raw) > context_limit(max_bytes):
         raise ValueError("context_too_large")
     return document, raw

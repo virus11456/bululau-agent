@@ -369,13 +369,6 @@ def _trustworthy_book(envelope):
     )
 
 
-def _series_continuous(bars, interval):
-    from .market_adapter import _INTERVAL_MS, continuous_window
-    if interval not in _INTERVAL_MS or not isinstance(bars, list) or not bars:
-        return False
-    return continuous_window(bars, interval, len(bars))
-
-
 def _review_context_ok(envelope):
     review = envelope.get("review_context")
     if not isinstance(review, dict) or set(review) != set(_REVIEW_CONTEXT_FIELDS):
@@ -396,14 +389,9 @@ def _review_context_ok(envelope):
     if not isinstance(klines, dict) or not isinstance(review.get("missing"), list):
         return False
     if review.get("context_sufficient") is True:
-        if not klines:
+        from .market_adapter import review_covers_setup, sent_at_ms
+        if not review_covers_setup(envelope.get("candidates"), klines, sent_at_ms(envelope.get("sent_at"))):
             return False
-        for series in klines.values():
-            if not isinstance(series, dict) or not series:
-                return False
-            for interval, bars in series.items():
-                if not _series_continuous(bars, interval):
-                    return False
     return True
 
 

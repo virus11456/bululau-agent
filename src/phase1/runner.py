@@ -19,7 +19,9 @@ from .cycle import run_cycle
 from .session import Store, refuse_foreign_state_dir
 
 MARKER = "bululau-cycle-shadow\n"
-HOURLY_SCAN_SECONDS = 3600
+DEFAULT_SCAN_SECONDS = 1800
+MAC_SCAN_FLOOR_SECONDS = 1800
+HOURLY_SCAN_SECONDS = DEFAULT_SCAN_SECONDS
 TPE = timezone(timedelta(hours=8))
 WAKE_SCHEMA = 1
 REFUSED_BASES = ("sender_setup.py",)
@@ -111,8 +113,8 @@ def _load_config(path):
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 120:
         raise ValueError("malformed_config")
     role = loaded.get("role", "package")
-    interval = _interval(loaded.get("interval_seconds", HOURLY_SCAN_SECONDS))
-    if role == "mac" and interval < HOURLY_SCAN_SECONDS:
+    interval = _interval(loaded.get("interval_seconds", DEFAULT_SCAN_SECONDS))
+    if role == "mac" and interval < MAC_SCAN_FLOOR_SECONDS:
         raise ValueError("scan_interval_too_fast")
     notifier = _notifier_config(loaded.get("notifier"))
     if role not in ("package", "mac"):
@@ -427,7 +429,7 @@ def run_configured(store, config, *, now, scan_id):
     decision["post_authorized"] = False
     decision["status_from_state_snapshot"] = False
     decision["scan_interval_seconds"] = config.get("interval_seconds")
-    decision["opportunity_scan"] = "hourly"
+    decision["opportunity_scan"] = str(config.get("interval_seconds"))
     decision["position_ai_event_path"] = "not_implemented"
     decision["hard_watch_seconds"] = 60
     decision["hard_watch_modified"] = False
@@ -465,7 +467,7 @@ def install_schedule(dest, state_dir, repo, python, config_path=None):
     if _unsafe_schedule_dest(dest):
         raise ValueError("refused_schedule_dest")
     refuse_foreign_state_dir(state_dir)
-    interval = HOURLY_SCAN_SECONDS
+    interval = DEFAULT_SCAN_SECONDS
     command = [python, "-m", "src.phase1.runner", "run", "--state-dir", state_dir, "--config", config_path or os.path.join(state_dir, "runner.json"), "--shadow"]
     if config_path:
         loaded = _load_config(config_path)
@@ -648,7 +650,7 @@ def check_config(config_path, state_dir=None):
         "quantboy_root": loaded.get("quantboy_root"),
         "role": loaded.get("role"),
         "scan_interval_seconds": loaded["interval_seconds"],
-        "opportunity_scan": "hourly",
+        "opportunity_scan": str(loaded["interval_seconds"]),
         "position_ai_event_path": "not_implemented",
         "hard_watch_seconds": 60,
         "hard_watch_modified": False,

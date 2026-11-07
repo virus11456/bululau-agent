@@ -270,49 +270,110 @@ def _review_scalar(value):
     return False
 
 
-def _nested_envelope(envelope):
-    """snapshot、freshness、candidates 的型別與必填。合法摘要不能代替這個契約。"""
-    freshness = envelope.get("freshness")
+def _freshness_consistent(freshness):
+    """跟 autoscan.freshness 與 runner 缺 as_of 時的 missing 同一套。"""
+    from .autoscan import MAX_AGE_SECONDS
     if not isinstance(freshness, dict) or set(freshness) != set(_FRESHNESS_FIELDS):
-        return "rejected_context"
-    if type(freshness.get("valid")) is not bool or freshness.get("status") not in _FRESHNESS_STATUS:
-        return "rejected_context"
-    if not _exact_int(freshness.get("age_seconds")):
-        return "rejected_context"
-    snapshot = envelope.get("snapshot")
+        return False
+    valid = freshness.get("valid")
+    status = freshness.get("status")
+    age = freshness.get("age_seconds")
+    if type(valid) is not bool or status not in _FRESHNESS_STATUS:
+        return False
+    if status == "missing":
+        return valid is False and age is None
+    if not _exact_int(age):
+        return False
+    if status == "blocked_clock_skew":
+        return valid is False and age < 0
+    if status == "stale":
+        return valid is False and age > MAX_AGE_SECONDS
+    if status == "fresh":
+        return valid is True and 0 <= age <= MAX_AGE_SECONDS
+    return False
+
+
+def _snapshot_consistent(snapshot, freshness):
     if not isinstance(snapshot, dict) or set(snapshot) != set(_SNAPSHOT_FIELDS):
-        return "rejected_context"
-    if not isinstance(snapshot.get("status"), str) or not snapshot.get("status"):
-        return "rejected_context"
-    as_of = snapshot.get("as_of")
-    if as_of is not None and not isinstance(as_of, str):
-        return "rejected_context"
-    for key in ("positions", "orders"):
-        if not _exact_int(snapshot.get(key)) or snapshot.get(key) < 0:
-            return "rejected_context"
-    for key in ("manage_error", "manage_complete", "status_trusted"):
-        if type(snapshot.get(key)) is not bool:
-            return "rejected_context"
+        return False
+    status = snapshot.get("status")
+    if status not in ("ok", "unknown"):
+        return False
+    if type(snapshot.get("manage_error")) is not bool or type(snapshot.get("manage_complete")) is not bool:
+        return False
+    if snapshot.get("manage_complete") is snapshot.get("manage_error"):
+        return False
     if snapshot.get("limit_older_than_2h_implemented") is not False:
-        return "rejected_context"
-    candidates = envelope.get("candidates")
+        return False
+    as_of = snapshot.get("as_of")
+    fresh_status = freshness.get("status")
+    if fresh_status == "missing":
+        if as_of is not None or status != "unknown":
+            return False
+    elif not isinstance(as_of, str) or not as_of:
+        return False
+    for key in ("positions", "orders"):
+        value = snapshot.get(key)
+        if status == "unknown":
+            if value is not None and (not _exact_int(value) or value < 0):
+                return False
+        elif not _exact_int(value) or value < 0:
+            return False
+    trusted = snapshot.get("status_trusted")
+    if status == "ok":
+        if type(trusted) is not bool:
+            return False
+    elif trusted is not None and type(trusted) is not bool:
+        return False
+    return True
+
+
+def _candidates_consistent(candidates):
     if not isinstance(candidates, list):
-        return "rejected_context"
+        return False
     for item in candidates:
         if not isinstance(item, dict):
-            return "rejected_context"
+            return False
         if any(key not in item for key in _CANDIDATE_FIELDS):
-            return "rejected_context"
+            return False
         if any(key not in _CANDIDATE_FIELDS and key not in _CANDIDATE_OPTIONAL for key in item):
-            return "rejected_context"
-        if not all(isinstance(item.get(key), str) for key in ("symbol", "setup", "bar_time")):
-            return "rejected_context"
+            return False
+        identity = [item.get(key) for key in ("symbol", "setup", "bar_time")]
+        if not all(isinstance(value, str) and value.strip() for value in identity):
+            return False
         ladder = item.get("ladder")
         if not isinstance(ladder, list) or len(ladder) > 8 or any(not _review_scalar(step) or isinstance(step, str) for step in ladder):
-            return "rejected_context"
+            return False
         for key in _CANDIDATE_OPTIONAL:
             if key in item and not _review_scalar(item.get(key)):
-                return "rejected_context"
+                return False
+    return True
+
+
+def _trustworthy_book(envelope):
+    """只有新鮮、查詢完成、旗標不打架，才夠格做 no_trade。缺資料只能 keep_original_ai。"""
+    freshness = envelope.get("freshness") if isinstance(envelope.get("freshness"), dict) else {}
+    snapshot = envelope.get("snapshot") if isinstance(envelope.get("snapshot"), dict) else {}
+    return (
+        freshness.get("valid") is True
+        and freshness.get("status") == "fresh"
+        and snapshot.get("status") == "ok"
+        and snapshot.get("status_trusted") is True
+        and snapshot.get("manage_error") is False
+        and snapshot.get("manage_complete") is True
+    )
+
+
+def _nested_envelope(envelope):
+    """型別加上跨欄一致。unknown/missing 可以表示，不能裝成 fresh 或已完成。"""
+    freshness = envelope.get("freshness")
+    if not _freshness_consistent(freshness):
+        return "rejected_context"
+    snapshot = envelope.get("snapshot")
+    if not _snapshot_consistent(snapshot, freshness):
+        return "rejected_context"
+    if not _candidates_consistent(envelope.get("candidates")):
+        return "rejected_context"
     return None
 
 
@@ -383,6 +444,9 @@ def parent_package_ready(judgment, trace, context=None):
             return {"ready": False, "reason": "binding_mismatch", "discretion_complete": False}
         if judgment.get("envelope_sha256") != digest or trace.get("envelope_sha256") != digest:
             return {"ready": False, "reason": "digest_mismatch", "discretion_complete": False}
+        envelope = context.get("envelope") if isinstance(context.get("envelope"), dict) else {}
+        if judgment.get("decision") == "no_trade" and not _trustworthy_book(envelope):
+            return {"ready": False, "reason": "untrustworthy_discretion", "discretion_complete": False}
     return {
         "ready": True,
         "reason": "parent_package_present",

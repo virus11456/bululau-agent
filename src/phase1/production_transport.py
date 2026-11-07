@@ -450,9 +450,11 @@ def verify_context(document, now):
     }
 
 
-def prepare_handoff(state_dir, event_id, evaluation_id, dest):
+def prepare_handoff(state_dir, event_id, evaluation_id, dest, scan_interval_seconds=1800):
     """寫出要交給 box 的上下文清單。不 POST，不代寫判斷。"""
     export_context(state_dir, event_id, evaluation_id, dest)
+    if isinstance(scan_interval_seconds, bool) or not isinstance(scan_interval_seconds, int) or not 1800 <= scan_interval_seconds <= 86400:
+        raise ValueError("scan_interval_too_fast")
     manifest = {
         "schema_version": 1,
         "event_type": "mac_box_handoff",
@@ -471,7 +473,7 @@ def prepare_handoff(state_dir, event_id, evaluation_id, dest):
         "apply_host": "mac_producer",
         "physical_store_proven": False,
         "replacement_allowed": False,
-        "scan_interval_seconds": 3600,
+        "scan_interval_seconds": scan_interval_seconds,
         "scan_interval_reverts_to_15m": False,
     }
     side = os.path.splitext(dest)[0] + ".handoff.json"
@@ -888,7 +890,7 @@ def _parse(argv):
     index = 0
     while index < len(argv):
         key = argv[index]
-        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id", "--now", "--out", "--file") or index + 1 >= len(argv):
+        if key not in ("--config-dir", "--state-dir", "--event-id", "--evaluation-id", "--now", "--out", "--file", "--scan-interval") or index + 1 >= len(argv):
             return None
         found[key] = argv[index + 1]
         index += 2
@@ -958,7 +960,8 @@ def main(argv, config_dir=None, read_pair=None, transport=None):
         return 0
     if argv[:1] == ["prepare-handoff"] and found and "--state-dir" in found and "--event-id" in found and "--evaluation-id" in found and "--out" in found:
         try:
-            manifest, _side = prepare_handoff(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"])
+            interval = int(found["--scan-interval"]) if "--scan-interval" in found else 1800
+            manifest, _side = prepare_handoff(found["--state-dir"], found["--event-id"], found["--evaluation-id"], found["--out"], interval)
         except ValueError as exc:
             print(json.dumps({"exported": False, "post_authorized": False, "transport_implemented": False, "reason": str(exc)}, ensure_ascii=False))
             return 1

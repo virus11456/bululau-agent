@@ -39,7 +39,7 @@ _FIXED_REASONS = {
     "get_budget_exhausted", "wake_budget_exhausted", "deadline_exceeded", "event_not_approved",
     "rejected_id", "role_rejected", "timeout", "transport_failed", "too_large",
     "rejected_schema", "non_finite", "unsafe_integer", "digest_mismatch", "binding_mismatch",
-    "not_applied", "store_failed", "rejected_context", "ledger_missing", "ledger_corrupt", "ledger_path_rejected",
+    "not_applied", "store_failed", "rejected_context", "untrustworthy_discretion", "ledger_missing", "ledger_corrupt", "ledger_path_rejected",
     "stage_rejected", "parent_package_not_ready", "clock_invalid",
 }
 LEDGER_LIMITS = (

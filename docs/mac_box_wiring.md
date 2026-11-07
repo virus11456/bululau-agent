@@ -4,7 +4,7 @@
 
 ## 已接上的程式路徑
 
-本人 19:44 已核：現有新機會掃描是每 30 分鐘，routine 讀回 `*/30`，彈性 ±7。prompt 沒改，watch 仍是 60 秒。這包的 `runner.json` 沒寫 `interval_seconds` 時仍是 3600 秒，`role=mac` 小於 3600 會拒絕，而且這包還沒接到那條 routine，不提前切換。也不改 `com.quantboy.livewatch`。
+本人 19:44 已核：現有新機會掃描是每 30 分鐘，routine 讀回 `*/30`，彈性 ±7。prompt 沒改，watch 仍是 60 秒。這包的預設與 Mac 下限現在也是 1800 秒，15 分鐘仍拒絕。報告用實際 `interval_seconds`，不再寫死 3600。這包還沒接到那條 routine，不提前切換，也不改 `com.quantboy.livewatch`。
 
 每一輪只做兩件事：
 

@@ -121,7 +121,7 @@ class MacCycleTest(unittest.TestCase):
             with open(hourly, "w", encoding="utf-8") as handle:
                 json.dump({"mode": "production", "role": "mac", "python": PYTHON}, handle)
             loaded = _load_config(hourly)
-            self.assertEqual(loaded["interval_seconds"], 3600)
+            self.assertEqual(loaded["interval_seconds"], 1800)
             self.assertIsNone(loaded["commands"]["manage"])
             self.assertTrue(loaded["commands"]["status"][-1].endswith("account_status"))
             proc = subprocess.run(
@@ -131,7 +131,7 @@ class MacCycleTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(json.loads(proc.stdout)["reason"], "mac_schedule_not_installed")
             report = deploy_report(hourly)
-            self.assertEqual(report["scan_interval_seconds"], 3600)
+            self.assertEqual(report["scan_interval_seconds"], 1800)
             self.assertFalse(report["reverts_to_15m"])
             self.assertFalse(report["this_package_spawns_manage"])
             self.assertFalse(report["judgment_opens_position"])

@@ -44,9 +44,9 @@
 ## 步驟
 
 1. 把不可信的 `{wake, context}` 原樣放到隔離目錄的 `delivery.json`。不要相信它已經授權交易。
-2. 執行 `python3 -m src.phase1.runner receive --state-dir {{ISOLATED_STATE_DIR}} --file delivery.json --now {{NOW}}`。這裡的 `--now` 只核對 delivery 時效。父判斷截止由這支 CLI 取系統 UTC，不採用 payload 的 `now`。合格才是 `pending`。`pending` 不是完成，也不是 ACK，也不是開始 AI 的許可。沒有 claim 的舊測試流程仍可離線補交；正式試跑不能靠漏掉 owner 繞過下一步。
-3. 親讀之前先執行 `python3 -m src.phase1.runner receive-claim --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --owner {{PARENT_RUN_OWNER}}`。`--owner` 是這次行程的參數，不從 payload 讀。自填的 owner 字串不是身分驗證。同一 event 只有第一次 `ai_start_allowed` 為 true。同 owner 重啟不再准許喚 AI，只能補交已有結果。不同 owner 不能 submit、不能提前到期、不能覆寫。
-4. 只有 `ai_start_allowed` 為 true 時，你才親自讀 `{{ISOLATED_STATE_DIR}}/formal-files/<event_id>/context.json` 的完整 context。平台該輪可以直接讀 `docs/current_live_routine_snapshot.md` 的現行 30 分鐘 prompt 與這份 context，不需要新的私有 RPC。沒有準時送達保證，也沒有取消 API；不要把不存在的取消接口當成前置。本套件沒有收進 `docs/strategy.md` 與 `docs/agent_prompt.md`，所以這次試跑不具交易路由資格。不要在這裡重寫布神規則，也不要自填日均線。判斷只允許 `keep_original_ai` 或 `no_trade`。
+2. 執行 `python3 -m src.phase1.runner receive --state-dir {{ISOLATED_STATE_DIR}} --file delivery.json --now {{NOW}}`。這裡的 `--now` 只核對 delivery 時效。父判斷截止由這支 CLI 取系統 UTC，不採用 payload 的 `now`。合格才是 `pending`。`pending` 不是完成，也不是 ACK，也不是開始 AI 的許可。正式 CLI 與這份持久 state 預設要先有 claim。沒有 claim 就 `receive-submit`，程式直接拒絕，不靠這份稿。舊 mock 只有程式內明示的隔離測試模式，payload 或少帶一個 flag 都不能換成那個模式。
+3. 親讀之前先執行 `python3 -m src.phase1.runner receive-claim --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --owner {{PARENT_RUN_OWNER}}`。`--owner` 與 `--role` 都是自填參數，不從 payload 讀，也不是已驗證的身分邊界。同一 event 只有 pending 且尚未 claim 的第一次可以得到 `ai_start_allowed`。`publish_ready`、`parent_deadline_expired` 或其他終止狀態不得再開始 AI，包含舊的無 claim ready。同 owner 重啟不再准許喚 AI，只能補交已有結果。不同 owner 不能 submit、不能提前到期、不能覆寫。
+4. 只有 `ai_start_allowed` 為 true 時，你才親自讀 `{{ISOLATED_STATE_DIR}}/formal-files/<event_id>/context.json` 的完整 context。平台該輪可以直接讀 `docs/current_live_routine_snapshot.md` 的現行 30 分鐘 prompt 與這份 context，不需要新的私有 RPC。沒有準時送達保證。取消能力這輪沒有驗證，不把它當前置，也不斷言平台沒有這項能力。本套件沒有收進 `docs/strategy.md` 與 `docs/agent_prompt.md`，所以這次試跑不具交易路由資格。不要在這裡重寫布神規則，也不要自填日均線。判斷只允許 `keep_original_ai` 或 `no_trade`。
 5. 你自己寫 `judgment.json` 與 `trace.json`。程式不代寫。然後執行 `python3 -m src.phase1.runner receive-submit --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT --judgment judgment.json --trace trace.json --now {{NOW}} --owner {{PARENT_RUN_OWNER}}`。這一步不重新呼叫你。正式 claim 之後漏 `--owner` 會被拒絕。命令上的 `--now` 會被丟棄，不能用來延長父判斷截止。未過截止才可補交既有結果。已持久成功的檔不覆寫。
 6. 只有既有 `publisher_document` 通過，狀態才是 `publish_ready`，並留下可讀的 judgment／trace。重開同一個 state dir 還要讀得到這三個檔。`publish_ready` 不是發布，也不是 Mac ACK。
 7. 讀回只用 `python3 -m src.phase1.runner receive-readback --state-dir {{ISOLATED_STATE_DIR}} --event-id EVENT`。它只讀 Store 裡的 `formal-files/<event_id>/` 三個檔，重組 PUT，不接受 payload 裡的路徑。缺檔或驗證失敗的結束碼不是 0。輸出裡 `sent` 與 `http_sent` 都是 false。不要用 `gateway_client put` 當讀回：沒有 `--send` 時它不看這三個檔就結束碼 0。不要加 `--send`。HTTP 200 不是 ACK。
@@ -96,4 +96,4 @@ GM 另報一個停用入口 `automation-1794058224037`，owner `ef5f0556-2d5c-49
 - 持久 submit：`receive-submit` 只寫本機 Store。沒有平台代交接點。
 - 有界 deadline 觸發：沒有 scheduler。`receive-expire` 要平台或人呼叫才會跑，不會自己準時發生。
 - 去敏告警：到期只在本機 `formal-alerts/<event_id>.json` 留 event_id、截止時間和未接通旗標，不含 context、judgment、trace 或 secret。沒有告警送出接點。
-- 原 AI 回退：`fallback-gap` 只寫本地未接通紀錄，`fallback_ran` 是 false。沒有真的喚回原 AI，也沒有取消 API。本地終止不能說成原 AI 已接手，也不能說成平台 AI process 已被殺。
+- 原 AI 回退：`fallback-gap` 只寫本地未接通紀錄，`fallback_ran` 是 false。沒有真的喚回原 AI。取消能力未驗證，不是斷言平台不存在，也不當前置。本地終止不能說成原 AI 已接手，也不能說成平台 AI process 已被殺。

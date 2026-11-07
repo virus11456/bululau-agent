@@ -9,7 +9,17 @@ cd "$HOME/bululau-cycle-ack"
 python3 -m unittest discover -s tests -t . -p 'test_*.py'
 ```
 
-discover 的測試數必須大於 0。`ai_suggestion=skip` 只出現在真的沒有倉、沒有單、沒有新事件且沒有錯誤的時候。`old_ai_poll` 仍是 keep，不會停舊 routine。
+discover 的測試數必須大於 0。`ai_suggestion=skip` 只出現在真的沒有倉、沒有單、沒有新事件且掃描沒有錯誤的時候。timeout、429、空檔、缺欄、格式錯都不能 skip。`old_ai_poll` 仍是 keep，`ready` 是 false，不會停舊 routine。
+
+shadow runner 不讀金鑰，不 POST，不執行 `live_trader.py` 或 `--live`。正式 notifier 沒配置就是 blocked。
+
+```bash
+python3 -m src.phase1.runner run --state-dir "$CYCLE_DIR" --config "$CYCLE_DIR/runner.json" --now TIME --scan-id ID --shadow
+python3 -m src.phase1.runner install-schedule --dest "$CYCLE_DIR/schedule" --state-dir "$CYCLE_DIR" --repo "$PWD" --python python3
+python3 -m src.phase1.runner rollback-schedule --dest "$CYCLE_DIR/schedule"
+```
+
+`install-schedule` 只在指定目錄寫 Disabled 的 plist，不會 load，也不會刪舊 AI 排程。
 
 正式狀態目錄由操作者自建，不要指到實盤資料目錄或 GM 的 ACK 目錄：
 

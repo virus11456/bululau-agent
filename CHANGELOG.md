@@ -18,6 +18,8 @@ manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小�
 
 cycle 的 processed 回條寫回同一個 `phase1_state.json`。`python3 -m src.phase1.cycle apply` 才落地。布林值不會當成 processed。舊 pending 鍵不自動刪除。這個結果仍不停舊 routine。
 
+掃描錯誤不再被空倉蓋成 quiet。`python3 -m src.phase1.runner run --shadow` 用子程序串 scanner、manage、status 與同一個 store。預設不執行實盤指令，排程檔是 Disabled。`ready` 不是 true。
+
 ## 2026-11-06
 
 使用者於 22:23（台北時間）確認策略定稿。這一版只更新文件，沒有改下單程式，沒有部署，也沒有讀取帳戶。實盤維持停止，紙上為現階段。重啟實盤還要等固定監控部署、測試完成，以及使用者確認資金可用。

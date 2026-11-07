@@ -24,6 +24,31 @@ def _fingerprints(prefilter):
     return found
 
 
+def _normalize_prefilter(prefilter):
+    """空、缺、格式錯、timeout、429 都保持錯誤，不能被換成空候選。"""
+    if not isinstance(prefilter, dict) or "candidates" not in prefilter or not isinstance(prefilter.get("candidates"), list):
+        reason = "missing" if isinstance(prefilter, dict) and "candidates" not in prefilter else "malformed"
+        return {"error": reason, "candidates": []}, True
+    blocked = "error" in prefilter and prefilter.get("error") not in (None, False)
+    if not blocked:
+        for item in prefilter["candidates"]:
+            try:
+                ident = _identity(item)
+            except (TypeError, ValueError, OSError, OverflowError):
+                blocked = True
+                break
+            if ident is None and not (isinstance(item, dict) and (item.get("fail") or item.get("blocked_by_btc_guard"))):
+                blocked = True
+                break
+    if not blocked:
+        return prefilter, False
+    if prefilter.get("error"):
+        return prefilter, True
+    cloned = dict(prefilter)
+    cloned["error"] = "malformed"
+    return cloned, True
+
+
 def _already_consumed(store, item):
     event_id = item.get("event_id")
     row = (store.state.get("test_events") or {}).get(event_id) or {}
@@ -58,7 +83,8 @@ def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier
     if not manage_complete or snapshot.get("limit_older_than_2h"):
         gate_snapshot["manage_error"] = True
     seen = store.state.setdefault("seen_candidate_fingerprints", [])
-    fingerprints = [] if prefilter.get("error") else _fingerprints(prefilter)
+    prefilter_for_gate, scan_blocked = _normalize_prefilter(prefilter)
+    fingerprints = [] if scan_blocked else _fingerprints(prefilter_for_gate)
     new_fingerprints = [item for item in fingerprints if item not in seen]
     flat = (
         gate_snapshot.get("status") == "ok"
@@ -66,8 +92,7 @@ def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier
         and gate_snapshot.get("orders") == 0
         and not gate_snapshot.get("manage_error")
     )
-    prefilter_for_gate = prefilter
-    if flat and not new_fingerprints:
+    if not scan_blocked and flat and not new_fingerprints:
         prefilter_for_gate = {"candidates": []}
     decision = decide(
         store, gate_snapshot, prefilter_for_gate, now=now, scan_id=scan_id, notifier=notifier,
@@ -100,8 +125,9 @@ def run_cycle(store, snapshot, prefilter, *, now, scan_id, manage_exit, notifier
         store.save()
     decision["sender"] = sender
     decision["new_candidate_fingerprints"] = new_fingerprints
-    decision["protection_complete"] = False if not manage_complete else bool(decision["snapshot_fresh"])
-    if decision["cycle_needs_ai"] and decision["reason"] in ("manage_or_scan_error", "snapshot_missing", "snapshot_stale", "snapshot_unknown"):
+    decision["scan_blocked"] = scan_blocked
+    decision["protection_complete"] = bool(manage_complete and decision["snapshot_fresh"] and not scan_blocked)
+    if decision["reason"] in ("manage_or_scan_error", "snapshot_missing", "snapshot_stale", "snapshot_unknown"):
         decision["protection_complete"] = False
     decision["manage_argv"] = manage_argv
     decision["ai_suggestion"] = "skip" if not decision["cycle_needs_ai"] else "keep"

@@ -90,6 +90,30 @@ class CycleTest(unittest.TestCase):
             self.assertEqual(store.state["outbox"][key]["status"], "pending")
             self.assertEqual(store.state["outbox"][key]["event_id"], decision["event_id"])
 
+    def test_scan_errors_never_skip(self):
+        cases = [
+            None,
+            {},
+            [],
+            {"candidates": None},
+            {"candidates": {}},
+            {"error": "timeout", "candidates": []},
+            {"error": "429", "candidates": []},
+            {"error": 429, "candidates": []},
+            {"error": "", "candidates": []},
+            {"candidates": ["bad"]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp))
+            for index, prefilter in enumerate(cases):
+                decision = self._run(store, _snap(), prefilter, "e" + str(index))
+                self.assertTrue(decision["cycle_needs_ai"], prefilter)
+                self.assertNotEqual(decision["reason"], "quiet_flat_book", prefilter)
+                self.assertEqual(decision["ai_suggestion"], "keep", prefilter)
+                self.assertFalse(decision["protection_complete"], prefilter)
+                self.assertEqual(decision["old_ai_poll"], "keep")
+                self.assertFalse(decision["routine_stopped"])
+
     def test_disconnect_does_not_claim_protection_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp))

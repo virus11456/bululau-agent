@@ -4,9 +4,17 @@
 
 `manage --live` 每輪都跑，不看候選。指令是 `src/phase1/manage_job.py` 的 `build_manage_argv()`。
 
-免 AI 只有：manage 整輪完成、快照新鮮、0 倉、0 掛單、沒有新候選、沒有錯誤。有倉、任何掛單、超過 2 小時的限價、過期、未知或查詢失敗，都留下原 AI。同一根 K 的指紋不能取消有倉時的下一輪複查。
+免 AI 只是建議：manage 整輪完成、快照新鮮、0 倉、0 掛單、沒有新候選、而且 prefilter 沒有錯誤。空檔、缺欄、格式錯、timeout、429 都不能建議 skip。有倉、任何掛單、超過 2 小時的限價、過期、未知或查詢失敗，都留下原 AI。同一根 K 的指紋不能取消有倉時的下一輪複查，也不能把掃描錯誤蓋成空候選。
 
-HTTP 2xx 不把 outbox 標成已處理。只有另外的 `ack_cycle(..., processing_ack=True)` 才離開 pending。發送或 consumer 失敗時事件還在。manage 沒跑完時 `protection_complete` 是 false。
+HTTP 2xx 不把 outbox 標成已處理。布林值不會讓它離開 pending。發送或 consumer 失敗時事件還在。掃描錯誤或 manage 沒跑完時 `protection_complete` 是 false。
+
+可執行入口是 shadow runner，不讀金鑰、不 POST、不跑 `live_trader.py --live`，也不把五欄 sender 當正式通道。排程檔預設 Disabled，不安進 LaunchAgents。`ready` 維持 false。
+
+```bash
+python3 -m src.phase1.runner run --state-dir "$CYCLE_DIR" --config "$CYCLE_DIR/runner.json" --now TIME --scan-id ID --shadow
+python3 -m src.phase1.runner install-schedule --dest "$CYCLE_DIR/schedule" --state-dir "$CYCLE_DIR" --repo "$PWD" --python python3
+python3 -m src.phase1.runner rollback-schedule --dest "$CYCLE_DIR/schedule"
+```
 
 五欄 `trade_candidate_test` 仍只是測試入口，不是這條持倉喚醒通道。正式通道要另做契約。
 

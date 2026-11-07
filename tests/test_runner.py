@@ -68,7 +68,7 @@ class RunnerChainTest(unittest.TestCase):
             "status": [PYTHON, script, mode_path, "status"],
         }
         if notifier:
-            config["notifier"] = [PYTHON, script, mode_path, "notifier", os.path.join(tmp, "notified.txt")]
+            config["notifier"] = {"verified": True, "argv": [PYTHON, script, mode_path, "notifier", os.path.join(tmp, "notified.txt")]}
         config_path = os.path.join(state, "runner.json")
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump(config, handle)
@@ -161,7 +161,7 @@ class RunnerChainTest(unittest.TestCase):
         loaded["scanner"][0:3] = [PYTHON, status, mode]
         loaded["manage"][0:3] = [PYTHON, status, mode]
         loaded["status"] = [PYTHON, status, mode, "status"]
-        loaded["notifier"] = [PYTHON, status, mode, "notifier", os.path.join(tmp, "notified.txt")]
+        loaded["notifier"] = {"verified": True, "argv": [PYTHON, status, mode, "notifier", os.path.join(tmp, "notified.txt")]}
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump(loaded, handle)
         del state
@@ -215,6 +215,235 @@ class RunnerChainTest(unittest.TestCase):
             )
             self.assertEqual(launch.returncode, 1)
             self.assertEqual(json.loads(launch.stdout)["reason"], "refused_schedule_dest")
+
+
+PREFILTER = r"""
+import json, os, sys
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+mode = open(os.path.join(root, "mode.txt"), encoding="utf-8").read().strip()
+if "--quiet" not in sys.argv or "--nolog" not in sys.argv:
+    sys.exit(9)
+with open(os.path.join(root, "spawned.txt"), "a", encoding="utf-8") as handle:
+    handle.write("prefilter\n")
+if mode == "candidates":
+    json.dump({"time": "2026-11-07T04:19:00Z", "call_ai": True, "n_candidates": 1, "candidates": [{"symbol": "ETHUSDT", "setup": "布鹿流", "bar_open_ms": 1762484400000, "ladder": ["1"]}]}, sys.stdout)
+    sys.exit(10)
+if mode == "rate":
+    json.dump({"time": "2026-11-07T04:19:00Z", "call_ai": False, "error": "rate_limited: HTTP 429", "candidates": []}, sys.stdout)
+    sys.exit(2)
+if mode == "contradict":
+    json.dump({"call_ai": True, "candidates": []}, sys.stdout)
+    sys.exit(0)
+json.dump({"time": "2026-11-07T04:19:00Z", "call_ai": False, "n_candidates": 0, "candidates": []}, sys.stdout)
+sys.exit(0)
+"""
+
+TRADER = r"""
+import os, sys
+from datetime import datetime, timedelta, timezone
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+mode = open(os.path.join(root, "mode.txt"), encoding="utf-8").read().strip()
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+if cmd == "manage":
+    if sys.argv[2:] != ["--live"]:
+        sys.exit(9)
+    with open(os.path.join(root, "spawned.txt"), "a", encoding="utf-8") as handle:
+        handle.write("manage\n")
+    sys.exit(1 if mode == "manage_fail" else (10 if mode == "manage10" else 0))
+if cmd == "status":
+    if len(sys.argv) != 2:
+        sys.exit(9)
+    with open(os.path.join(root, "spawned.txt"), "a", encoding="utf-8") as handle:
+        handle.write("status\n")
+    if mode == "status10":
+        sys.exit(10)
+    if mode == "status_fail":
+        sys.exit(1)
+    now = "2026-11-07 12:19"
+    held = "2" if mode == "position" else "0"
+    general = "1" if mode == "order" else "0"
+    algo = "1" if mode == "algo" else "0"
+    if mode == "broken":
+        print("時間壞掉")
+        sys.exit(0)
+    print("時間 {0} 台北".format(now))
+    print("錢包 1.00  未實現 +0.00  淨值 1.00  可用 1.00 USDT")
+    print("持倉 {0}/5".format(held))
+    print("一般掛單 {0}  條件單 {1}".format(general, algo))
+    sys.exit(0)
+sys.exit(9)
+"""
+
+NOTIFIER = r"""
+import json, sys
+raw = json.load(sys.stdin)
+open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(raw, ensure_ascii=False))
+if raw.get("schema_version") != 1 or raw.get("event_type") != "evaluation_wake":
+    sys.exit(2)
+if raw.get("test_channel") or raw.get("position_channel"):
+    sys.exit(2)
+json.dump({"schema_version": 1, "delivered": True}, sys.stdout)
+"""
+
+
+class ProductionAdapterTest(unittest.TestCase):
+    def _tree(self, tmp, mode, notifier=None):
+        root = os.path.join(tmp, "quantboy")
+        os.makedirs(os.path.join(root, "src"))
+        with open(os.path.join(root, "src", "prefilter.py"), "w", encoding="utf-8") as handle:
+            handle.write(PREFILTER)
+        with open(os.path.join(root, "src", "live_trader.py"), "w", encoding="utf-8") as handle:
+            handle.write(TRADER)
+        with open(os.path.join(root, "mode.txt"), "w", encoding="utf-8") as handle:
+            handle.write(mode)
+        state = os.path.join(tmp, "state")
+        os.makedirs(state)
+        config = {"mode": "production", "quantboy_root": root, "python": PYTHON, "interval_seconds": 180, "timeout_seconds": 10}
+        if notifier is not None:
+            config["notifier"] = notifier
+        path = os.path.join(state, "runner.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+        return root, state, path
+
+    def _run(self, state, config, scan_id="s1", now=NOW, extra=None):
+        argv = [PYTHON, "-m", "src.phase1.runner", "run", "--state-dir", state, "--config", config]
+        if now is not None:
+            argv.extend(["--now", now, "--scan-id", scan_id])
+        if extra:
+            argv.extend(extra)
+        return subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True)
+
+    def test_exit_contracts_and_status_text(self):
+        expect = {
+            "candidates": {"needs": True, "blocked": False, "reason": "candidates_present"},
+            "quiet": {"needs": False, "blocked": False, "reason": "quiet_flat_book"},
+            "rate": {"needs": True, "blocked": True},
+            "position": {"needs": True, "blocked": False, "reason": "positions_open"},
+            "order": {"needs": True, "blocked": False, "reason": "orders_open"},
+            "algo": {"needs": True, "blocked": False, "reason": "orders_open"},
+            "manage_fail": {"needs": True, "blocked": False},
+            "manage10": {"needs": True, "blocked": False},
+            "status10": {"needs": True, "blocked": False},
+            "status_fail": {"needs": True, "blocked": False},
+            "broken": {"needs": True, "blocked": False},
+            "contradict": {"needs": True, "blocked": True},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for mode, wanted in expect.items():
+                root, state, config = self._tree(os.path.join(tmp, mode), mode)
+                proc = self._run(state, config, "p" + mode[:6])
+                self.assertEqual(proc.returncode, 0, mode + proc.stderr)
+                body = json.loads(proc.stdout)
+                self.assertEqual(body["cycle_needs_ai"], wanted["needs"], mode)
+                self.assertEqual(body["scan_blocked"], wanted["blocked"], mode)
+                if "reason" in wanted:
+                    self.assertEqual(body["reason"], wanted["reason"], mode)
+                self.assertNotEqual(body["reason"], "quiet_flat_book" if mode != "quiet" else "positions_open", mode)
+                self.assertEqual(body["old_ai_poll"], "keep", mode)
+                self.assertFalse(body["switch_allowed"], mode)
+                self.assertFalse(body["processing_ack"], mode)
+                self.assertFalse(body["account_verified"], mode)
+                self.assertEqual(body["mode"], "production")
+                self.assertTrue(body["executed_live"], mode)
+                spawned = Path(root, "spawned.txt").read_text(encoding="utf-8")
+                self.assertIn("manage\n", spawned, mode)
+                if mode == "quiet":
+                    self.assertEqual(body["ai_suggestion"], "skip")
+                    self.assertTrue(body["protection_complete"])
+                else:
+                    self.assertEqual(body["ai_suggestion"], "keep", mode)
+                if mode in ("rate", "manage_fail", "manage10", "status10", "status_fail", "broken", "contradict"):
+                    self.assertFalse(body["protection_complete"], mode)
+                if mode == "status10":
+                    self.assertNotEqual(body["reason"], "candidates_present")
+
+    def test_verified_notifier_delivers_without_processing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            note = os.path.join(tmp, "transport.py")
+            seen = os.path.join(tmp, "seen.json")
+            with open(note, "w", encoding="utf-8") as handle:
+                handle.write(NOTIFIER)
+            root, state, config = self._tree(tmp, "position", {"verified": True, "argv": [PYTHON, note, seen]})
+            proc = self._run(state, config, "hold1")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            body = json.loads(proc.stdout)
+            self.assertTrue(body["delivered"])
+            self.assertFalse(body["processing_ack"])
+            self.assertFalse(body["formal_channel"])
+            self.assertEqual(body["old_ai_poll"], "keep")
+            saved = json.loads(Path(state, "phase1_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["outbox"]["cycle:hold1"]["status"], "pending")
+            payload = json.loads(Path(seen).read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["event_type"], "evaluation_wake")
+            self.assertEqual(payload["evaluation_id"], "hold1")
+            self.assertTrue(payload["event_id"])
+            self.assertTrue(payload["sent_at"])
+            self.assertFalse(payload["test_channel"])
+            self.assertFalse(payload["position_channel"])
+            unverified = dict(json.loads(Path(config).read_text(encoding="utf-8")))
+            unverified["notifier"] = {"verified": False, "argv": [PYTHON, note, seen + ".no"]}
+            with open(config, "w", encoding="utf-8") as handle:
+                json.dump(unverified, handle)
+            blocked = self._run(os.path.join(tmp, "state2"), config, "hold2")
+            self.assertEqual(blocked.returncode, 0, blocked.stderr)
+            self.assertFalse(json.loads(blocked.stdout)["delivered"])
+            self.assertFalse(os.path.exists(seen + ".no"))
+
+    def test_generated_scan_id_and_runnable_disabled_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state, config = self._tree(tmp, "quiet")
+            first = self._run(state, config, now=None)
+            second = self._run(state, config, now=None)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            one = json.loads(first.stdout)["evaluation_id"]
+            two = json.loads(second.stdout)["evaluation_id"]
+            self.assertRegex(one, r"^c\d{8}T\d{6}Z[0-9a-f]{8}$")
+            self.assertNotEqual(one, two)
+            dest = os.path.join(tmp, "schedule")
+            installed = subprocess.run(
+                [PYTHON, "-m", "src.phase1.runner", "install-schedule", "--dest", dest, "--state-dir", state, "--repo", str(ROOT), "--python", PYTHON, "--config", config],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            plist = Path(dest, "bululau-cycle-shadow.plist").read_text(encoding="utf-8")
+            self.assertIn("<key>Disabled</key><true/>", plist)
+            self.assertIn("<key>StartInterval</key><integer>180</integer>", plist)
+            self.assertNotIn("--now", plist)
+            self.assertNotIn("--scan-id", plist)
+            matched = __import__("re").search(r"<key>ProgramArguments</key><array>(.*)</array>", plist)
+            args = __import__("re").findall(r"<string>(.*?)</string>", matched.group(1))
+            self.assertNotIn("--shadow", args)
+            ran = subprocess.run(args, cwd=str(ROOT), capture_output=True, text=True)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertTrue(json.loads(ran.stdout)["executed_live"])
+            self.assertFalse(json.loads(ran.stdout)["switch_allowed"])
+            self.assertIn("manage\n", Path(root, "spawned.txt").read_text(encoding="utf-8"))
+            empty = os.path.join(tmp, "empty")
+            os.makedirs(empty)
+            checked = subprocess.run(
+                [PYTHON, "-m", "src.phase1.runner", "check", "--config", config, "--state-dir", empty],
+                cwd=str(ROOT), capture_output=True, text=True,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            report = json.loads(checked.stdout)
+            self.assertFalse(report["spawned"])
+            self.assertFalse(report["account_verified"])
+            self.assertFalse(report["switch_allowed"])
+            self.assertEqual(report["commands"]["manage"][-2:], ["manage", "--live"])
+            self.assertEqual(report["commands"]["status"][-1], "status")
+            self.assertEqual(report["commands"]["scanner"][-2:], ["--quiet", "--nolog"])
+            self.assertEqual(os.listdir(os.path.join(tmp, "empty")), [])
+
+    def test_shadow_flag_does_not_run_production(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state, config = self._tree(tmp, "quiet")
+            proc = self._run(state, config, extra=["--shadow"])
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["reason"], "shadow_refuses_production")
+            self.assertFalse(os.path.exists(os.path.join(root, "spawned.txt")))
 
 
 if __name__ == "__main__":

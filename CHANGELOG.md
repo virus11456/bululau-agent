@@ -18,7 +18,9 @@ manage 等效只移走既有 `manage --live` 已做的固定風控。逾 2 小�
 
 cycle 的 processed 回條寫回同一個 `phase1_state.json`。`python3 -m src.phase1.cycle apply` 才落地。布林值不會當成 processed。舊 pending 鍵不自動刪除。這個結果仍不停舊 routine。
 
-掃描錯誤不再被空倉蓋成 quiet。`python3 -m src.phase1.runner run --shadow` 用子程序串 scanner、manage、status 與同一個 store。預設不執行實盤指令，排程檔是 Disabled。`ready` 不是 true。
+掃描錯誤不再被空倉蓋成 quiet。`python3 -m src.phase1.runner run --shadow` 用子程序串 scanner、manage、status 與同一個 store。預設不執行實盤指令，排程檔是 Disabled。`switch_allowed` 不是 true。
+
+production 設定只接受操作者給的 quantboy 路徑，並組固定的 prefilter、manage --live、status。10 只沿 prefilter 的 call_ai 契約。正式 notifier 在 verified 且回 delivered 時記送達，不記 processed。沒有 verified 就 blocked。
 
 ## 2026-11-06
 

@@ -11,7 +11,7 @@ python3 -m unittest discover -s tests -t . -p 'test_*.py'
 
 discover 的測試數必須大於 0。`ai_suggestion=skip` 只出現在真的沒有倉、沒有單、沒有新事件且掃描沒有錯誤的時候。timeout、429、空檔、缺欄、格式錯都不能 skip。`old_ai_poll` 仍是 keep，`ready` 是 false，不會停舊 routine。
 
-shadow runner 不讀金鑰，不 POST，不執行 `live_trader.py` 或 `--live`。正式 notifier 沒配置就是 blocked。
+shadow 不執行 `live_trader.py` 或 `--live`。`mode=production` 才依 `quantboy_root` 組固定的 `prefilter.py --quiet --nolog`、`live_trader.py manage --live`、`live_trader.py status`。`check` 只讀，不啟動、不安裝。正式 notifier 要 `verified: true` 才會被呼叫；回 delivered 不是 processed。沒有 verified 就是 blocked。`switch_allowed` 固定 false。排程模板自己產生 UTC 時間與 scan id，plist 預設 Disabled。
 
 ```bash
 python3 -m src.phase1.runner run --state-dir "$CYCLE_DIR" --config "$CYCLE_DIR/runner.json" --now TIME --scan-id ID --shadow

@@ -78,7 +78,13 @@ Mac 掃描之後、wake 之前仍走 quiet gate。有倉或有候選時，上下
 
 GM 交過的非秘密 endpoint 是 `https://bululau-return-isolated-8qi96wkvs-virus11456s-projects.vercel.app`，路徑 `/v1/installations/<installation_id>/judgments/<event_id>`。PUT 給 publisher，GET 給 reader，標頭是 `Bearer key_id:secret`。`gateway/client.example.json` 把這個 URL 寫成預設關閉的 `base_url`。`installation_id` 與 `key_id` 留空，不猜。secret 不進 argv、不進 git、不讀角色 secret 檔。GM 說 b559ced 的隔離 deployment 是 READY，未認證 GET 為 401 且 `no-store`，OIDC 與 Blob 尚未證明。本包沒有對該 URL 發過 PUT、POST 或 GET，也不把 GM 的回報說成自己驗過。
 
-`config/review_entry.example.json` 預設 `enabled`、`live_fetch`、`replaces_scan_entry`、`outbound` 都是 false。`review-round` 可以讀它，但 `runner run` 與 `com.quantboy.livewatch` 沒有改。真取數要等 `live_fetch` 被明確打開，才會核對 `/Users/frank/quantboy-live/live_trader.py` 的 SHA256 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`，然後只用該檔的 `req(method, path, params=None, signed=False, retries=5)`。帳戶是 `req("GET", "/fapi/v2/account", signed=True)`，一般單是 `/fapi/v1/openOrders`，條件單直接 `req("GET", "/fapi/v1/openAlgoOrders", signed=True)`，不用 `open_algo`。`req` 成功時 `json.loads` 可以是 None；None 或非容器留原 AI，不收成 `[]`。錯誤路徑會寫 backoff／warn 日誌，不能說完全沒有寫入。這檔沒有 klines 函式。K 線沿 `src.common.get("/fapi/v1/klines", symbol, 15m, limit 20)`，參數沒有在這輪打過真 API。SHA 不符就不執行檔案。repo 根的 `config/` 不是 `src/config.py`。載入或取數失敗留原 AI。這包仍沒有接到現有 routine。
+`config/review_entry.example.json` 預設 `enabled`、`live_fetch`、`replaces_scan_entry`、`outbound` 都是 false。`review-round` 可以讀它，但 `runner run` 與 `com.quantboy.livewatch` 沒有改。15m×20 不夠原策略的完整 context。瘸師弟／小師弟要 24 根已收 15m（前 20 根量比較加訊號）、6 根已收 4H 與 6 根已收日 K（黑紅黑，不是均線）。布鹿流要 48 根已收 1H、50 根已收 4H（趨勢 30–50 的上緣，程式不判定成形）、6 根已收日 K。日均線參數仍是未定，`daily_ma_gate` 是 `not_evaluated`，不採用 30／45／60。有候選才另取 BTC 的 24 根已收 15m。未知 setup 或缺週期就留原 AI。空倉無候選不拉 K 線。未收盤的根會丟掉。
+
+真取數要等 `live_fetch` 被明確打開，才會核對 `/Users/frank/quantboy-live/live_trader.py` 的 SHA256 `65f1d4526cd5d3b6c2115ca8eeebd102281b27a2fbd40d0ee07054ff4891459b`，然後只用該檔的 `req(method, path, params=None, signed=False, retries=5)`。帳戶是 `req("GET", "/fapi/v2/account", signed=True)`，一般單是 `/fapi/v1/openOrders`，條件單直接 `req("GET", "/fapi/v1/openAlgoOrders", signed=True)`，不用 `open_algo`。`req` 成功時 `json.loads` 可以是 None；None 或非容器留原 AI，不收成 `[]`。錯誤路徑會寫 backoff／warn 日誌，不能說完全沒有寫入。這檔沒有 klines 函式。K 線沿 `src.common.get("/fapi/v1/klines", ...)`，週期與根數按上面的 setup 表，只留已收盤。參數沒有在這輪打過真 API。SHA 不符就不執行檔案。repo 根的 `config/` 不是 `src/config.py`。載入或取數失敗留原 AI。這包仍沒有接到現有 routine。
+
+## 下一步：30 分鐘 routine 等效接線（未啟用）
+
+現有 routine 已是 `*/30`、彈性 ±7，prompt 與 60 秒 watch 都不要動。最小接法是以後把那一條既有命令指到 `python3 -m src.phase1.runner review-round --entry-config ...`，不另裝第二條排程，也不改 watch。啟用前仍要本人批准：打開 `live_fetch`（會讀已核平鋪檔、打三個只讀簽名 GET，並按 setup 拉公開 K 線）、接受 `req` 錯誤會寫日誌、gateway 的 installation／key 與有界試跑，以及日均線繼續未定、不能由程式宣佈通過。這份文件不執行上述任何一項。
 
 Ledger 只保證正常設定與行程崩潰：呼叫端不能改 ledger 路徑或 method→stage；空檔、壞檔、缺檔不會重開 `approved_at`；寫入用替換，中斷不會把檔案截成空的再當新期限。有磁碟管理權限的人若刪掉 ledger 再 `init-ledger`，次數會歸零，期限仍是授權裡的 `approved_at`。不宣稱擋得住刪檔。
 

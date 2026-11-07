@@ -34,7 +34,19 @@ def source_gap():
         "repo_private": "src.phase1.account_status._signed_get(path) -> object",
         "repo_public": "src.common.get(path, params=None, retries=2) -> object",
         "private_paths": list(_PRIVATE_PATHS),
-        "public_kline": {"path": "/fapi/v1/klines", "interval": "15m", "limit": 20, "fields": ["open_time", "open", "high", "low", "close", "volume"]},
+        "public_kline": {
+            "path": "/fapi/v1/klines",
+            "closed_only": True,
+            "daily_ma_parameter": "undecided",
+            "daily_ma_gate": "not_evaluated",
+            "by_setup": {
+                "瘸師弟": {"15m": 24, "4h": 6, "1d": 6},
+                "小師弟": {"15m": 24, "4h": 6, "1d": 6},
+                "布鹿流": {"1h": 48, "4h": 50, "1d": 6},
+            },
+            "btc_15m_when_candidate": 24,
+            "fifteen_m_20_is_not_strategy_context": True,
+        },
         "not_used": {
             "src.common.klines": "quote volume replaces base volume and the raw row is dropped",
             "open_algo": "BinanceError becomes [] after a warn log; adapter calls req directly",
@@ -162,20 +174,85 @@ def _load_public_get():
     return public_get
 
 
-def kline_request(symbol):
+_INTERVAL_MS = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000, "1d": 24 * 60 * 60 * 1000}
+# 24 = 前 20 根量比較再加最多 3 根訊號，都要已收。6 = 黑紅黑三根再留餘地，不是均線長度。
+# 48 = 1H 看更高低與大約三波的結構窗。50 = 4H 趨勢 30–50 的上緣，程式不判定趨勢已成形。
+_SETUP_BARS = {
+    "瘸師弟": (("15m", 24), ("4h", 6), ("1d", 6)),
+    "小師弟": (("15m", 24), ("4h", 6), ("1d", 6)),
+    "布鹿流": (("1h", 48), ("4h", 50), ("1d", 6)),
+}
+
+
+def kline_request(symbol, interval="15m", limit=20):
     """平鋪檔沒有 klines。參數沿 repo 公開 client，不代表已打過真 API。"""
-    if not _symbol_ok(symbol):
+    if not _symbol_ok(symbol) or interval not in _INTERVAL_MS:
         raise ValueError("rejected_symbol")
-    return "/fapi/v1/klines", {"symbol": symbol, "interval": "15m", "limit": 20}
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("rejected_symbol")
+    return "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit}
 
 
-def _real_public(symbol):
-    path, params = kline_request(symbol)
+def _real_public(symbol, interval="15m", limit=20):
+    path, params = kline_request(symbol, interval, limit)
     try:
         public_get = _load_public_get()
     except ImportError:
         raise ValueError("fetcher_missing")
     return public_get(path, params)
+
+
+def _merge_bars(spec, into):
+    for interval, count in spec:
+        into[interval] = max(into.get(interval, 0), count)
+
+
+def _setup_names(symbol, candidates):
+    found = []
+    for item in candidates or []:
+        if isinstance(item, dict) and item.get("symbol") == symbol and item.get("setup") not in found:
+            found.append(item.get("setup"))
+    return found
+
+
+def closed_ohlcv(raw, interval, now_ms):
+    """丟掉未收盤與沒對齊的根。保留 open/high/low/close/volume。"""
+    step = _INTERVAL_MS[interval]
+    bars = []
+    if not isinstance(raw, list):
+        return bars
+    for item in raw:
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        opened = item[0]
+        try:
+            opened = int(opened)
+            prices = [float(item[index]) for index in range(1, 6)]
+        except (TypeError, ValueError):
+            continue
+        if opened % step != 0 or any(price != price or abs(price) == float("inf") for price in prices):
+            continue
+        close_time = int(item[6]) if len(item) > 6 else opened + step - 1
+        if close_time >= now_ms or opened + step > now_ms:
+            continue
+        bars.append({
+            "open_time": opened,
+            "open": prices[0],
+            "high": prices[1],
+            "low": prices[2],
+            "close": prices[3],
+            "volume": prices[4],
+            "closed": True,
+        })
+    return bars
+
+
+def _series_fresh(bars, interval, now_ms):
+    if not bars:
+        return False
+    step = _INTERVAL_MS[interval]
+    age = now_ms - bars[-1]["open_time"]
+    return step <= age < 2 * step
 
 
 def resolve_clients(entry, private_get=None, public_get=None):
@@ -252,6 +329,77 @@ def fetch_market(private_get, public_get, candidates, now_ms):
     return review
 
 
+def _annotate_strategy(review):
+    review["daily_ma_parameter"] = "undecided"
+    review["daily_ma_gate"] = "not_evaluated"
+    review["unclosed_bars_excluded"] = True
+    review["old_ai_poll"] = "keep"
+    review["context_sufficient"] = not review.get("missing")
+    return review
+
+
+def fetch_strategy_market(private_get, public_get, candidates, now_ms):
+    """只拉候選與持倉 setup 需要的已收盤 K。空倉無候選不掃市場。"""
+    if private_get is None or public_get is None:
+        empty = build_review(None, [], [], {}, candidates or [], now_ms)
+        empty["context_sufficient"] = False
+        empty["missing"] = ["fetcher_missing"]
+        return _annotate_strategy(empty)
+    try:
+        account = private_get("/fapi/v2/account")
+        orders = private_get("/fapi/v1/openOrders")
+        algo = private_get("/fapi/v1/openAlgoOrders")
+        if account is None or orders is None or algo is None:
+            raise ValueError("query_failed")
+        preview = build_review(account, orders, algo, {}, candidates or [], now_ms, queries_present=True)
+        requirements = {}
+        unknown = []
+        named = [item for item in candidates or [] if isinstance(item, dict)]
+        for item in named:
+            symbol = item.get("symbol")
+            spec = _SETUP_BARS.get(item.get("setup"))
+            if not _symbol_ok(symbol) or spec is None:
+                unknown.append(symbol if isinstance(symbol, str) else "")
+                continue
+            _merge_bars(spec, requirements.setdefault(symbol, {}))
+        if any(item.get("setup") in _SETUP_BARS and _symbol_ok(item.get("symbol")) for item in named):
+            _merge_bars((("15m", 24),), requirements.setdefault("BTCUSDT", {}))
+        for pos in preview["positions"]:
+            known = [name for name in _setup_names(pos["symbol"], named) if name in _SETUP_BARS]
+            if not known:
+                unknown.append(pos["symbol"])
+            else:
+                for name in known:
+                    _merge_bars(_SETUP_BARS[name], requirements.setdefault(pos["symbol"], {}))
+        for order in preview["orders"]:
+            known = [name for name in _setup_names(order["symbol"], named) if name in _SETUP_BARS]
+            if not known and order["symbol"] not in requirements:
+                unknown.append(order["symbol"])
+        series = {}
+        strategy_missing = []
+        for symbol, intervals in requirements.items():
+            series[symbol] = {}
+            for interval, count in intervals.items():
+                raw = public_get(symbol, interval, count + 1)
+                if not isinstance(raw, list):
+                    raise ValueError("query_failed")
+                closed = closed_ohlcv(raw, interval, now_ms)
+                series[symbol][interval] = closed[-count:]
+                if len(closed) < count or not _series_fresh(closed, interval, now_ms):
+                    strategy_missing.append("klines:{0}:{1}".format(symbol, interval))
+        for symbol in unknown:
+            strategy_missing.append("unknown_setup:" + (symbol or ""))
+    except Exception:
+        failed = build_review(None, None, None, {}, candidates or [], now_ms, queries_present=False)
+        failed["missing"] = ["query_failed"]
+        failed["context_sufficient"] = False
+        return _annotate_strategy(failed)
+    kept = [item for item in preview.get("missing") or [] if not str(item).startswith("klines:")]
+    preview["missing"] = kept + strategy_missing
+    preview["klines"] = series
+    return _annotate_strategy(preview)
+
+
 def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry, notifier=None, private_get=None, public_get=None):
     """quiet 在 notifier 之前。不改現有 routine，不宣稱已省下真喚醒。"""
     entry = entry or disabled_entry()
@@ -297,7 +445,7 @@ def run_review_entry(store, snapshot, prefilter, *, now, scan_id, now_ms, entry,
         )
     else:
         try:
-            review = fetch_market(private, public, candidates, now_ms)
+            review = fetch_strategy_market(private, public, candidates, now_ms)
         except Exception:
             review = {"context_sufficient": False, "missing": ["query_failed"]}
         if review.get("context_sufficient") is not True:

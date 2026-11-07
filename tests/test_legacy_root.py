@@ -163,7 +163,8 @@ class LegacyRootTest(unittest.TestCase):
             }
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
-            before = open(path, "rb").read()
+            with open(path, "rb") as handle:
+                before = handle.read()
             report = snapshot_file(path, "2026-11-07T07:21:55Z")
             self.assertTrue(report["ok"])
             self.assertTrue(report["day_rollover_due"])
@@ -174,7 +175,8 @@ class LegacyRootTest(unittest.TestCase):
             self.assertFalse(report["account_queried"])
             self.assertNotIn("day_start_equity", report)
             self.assertNotIn("123.45", json.dumps(report))
-            self.assertEqual(open(path, "rb").read(), before)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), before)
             self.assertFalse(os.path.exists(os.path.join(tmp, ".lock")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "data")))
 

@@ -4,7 +4,7 @@
 原則（總經理boy 11/10 轉達使用者 23:44 原話「你依照原本的開單的條件跟頻率來撈單來做設定」）：
   - 只照現行規則（~/quantboy-gate/full_prompt.md 與 docs/strategy.md 11-06 定稿）判斷，不放寬也不加嚴。
   - 規則原文沒給數字、需要看型態、或資料不夠時，一律留下候選交給 AI（fail-open to AI）。
-  - 429／418 限流：同一輪最多再試 2 次（有上限的退避）。仍失敗或等待超過上限：結束碼 2，gate 會 WAKE 並保留全部候選。
+  - 429／418 限流：同一輪最多再試 2 次（有上限的退避）。等待前若 60 秒逾時的剩餘時間不夠再打一發，就不等。仍失敗：結束碼 2，gate 會 WAKE 並保留全部候選。
   - 其他整體讀取失敗：不重試，結束碼 2，同樣 WAKE。
   - 不下單、不讀金鑰、不做簽章請求，只讀幣安公開 K 線。
 
@@ -48,14 +48,17 @@ BLACKLIST_BASES = {"INIT", "EWZ", "CAP", "TAG", "APR", "BREV", "XAN", "AIN", "DO
 BULU_RR_TARGET = "prior_high"
 
 REQUEST_TIMEOUT_S = 10
-# 公開 K 線 429／418 才重試。gate 給這支的逾時是 60 秒，每次請求逾時 10 秒。
+# 公開 K 線 429／418 才重試。gate 給這支的逾時是 60 秒（gate.HARDFILTER_TIMEOUT_S），每次請求逾時 10 秒。
 # 整輪（不是每個幣）最多再試 2 次。沒有正數 Retry-After 就等 2 秒、再 6 秒。
-# 單次超過 8 秒，或這一輪累計會超過 15 秒：不等，直接 RateLimited（結束碼 2）。
-# 最壞 3 次請求都打滿 10 秒再加 15 秒等待，約 45 秒，比 60 秒逾時留約 15 秒。
+# 單次超過 8 秒，或這一輪累計睡眠會超過 15 秒：不等，直接 RateLimited（結束碼 2）。
+# 另外在每次等待前看整輪還剩多少：必須蓋過「這次等待 + 一次請求逾時 + 餘裕」，否則不等。
+# 沒有固定的「最壞 45 秒」；能不能等，看從這支開始起算的剩餘時間。
 HARDFILTER_MAX_RETRIES = 2
 HARDFILTER_BACKOFF_S = (2.0, 6.0)
 HARDFILTER_WAIT_CAP_S = 8.0
 HARDFILTER_TOTAL_WAIT_CAP_S = 15.0
+HARDFILTER_RUN_BUDGET_S = 60.0
+HARDFILTER_TIME_MARGIN_S = 5.0
 
 
 class RateLimited(Exception):
@@ -63,14 +66,22 @@ class RateLimited(Exception):
 
 
 class KlineRetryBudget:
-    """一整輪 hardfilter 共用的 429／418 等待預算。sleep 可注入，測試不真的睡。"""
+    """一整輪 hardfilter 共用的 429／418 等待預算。sleep 與 monotonic 可注入，測試不真的睡。
 
-    def __init__(self, sleep):
+    t0 在建立時記下，也就是 hardfilter 這輪的開頭。等待前用它看離 60 秒還剩多少。
+    """
+
+    def __init__(self, sleep, monotonic=None):
         self.sleep = sleep
+        self.monotonic = time.monotonic if monotonic is None else monotonic
+        self.t0 = self.monotonic()
         self.retries = 0
         self.wait_s = 0.0
         self.waits_s = []
         self.stopped = None
+
+    def remaining(self):
+        return HARDFILTER_RUN_BUDGET_S - (self.monotonic() - self.t0)
 
     def plan(self, failure_count, retry_after):
         """這次請求的第 failure_count 次 429／418（從 1 起）要睡幾秒。不該等就回 None。"""
@@ -86,6 +97,11 @@ class KlineRetryBudget:
             wait = float(retry_after)
         if wait > HARDFILTER_WAIT_CAP_S or self.wait_s + wait > HARDFILTER_TOTAL_WAIT_CAP_S:
             self.stopped = "wait_cap"
+            return None
+        # 睡完還要留得下一次請求逾時與餘裕，否則這次等待會把 gate 的 60 秒吃穿。
+        reserve = REQUEST_TIMEOUT_S + HARDFILTER_TIME_MARGIN_S
+        if self.remaining() < wait + reserve:
+            self.stopped = "budget_exhausted"
             return None
         self.stopped = None
         return wait
@@ -129,10 +145,10 @@ class DataError(Exception):
     pass
 
 
-def fetch_klines(symbol, interval, limit, end_ms=None, sleep=None, budget=None):
+def fetch_klines(symbol, interval, limit, end_ms=None, sleep=None, budget=None, monotonic=None):
     """幣安公開 K 線，只回已收 K。418/429 在預算內退避重試；超過就丟 RateLimited。其他錯誤丟 DataError，不重試。"""
     if budget is None:
-        budget = KlineRetryBudget(time.sleep if sleep is None else sleep)
+        budget = KlineRetryBudget(time.sleep if sleep is None else sleep, monotonic)
     url = "{0}/fapi/v1/klines?symbol={1}&interval={2}&limit={3}".format(BASE, symbol, interval, limit)
     if end_ms:
         url += "&endTime={0}".format(end_ms)
@@ -376,7 +392,7 @@ def _fixture_getter(path, asof_ms):
     return get
 
 
-def main(argv=None, stdin=None, sleep=None):
+def main(argv=None, stdin=None, sleep=None, monotonic=None):
     ap = argparse.ArgumentParser(description="prefilter 之後的硬條件篩選（fail-open to AI）")
     ap.add_argument("--asof", help="回放時間 ISO 8601（含時區）。預設現在")
     ap.add_argument("--klines-fixture", help="回放用 K 線檔，不連網")
@@ -386,7 +402,10 @@ def main(argv=None, stdin=None, sleep=None):
     stdin = stdin or sys.stdin
     if sleep is None:
         sleep = time.sleep
-    budget = KlineRetryBudget(sleep)
+    if monotonic is None:
+        monotonic = time.monotonic
+    # t0 在這輪一開始就記下，後面每次退避都用它看離 gate 的 60 秒還剩多少。
+    budget = KlineRetryBudget(sleep, monotonic)
     try:
         body = json.loads(stdin.read())
         if not isinstance(body, dict):

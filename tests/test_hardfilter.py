@@ -283,25 +283,33 @@ class KlineRateLimitRetryTest(unittest.TestCase):
                 mock.patch("hardfilter.time.sleep", side_effect=AssertionError("不該真的 sleep")):
             return hf.fetch_klines("XUSDT", "15m", 2, end_ms=T0 + M15, sleep=self.sleep)
 
-    def main_with(self, urlopen, text, sleep=None):
+    def main_with(self, urlopen, text, sleep=None, monotonic=None):
         buf = io.StringIO()
         with mock.patch("urllib.request.urlopen", side_effect=urlopen), mock.patch("sys.stdout", buf), \
                 mock.patch("hardfilter.time.sleep", side_effect=AssertionError("不該真的 sleep")):
-            code = hf.main([], stdin=io.StringIO(text), sleep=self.sleep if sleep is None else sleep)
+            code = hf.main(
+                [], stdin=io.StringIO(text),
+                sleep=self.sleep if sleep is None else sleep,
+                monotonic=monotonic,
+            )
         line = buf.getvalue().strip().splitlines()[-1]
         return code, json.loads(line)
 
     def test_agreed_caps_fit_under_gate_timeout(self):
+        import gate as gate_mod
         self.assertEqual(hf.HARDFILTER_MAX_RETRIES, 2)
         self.assertEqual(hf.HARDFILTER_BACKOFF_S, (2.0, 6.0))
         self.assertEqual(hf.HARDFILTER_WAIT_CAP_S, 8.0)
         self.assertEqual(hf.HARDFILTER_TOTAL_WAIT_CAP_S, 15.0)
         self.assertEqual(hf.REQUEST_TIMEOUT_S, 10)
-        # 3 次請求都打滿逾時，再加上累計等待，仍要比 gate 的 60 秒少約 15 秒。
-        worst = (hf.HARDFILTER_MAX_RETRIES + 1) * hf.REQUEST_TIMEOUT_S + hf.HARDFILTER_TOTAL_WAIT_CAP_S
-        self.assertLessEqual(worst, 60 - 15)
+        self.assertEqual(hf.HARDFILTER_TIME_MARGIN_S, 5.0)
+        self.assertEqual(hf.HARDFILTER_RUN_BUDGET_S, gate_mod.HARDFILTER_TIMEOUT_S)
+        self.assertEqual(hf.HARDFILTER_RUN_BUDGET_S, 60.0)
+        reserve = hf.REQUEST_TIMEOUT_S + hf.HARDFILTER_TIME_MARGIN_S
+        self.assertLess(reserve, hf.HARDFILTER_RUN_BUDGET_S)
         self.assertLessEqual(sum(hf.HARDFILTER_BACKOFF_S), hf.HARDFILTER_TOTAL_WAIT_CAP_S)
         self.assertTrue(all(step <= hf.HARDFILTER_WAIT_CAP_S for step in hf.HARDFILTER_BACKOFF_S))
+        self.assertTrue(all(step + reserve <= hf.HARDFILTER_RUN_BUDGET_S for step in hf.HARDFILTER_BACKOFF_S))
 
     def test_429_then_success(self):
         def urlopen(_req, timeout=None):
@@ -440,6 +448,78 @@ class KlineRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(out["rate_limit_stopped"], "retries_exhausted")
         self.assertTrue(any("CUSDT" in url for url in symbols))
         self.assertEqual(sum(1 for url in symbols if "CUSDT" in url), 1)
+
+    def test_exact_reserve_still_waits(self):
+        # 剩餘剛好等於「等待 + 10 秒請求 + 5 秒餘裕」時仍可等。
+        clock = _StepClock()
+        budget = hf.KlineRetryBudget(clock.sleep, clock)
+
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                clock.advance(hf.HARDFILTER_RUN_BUDGET_S - (2 + hf.REQUEST_TIMEOUT_S + hf.HARDFILTER_TIME_MARGIN_S))
+                raise http_error(429)
+            return _Body([CLOSED])
+
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            bars = hf.fetch_klines("XUSDT", "15m", 2, end_ms=T0 + M15, budget=budget)
+        self.assertEqual(clock.sleeps, [2.0])
+        self.assertEqual(budget.stopped, None)
+        self.assertEqual(bars[0]["v"], 999.0)
+
+    def test_tight_remaining_does_not_wait_and_fails_open(self):
+        clock = _StepClock()
+
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            clock.advance(50)  # 剩 10 秒，蓋不住 2 + 10 + 5
+            raise http_error(429)
+
+        text = json.dumps({"candidates": [{"symbol": "XUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}]})
+        code, out = self.main_with(urlopen, text, sleep=clock.sleep, monotonic=clock)
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("rate_limited", out["error"])
+        self.assertEqual(out["rate_limit_retries"], 0)
+        self.assertEqual(out["rate_limit_wait_s"], 0)
+        self.assertEqual(out["rate_limit_stopped"], "budget_exhausted")
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(self.calls, 1)
+
+    def test_second_wait_skipped_after_time_is_used(self):
+        clock = _StepClock()
+
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise http_error(429)
+            clock.advance(40)  # 睡了 2 秒之後再加 40，剩下 18，蓋不住下一次 6 + 15
+            raise http_error(429)
+
+        text = json.dumps({"candidates": [{"symbol": "XUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}]})
+        code, out = self.main_with(urlopen, text, sleep=clock.sleep, monotonic=clock)
+        self.assertEqual(code, 2)
+        self.assertEqual(clock.sleeps, [2.0])
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(out["rate_limit_retries"], 1)
+        self.assertEqual(out["rate_limit_wait_s"], 2.0)
+        self.assertEqual(out["rate_limit_stopped"], "budget_exhausted")
+
+
+class _StepClock:
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += float(seconds)
+
+    def advance(self, seconds):
+        self.t += float(seconds)
 
 
 if __name__ == "__main__":

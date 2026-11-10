@@ -41,12 +41,15 @@ PREFILTER_TIMEOUT_S = 240
 HARDFILTER_TIMEOUT_S = 60
 # prefilter 因 429／418 失敗才重試。結束碼 2 同時是限流與其他行情失敗，不能當辨識依據。
 # 最多再試 2 次（一共最多 3 次呼叫）。沒有可用的 Retry-After 就等 5 秒、再 15 秒。
-# 單次等待超過 45 秒，或累計會超過 60 秒：不等、也不再打下一發，直接走原本的失敗路徑。
-# 60 秒是睡眠上限，用來避開 30 分鐘排程與 60 秒 watch；不是策略參數。
+# 單次等待超過 45 秒，或累計睡眠會超過 60 秒：不等、也不再打下一發，直接走原本的失敗路徑。
+# 另外，重試帶來的額外牆鐘（從第一次辨識到 429／418 起算，不含第一次呼叫本身）最多 120 秒。
+# 第一次呼叫逾時維持 240 秒。進入重試後，每次逾時 = min(240, 剩餘的 120 秒預算)。
+# 剩餘 <= 0，或剩餘蓋不住這次等待（下一發會沒有時間），就不再重試，記 budget_exhausted。
 PREFILTER_MAX_RETRIES = 2
 PREFILTER_BACKOFF_S = (5.0, 15.0)
 PREFILTER_WAIT_CAP_S = 45.0
 PREFILTER_TOTAL_WAIT_CAP_S = 60.0
+PREFILTER_RETRY_WALL_S = 120.0
 # 部署中的 public prefilter（與 src/prefilter.py）失敗時印：
 #   {"error": "rate_limited: 429 on /fapi/v1/klines", ...}  結束碼 2
 # 11/10 21:01 的 prefilter_log 原文就是 "rate_limited: 429 on /fapi/v1/klines"。
@@ -435,19 +438,41 @@ def prefilter_retry_wait(retry_index, retry_after, waited):
     return wait
 
 
-def run_prefilter_with_retry(runner, argv, cwd, sleep):
+def _retry_wall_remaining(retry_t0, monotonic):
+    """距離 120 秒額外預算還剩幾秒。retry_t0 是第一次 429／418 辨識到的時刻。"""
+    if retry_t0 is None:
+        return PREFILTER_RETRY_WALL_S
+    return PREFILTER_RETRY_WALL_S - (monotonic() - retry_t0)
+
+
+def run_prefilter_with_retry(runner, argv, cwd, sleep, monotonic=None):
     """呼叫 prefilter。只有辨識為 429／418 才退避重試，最多再 2 次。
 
+    牆鐘從第一次辨識到 429／418 起算，不含第一次呼叫。因此重試的等待與後續呼叫
+    合計不超過 PREFILTER_RETRY_WALL_S（120 秒）。第一次呼叫逾時仍是 240 秒。
+
     回傳最後一次的執行結果，並附上 rate_limit_* 欄位給 gate_log。
+    monotonic 與 sleep 可注入；測試時 sleep 要推進同一支 monotonic。
     """
+    if monotonic is None:
+        monotonic = time.monotonic
     waits = []
     limited = False
     stopped = None
     attempts = 0
     result = {"code": None, "stdout": "", "stderr": ""}
+    retry_t0 = None
     for attempt in range(1, PREFILTER_MAX_RETRIES + 2):
+        if retry_t0 is None:
+            timeout = PREFILTER_TIMEOUT_S
+        else:
+            remaining = _retry_wall_remaining(retry_t0, monotonic)
+            if remaining <= 0:
+                stopped = "budget_exhausted"
+                break
+            timeout = min(float(PREFILTER_TIMEOUT_S), remaining)
         attempts = attempt
-        result = dict(runner(argv, PREFILTER_TIMEOUT_S, cwd=cwd, lock_retries=0) or {})
+        result = dict(runner(argv, timeout, cwd=cwd, lock_retries=0) or {})
         if parse_prefilter(result) is not None or identify_prefilter_rate_limit(result) is None:
             break
         limited = True
@@ -457,6 +482,13 @@ def run_prefilter_with_retry(runner, argv, cwd, sleep):
         wait = prefilter_retry_wait(len(waits) + 1, prefilter_retry_after(result), sum(waits))
         if wait is None:
             stopped = "wait_cap"
+            break
+        if retry_t0 is None:
+            retry_t0 = monotonic()
+        remaining = _retry_wall_remaining(retry_t0, monotonic)
+        # 預估所需是這次等待。剩餘比等待還少（或已 <= 0）時，下一發逾時會是 0，不再重試。
+        if remaining <= 0 or remaining <= wait:
+            stopped = "budget_exhausted"
             break
         sleep(wait)
         waits.append(wait)
@@ -502,7 +534,7 @@ def hardfilter_retry_log(run):
     return {"retries": retries, "wait_s": wait_s, "waits_s": waits, "stopped": stopped}
 
 
-def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None):
+def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="省 token 閘門：空輪不叫 AI")
     ap.add_argument("--root", default=os.path.expanduser("~/quantboy-live"), help="live_trader.py 所在目錄")
@@ -516,6 +548,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None):
     args = ap.parse_args(argv)
     if sleep is None:
         sleep = time.sleep
+    if monotonic is None:
+        monotonic = time.monotonic
 
     os.makedirs(args.state_dir, exist_ok=True)
     state_path = os.path.join(args.state_dir, "gate_state.json")
@@ -542,7 +576,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None):
         status_run = runner([args.python, trader, "status"], STATUS_TIMEOUT_S, cwd=args.root)
         status = parse_status(status_run.get("stdout")) if status_run.get("code") == 0 else None
         prefilter_run = run_prefilter_with_retry(
-            runner, [args.python, prefilter_path, "--quiet"], args.root, sleep,
+            runner, [args.python, prefilter_path, "--quiet"], args.root, sleep, monotonic,
         )
         prefilter = parse_prefilter(prefilter_run)
         checked = clock()

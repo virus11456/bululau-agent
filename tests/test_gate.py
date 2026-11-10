@@ -571,14 +571,15 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
         self.when = datetime.now(gate.TPE).replace(microsecond=0)
         self.sleeps = []
 
-    def run_gate(self, runner):
+    def run_gate(self, runner, monotonic=None, sleep=None):
         out = io.StringIO()
         with redirect_stdout(out):
             code = gate.main(
                 ["--state-dir", self.tmp.name, "--root", self.tmp.name, "--hardfilter", "off"],
                 runner=runner,
                 clock=lambda: self.when,
-                sleep=self.sleeps.append,
+                sleep=self.sleeps.append if sleep is None else sleep,
+                monotonic=monotonic,
             )
         return code, out.getvalue()
 
@@ -591,7 +592,9 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(gate.PREFILTER_BACKOFF_S, (5.0, 15.0))
         self.assertEqual(gate.PREFILTER_WAIT_CAP_S, 45.0)
         self.assertEqual(gate.PREFILTER_TOTAL_WAIT_CAP_S, 60.0)
+        self.assertEqual(gate.PREFILTER_RETRY_WALL_S, 120.0)
         self.assertLessEqual(sum(gate.PREFILTER_BACKOFF_S), gate.PREFILTER_TOTAL_WAIT_CAP_S)
+        self.assertLessEqual(sum(gate.PREFILTER_BACKOFF_S), gate.PREFILTER_RETRY_WALL_S)
         self.assertTrue(all(step <= gate.PREFILTER_WAIT_CAP_S for step in gate.PREFILTER_BACKOFF_S))
 
     def test_429_then_success_is_quiet_and_logged(self):
@@ -721,3 +724,136 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(self.sleeps, [])
         self.assertEqual(runner.calls.count(("prefilter",)), 1)
         self.assertIsNone(self.log_row()["prefilter_retry"])
+
+
+class StepClock:
+    """測試用時鐘。sleep 與 advance 都推進同一支時間，不真的睡。"""
+
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += float(seconds)
+
+    def advance(self, seconds):
+        self.t += float(seconds)
+
+
+class WallScript:
+    """prefilter 依序回傳，並記下每次逾時。durations 是每次呼叫吃掉的牆鐘。"""
+
+    def __init__(self, prefilters, when, clock, durations):
+        self.prefilters = list(prefilters)
+        self.when = when
+        self.clock = clock
+        self.durations = list(durations)
+        self.timeouts = []
+        self.calls = []
+
+    def __call__(self, argv, timeout, cwd=None, lock_retries=5, input_text=None, **_kw):
+        if "manage" in argv:
+            self.calls.append(("manage",))
+            return ok()
+        if "status" in argv:
+            self.calls.append(("status",))
+            return ok(status_text(self.when))
+        self.calls.append(("prefilter",))
+        self.timeouts.append(timeout)
+        if self.durations:
+            self.clock.advance(self.durations.pop(0))
+        if not self.prefilters:
+            raise AssertionError("prefilter 被多呼叫了")
+        return dict(self.prefilters.pop(0))
+
+
+class PrefilterRetryWallTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.when = datetime.now(gate.TPE).replace(microsecond=0)
+
+    def run_gate(self, runner, clock):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = gate.main(
+                ["--state-dir", self.tmp.name, "--root", self.tmp.name, "--hardfilter", "off"],
+                runner=runner,
+                clock=lambda: self.when,
+                sleep=clock.sleep,
+                monotonic=clock,
+            )
+        return code, out.getvalue()
+
+    def log_row(self):
+        with open(os.path.join(self.tmp.name, "gate_log.jsonl"), encoding="utf-8") as handle:
+            return json.loads(handle.read().strip().splitlines()[-1])
+
+    def test_first_call_keeps_240s_and_retry_timeout_uses_remaining(self):
+        # 第一次就算跑了 200 秒，也不扣 120 秒預算；重試的逾時是 120 減掉已經睡的 5 秒。
+        clock = StepClock()
+        runner = WallScript(
+            [limited_prefilter(429), quiet_prefilter(self.when)],
+            self.when, clock, [200, 0],
+        )
+        code, out = self.run_gate(runner, clock)
+        self.assertEqual(code, gate.QUIET, out)
+        self.assertEqual(runner.timeouts, [gate.PREFILTER_TIMEOUT_S, gate.PREFILTER_RETRY_WALL_S - 5])
+        self.assertEqual(clock.sleeps, [5.0])
+        self.assertEqual(self.log_row()["prefilter_retry"]["retries"], 1)
+
+    def test_budget_exhausted_when_next_wait_does_not_fit(self):
+        # 第二次呼叫吃掉 100 秒之後，剩下 15 秒，蓋不住下一次 15 秒的等待。
+        clock = StepClock()
+        runner = WallScript(
+            [limited_prefilter(429), limited_prefilter(429), quiet_prefilter(self.when)],
+            self.when, clock, [0, 100],
+        )
+        code, out = self.run_gate(runner, clock)
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("prefilter_failed", out.splitlines()[0])
+        self.assertIn("prefilter_retries=1", out.splitlines()[0])
+        self.assertEqual(runner.timeouts, [240, 115])
+        self.assertEqual(clock.sleeps, [5.0])
+        self.assertEqual(len(runner.prefilters), 1)
+        row = self.log_row()
+        self.assertEqual(row["prefilter_retry"]["attempts"], 2)
+        self.assertEqual(row["prefilter_retry"]["retries"], 1)
+        self.assertEqual(row["prefilter_retry"]["stopped"], "budget_exhausted")
+
+    def test_full_timeout_then_no_further_call(self):
+        # 第二次用滿自己的逾時（115 秒）之後，剩餘是 0，不再打第三發。
+        clock = StepClock()
+        runner = WallScript(
+            [limited_prefilter(429), limited_prefilter(429), quiet_prefilter(self.when)],
+            self.when, clock, [0, 115],
+        )
+        code, out = self.run_gate(runner, clock)
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("prefilter_failed", out.splitlines()[0])
+        self.assertEqual(runner.timeouts, [240, 115])
+        self.assertEqual(clock.sleeps, [5.0])
+        self.assertEqual(self.log_row()["prefilter_retry"]["stopped"], "budget_exhausted")
+        self.assertEqual(self.log_row()["prefilter_retry"]["retries"], 1)
+
+    def test_sleep_past_the_budget_does_not_start_another_call(self):
+        clock = StepClock()
+        timeouts = []
+
+        def runner(_argv, timeout, cwd=None, lock_retries=0):
+            timeouts.append(timeout)
+            return limited_prefilter(429)
+
+        def sleep(seconds):
+            clock.sleeps.append(seconds)
+            clock.advance(gate.PREFILTER_RETRY_WALL_S)
+
+        result = gate.run_prefilter_with_retry(runner, ["prefilter", "--quiet"], ".", sleep, clock)
+        self.assertEqual(timeouts, [gate.PREFILTER_TIMEOUT_S])
+        self.assertEqual(result["rate_limit_attempts"], 1)
+        self.assertEqual(result["rate_limit_retries"], 1)
+        self.assertEqual(result["rate_limit_stopped"], "budget_exhausted")

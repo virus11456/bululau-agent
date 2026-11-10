@@ -43,14 +43,19 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 
 沒有可用的 Retry-After 時，兩次重試分別等 5 秒、15 秒。stdout／stderr 若有 `Retry-After: <正數秒>` 就改等那個秒數。目前這支 prefilter 的錯誤 JSON **沒有**帶 Retry-After，所以實際多半是 5 秒和 15 秒。`Retry-After: 0` 或不是數字，也改走 5／15 秒。
 
-兩道上限，超過就**不再等，也不再打下一發**，直接走原來的失敗路徑：
+三道上限。睡眠超過前兩道，或牆鐘預算不夠再打一發，就**不再等，也不再打下一發**，直接走原來的失敗路徑：
 
 | 上限 | 秒 | 超過時 |
 |---|---|---|
-| 單次等待 | 45 | Retry-After 大於 45 就不等 |
-| 累計等待 | 60 | 再等會讓累計超過 60 就不等 |
+| 單次等待 | 45 | Retry-After 大於 45 就不等（`wait_cap`） |
+| 累計睡眠 | 60 | 再等會讓睡眠合計超過 60 就不等（`wait_cap`） |
+| 重試額外牆鐘 | 120 | 見下面。不夠就不等、不再打（`budget_exhausted`） |
 
-重試後仍失敗：WAKE，理由仍是 `prefilter_failed`，並多一個 `prefilter_retries=N`（N 是實際等到的次數）。重試後成功：照原來的規則決定 QUIET 或 WAKE，不因為重試過就叫醒。
+重試的 120 秒從**第一次辨識到 429／418 的那一刻**起算，不含第一次呼叫本身。第一次呼叫的逾時維持 240 秒，就算它跑很久，也不扣這 120 秒。這樣才能同時保住「第一次逾時不變」和「重試多出來的時間 ≤ 120 秒」。若從函式一進來就起算，第一次呼叫超過 120 秒之後就永遠不會重試。
+
+進入重試之後，每一次呼叫的逾時是 `min(240, 剩餘的 120 秒)`。決定要不要睡之前，剩餘必須大於這次等待；剩餘 ≤ 0，或剩餘蓋不住這次等待（下一發逾時會變成 0），就停，理由記 `budget_exhausted`。`gate_log.jsonl` 的 `prefilter_retry` 會有 `retries` 和 `stopped`。
+
+重試後仍失敗：WAKE，理由仍是 `prefilter_failed`，並多一個 `prefilter_retries=N`（N 是實際等到的次數；一次都還沒等到就只有 `prefilter_failed`）。重試後成功：照原來的規則決定 QUIET 或 WAKE，不因為重試過就叫醒。
 
 `gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`，成功時是 null）。
 

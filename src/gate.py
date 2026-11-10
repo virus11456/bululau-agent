@@ -5,6 +5,7 @@
   1. live_trader.py manage --live   （原本每輪就會跑）
   2. live_trader.py status          （只讀）
   3. prefilter.py --quiet           （只讀公開行情）
+  4. hardfilter.py                  （只讀公開 K 線；有候選才跑。把確定不符合現行硬條件的候選拿掉）
 
 第一行輸出：
   QUIET  → 新鮮、可信的 0 倉 0 單 0 候選，上一輪也是空的。本輪結束，不叫 AI。
@@ -33,6 +34,8 @@ MAX_TAIL = 4000
 MANAGE_TIMEOUT_S = 180
 STATUS_TIMEOUT_S = 90
 PREFILTER_TIMEOUT_S = 240
+# hardfilter 只在有候選時跑，只會減少候選。它在新鮮度檢查時間點之後才跑，所以不影響 READING_MAX_AGE。
+HARDFILTER_TIMEOUT_S = 60
 # status 的「時間」只印到分鐘，解析成該分鐘的 00 秒，年齡最多被多算不滿 1 分鐘。
 STATUS_MINUTE_TRUNCATION_S = 60
 # 待擁有者確認的餘裕。不是停損、倉位、下單或 30 分鐘排程的參數。
@@ -64,13 +67,14 @@ def _tail(text, limit=MAX_TAIL):
     return text if len(text) <= limit else "…(前略)…\n" + text[-limit:]
 
 
-def run_cmd(argv, timeout, cwd=None, env=None, lock_retries=5, lock_wait=3.0, sleep=time.sleep):
+def run_cmd(argv, timeout, cwd=None, env=None, lock_retries=5, lock_wait=3.0, sleep=time.sleep, input_text=None):
     """跑一支命令。碰到 live_trader 檔案鎖（60 秒 watch 正在跑）就等一下重試。"""
     attempt = 0
     while True:
         try:
             proc = subprocess.run(
                 argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False,
+                input=input_text,
             )
             result = {"code": proc.returncode, "stdout": proc.stdout or "", "stderr": proc.stderr or "", "timeout": False}
         except subprocess.TimeoutExpired as exc:
@@ -210,6 +214,64 @@ def parse_prefilter(result):
     }
 
 
+def parse_hardfilter(result, candidates):
+    """hardfilter 結束碼 0 且 JSON 自洽才採用。kept＋blocked 必須剛好是原本的候選，否則不可信（回 None）。"""
+    if result.get("code") != 0:
+        return None
+    body = None
+    for line in reversed((result.get("stdout") or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                body = json.loads(line)
+            except ValueError:
+                body = None
+            break
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        return None
+    kept, blocked = body.get("kept"), body.get("blocked")
+    if not isinstance(kept, list) or not isinstance(blocked, list):
+        return None
+    if len(kept) + len(blocked) != len(candidates):
+        return None
+    remaining = list(candidates)
+    for item in kept:
+        if item not in remaining:
+            return None
+        remaining.remove(item)
+    left = sorted(str(c.get("symbol")) + "|" + str(c.get("setup")) for c in remaining if isinstance(c, dict))
+    got = []
+    for item in blocked:
+        if not isinstance(item, dict) or not item.get("blocked_by"):
+            return None
+        got.append(str(item.get("symbol")) + "|" + str(item.get("setup")))
+    if len(left) != len(remaining) or sorted(got) != left:
+        return None
+    return {"kept": kept, "blocked": blocked, "notes": body.get("notes") or []}
+
+
+def apply_hardfilter(prefilter, runner, python, path, cwd):
+    """有候選才跑。失敗、逾時、看不懂：保留全部候選，標記 hardfilter_failed（＝WAKE）。回傳這次的執行結果。"""
+    candidates = prefilter.get("candidates") or []
+    if not candidates:
+        return None
+    payload = json.dumps({"candidates": candidates}, ensure_ascii=False)
+    if not os.path.exists(path):
+        run = {"code": None, "stdout": "", "stderr": "hardfilter not found: " + path}
+    else:
+        run = runner([python, path], HARDFILTER_TIMEOUT_S, cwd=cwd, lock_retries=0, input_text=payload)
+    parsed = parse_hardfilter(run, candidates)
+    if parsed is None:
+        prefilter["hardfilter_failed"] = True
+        return run
+    prefilter["n_candidates_before_hardfilter"] = len(candidates)
+    prefilter["hardfilter_blocked"] = parsed["blocked"]
+    prefilter["candidates"] = parsed["kept"]
+    prefilter["n_candidates"] = len(parsed["kept"])
+    prefilter["call_ai"] = bool(parsed["kept"])
+    return run
+
+
 def load_state(path):
     """讀上一輪。檔案根本不存在是第一次跑（_absent）。
 
@@ -281,6 +343,8 @@ def decide(manage, status_run, status, prefilter_run, prefilter, previous, today
     if prefilter is None:
         reasons.append("prefilter_failed")
     else:
+        if prefilter.get("hardfilter_failed"):
+            reasons.append("hardfilter_failed")
         if prefilter["call_ai"] or prefilter["n_candidates"] > 0 or prefilter.get("candidates"):
             reasons.append("candidates")
         if not reading_is_fresh(prefilter.get("as_of"), now):
@@ -305,6 +369,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
     ap.add_argument("--prefilter", default="prefilter.py", help="相對 --root 的檔名，或絕對路徑")
     ap.add_argument("--state-dir", default=here, help="閘門自己的狀態與 log 目錄")
     ap.add_argument("--no-manage", action="store_true", help="不跑 manage --live（只讀測試用）")
+    ap.add_argument("--hardfilter", default=os.path.join(here, "hardfilter.py"),
+                    help="硬條件篩選的路徑；寫 off 則不跑（回到只看 prefilter 的行為）")
     args = ap.parse_args(argv)
 
     os.makedirs(args.state_dir, exist_ok=True)
@@ -322,6 +388,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
     status_run = {"code": None, "stdout": "", "stderr": ""}
     prefilter_run = {"code": None, "stdout": "", "stderr": ""}
     status = prefilter = None
+    hardfilter_run = None
     try:
         if args.no_manage:
             manage = {"code": 0, "stdout": "", "stderr": "", "skipped": True}
@@ -332,6 +399,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
         prefilter_run = runner([args.python, prefilter_path, "--quiet"], PREFILTER_TIMEOUT_S, cwd=args.root, lock_retries=0)
         prefilter = parse_prefilter(prefilter_run)
         checked = clock()
+        if prefilter is not None and args.hardfilter != "off":
+            hardfilter_run = apply_hardfilter(prefilter, runner, args.python, args.hardfilter, args.root)
         quiet, reasons = decide(manage, status_run, status, prefilter_run, prefilter, previous, today, checked)
     except Exception as exc:  # 閘門自己壞掉也只能叫 AI。已取得的輸出不要清掉。
         checked = clock()
@@ -361,13 +430,23 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
             "reasons": reasons,
             "status": logged_status,
             "n_candidates": prefilter["n_candidates"] if prefilter else None,
+            "hardfilter": None if not prefilter or hardfilter_run is None else {
+                "failed": bool(prefilter.get("hardfilter_failed")),
+                "before": prefilter.get("n_candidates_before_hardfilter"),
+                "blocked": [
+                    {"symbol": b.get("symbol"), "setup": b.get("setup"), "rule": b.get("blocked_by"), "why": b.get("why")}
+                    for b in prefilter.get("hardfilter_blocked", [])
+                ],
+            },
         })
     except OSError as exc:
         if quiet:
             quiet, reasons = False, ["gate_state_write_failed:{0}".format(type(exc).__name__)]
 
     if quiet:
-        print("QUIET 0倉 0單 0候選 {0}".format(started.strftime("%H:%M")))
+        blocked_n = len(prefilter.get("hardfilter_blocked", [])) if prefilter else 0
+        suffix = " 硬條件擋{0}".format(blocked_n) if blocked_n else ""
+        print("QUIET 0倉 0單 0候選 {0}{1}".format(started.strftime("%H:%M"), suffix))
         return QUIET
 
     print("WAKE " + ",".join(reasons))
@@ -377,6 +456,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
         ("status", status_run),
         ("prefilter --quiet", prefilter_run),
     )
+    if hardfilter_run is not None:
+        sections = sections + (("hardfilter（硬條件篩選；被擋的候選與理由在 blocked，留下的在 kept）", hardfilter_run),)
     for title, result in sections:
         print("\n=== {0}（結束碼 {1}）===".format(title, result.get("code")))
         out = _tail(result.get("stdout"))

@@ -52,17 +52,30 @@ def ok(text=""):
     return {"code": 0, "stdout": text, "stderr": ""}
 
 
+def keep_all(input_text):
+    """假的 hardfilter：全部留下。"""
+    cands = json.loads(input_text)["candidates"]
+    return ok(json.dumps({"ok": True, "kept": cands, "blocked": [], "notes": []}, ensure_ascii=False))
+
+
 class FakeRunner:
-    def __init__(self, manage=None, status=None, prefilter=None, when=None):
+    def __init__(self, manage=None, status=None, prefilter=None, when=None, hardfilter=None):
         when = when or datetime.now(gate.TPE)
         self.answers = {
             "manage": manage or ok(),
             "status": status or ok(status_text(when)),
             "prefilter": prefilter or quiet_prefilter(when),
         }
+        self.hardfilter = hardfilter or keep_all
+        self.hardfilter_inputs = []
         self.calls = []
 
-    def __call__(self, argv, timeout, cwd=None, lock_retries=5, **_kw):
+    def __call__(self, argv, timeout, cwd=None, lock_retries=5, input_text=None, **_kw):
+        if any(str(a).endswith("hardfilter.py") for a in argv):
+            self.calls.append(("hardfilter",))
+            self.hardfilter_inputs.append(input_text)
+            answer = self.hardfilter(input_text) if callable(self.hardfilter) else self.hardfilter
+            return dict(answer)
         if "manage" in argv:
             key = "manage"
             self.calls.append(("manage", "--live" in argv))
@@ -347,3 +360,137 @@ class GateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def blocked_rec(cand, rule="kuai_consecutive_blacks", why="只有 1 根長黑"):
+    return {"symbol": cand["symbol"], "setup": cand.get("setup"), "blocked_by": rule, "why": why, "checks": []}
+
+
+class GateHardfilterTest(unittest.TestCase):
+    """gate.py 呼叫 hardfilter：全擋才可能 QUIET；任何失敗、看不懂都保留候選並 WAKE。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.when = datetime.now(gate.TPE).replace(microsecond=0)
+        self.c1 = {"symbol": "CAPUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}
+        self.c2 = {"symbol": "MERLUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.97, "prior_high": 1.2}
+        # 讓預設的 hardfilter 路徑存在（內容不會被執行，FakeRunner 攔下）
+        self.hf_path = os.path.join(self.tmp.name, "hardfilter.py")
+        with open(self.hf_path, "w", encoding="utf-8") as handle:
+            handle.write("# fake\n")
+
+    def clock(self):
+        return self.when
+
+    def pref(self, *cands):
+        return quiet_prefilter(self.when, call_ai=bool(cands), n_candidates=len(cands), candidates=list(cands))
+
+    def run_gate(self, runner, extra=None):
+        out = io.StringIO()
+        argv = ["--state-dir", self.tmp.name, "--root", self.tmp.name, "--hardfilter", self.hf_path] + (extra or [])
+        with redirect_stdout(out):
+            code = gate.main(argv, runner=runner, clock=self.clock)
+        return code, out.getvalue()
+
+    def log_rows(self):
+        with open(os.path.join(self.tmp.name, "gate_log.jsonl"), encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
+    def test_all_blocked_is_quiet_and_logged(self):
+        def block_all(text):
+            cands = json.loads(text)["candidates"]
+            return ok(json.dumps({"ok": True, "kept": [], "blocked": [blocked_rec(c) for c in cands], "notes": []}, ensure_ascii=False))
+        runner = FakeRunner(prefilter=self.pref(self.c1), when=self.when, hardfilter=block_all)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.QUIET, out)
+        self.assertTrue(out.startswith("QUIET"))
+        self.assertIn("硬條件擋1", out)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["n_candidates"], 0)
+        self.assertEqual(row["hardfilter"]["before"], 1)
+        self.assertEqual(row["hardfilter"]["blocked"][0]["symbol"], "CAPUSDT")
+        self.assertEqual(json.loads(runner.hardfilter_inputs[0])["candidates"], [self.c1])
+
+    def test_some_kept_wakes_with_section(self):
+        def block_first(text):
+            cands = json.loads(text)["candidates"]
+            return ok(json.dumps({"ok": True, "kept": cands[1:], "blocked": [blocked_rec(cands[0])], "notes": []}, ensure_ascii=False))
+        runner = FakeRunner(prefilter=self.pref(self.c1, self.c2), when=self.when, hardfilter=block_first)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE)
+        self.assertTrue(out.startswith("WAKE candidates"), out)
+        self.assertIn("=== hardfilter", out)
+        self.assertEqual(self.log_rows()[-1]["n_candidates"], 1)
+
+    def test_hardfilter_failures_keep_candidates_and_wake(self):
+        bad = [
+            {"code": 2, "stdout": json.dumps({"ok": False, "error": "rate_limited: 429 on klines CAPUSDT"}), "stderr": ""},
+            {"code": None, "stdout": "", "stderr": "timeout", "timeout": True},
+            ok("not json"),
+            ok(json.dumps({"ok": True, "kept": [], "blocked": []})),  # 張數對不上
+            ok(json.dumps({"ok": True, "kept": [{"symbol": "XUSDT"}], "blocked": []})),  # 留下的不是原候選
+            ok(json.dumps({"ok": True, "kept": [], "blocked": [{"symbol": "CAPUSDT", "setup": "瘸師弟"}]})),  # 缺 blocked_by
+            ok(json.dumps({"ok": True, "kept": [], "blocked": [{"symbol": "ZZZUSDT", "setup": "瘸師弟", "blocked_by": "x"}]})),
+            ok(json.dumps({"ok": False, "kept": [], "blocked": []})),
+            ok(json.dumps({"ok": True, "kept": "all", "blocked": []})),
+        ]
+        for answer in bad:
+            with self.subTest(answer=answer):
+                runner = FakeRunner(prefilter=self.pref(self.c1), when=self.when, hardfilter=answer)
+                code, out = self.run_gate(runner)
+                self.assertEqual(code, gate.WAKE)
+                self.assertIn("hardfilter_failed", out.splitlines()[0])
+                self.assertIn("candidates", out.splitlines()[0])
+                self.assertEqual(self.log_rows()[-1]["n_candidates"], 1)
+
+    def test_missing_hardfilter_file_wakes(self):
+        os.remove(self.hf_path)
+        runner = FakeRunner(prefilter=self.pref(self.c1), when=self.when)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE)
+        self.assertIn("hardfilter_failed", out)
+
+    def test_hardfilter_off_restores_old_behaviour(self):
+        runner = FakeRunner(prefilter=self.pref(self.c1), when=self.when)
+        code, out = self.run_gate(runner, ["--hardfilter", "off"])
+        self.assertEqual(code, gate.WAKE)
+        self.assertTrue(out.startswith("WAKE candidates"))
+        self.assertNotIn(("hardfilter",), runner.calls)
+
+    def test_no_candidates_does_not_call_hardfilter(self):
+        runner = FakeRunner(when=self.when)
+        code, _out = self.run_gate(runner)
+        self.assertEqual(code, gate.QUIET)
+        self.assertNotIn(("hardfilter",), runner.calls)
+
+    def test_all_blocked_but_position_open_still_wakes(self):
+        def block_all(text):
+            cands = json.loads(text)["candidates"]
+            return ok(json.dumps({"ok": True, "kept": [], "blocked": [blocked_rec(c) for c in cands]}, ensure_ascii=False))
+        busy = status_text(self.when, positions=1, pos_rows=BUSY_POS, algo=2, order_rows=BUSY_ORDERS)
+        runner = FakeRunner(prefilter=self.pref(self.c1), status=ok(busy), when=self.when, hardfilter=block_all)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE)
+        self.assertIn("positions_open", out)
+        self.assertNotIn("candidates", out.splitlines()[0])
+
+    def test_prefilter_429_still_wakes_without_hardfilter(self):
+        pref = {"code": 2, "stdout": json.dumps({"time": "t", "call_ai": False, "error": "rate_limited: 429", "candidates": []}), "stderr": ""}
+        runner = FakeRunner(prefilter=pref, when=self.when)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE)
+        self.assertIn("prefilter_failed", out)
+        self.assertNotIn(("hardfilter",), runner.calls)
+
+    def test_real_hardfilter_subprocess_with_stdin(self):
+        """真的起子程序跑一支假 hardfilter，確認 stdin 有送到、輸出有被讀回。"""
+        with open(self.hf_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "import json,sys\nb=json.load(sys.stdin)\n"
+                "print(json.dumps({'ok':True,'kept':[],'blocked':[dict(symbol=c['symbol'],setup=c.get('setup'),blocked_by='t',why='t') for c in b['candidates']]}))\n"
+            )
+        result = gate.run_cmd([sys.executable, self.hf_path], 30, input_text=json.dumps({"candidates": [self.c1]}))
+        parsed = gate.parse_hardfilter(result, [self.c1])
+        self.assertIsNotNone(parsed, result)
+        self.assertEqual(parsed["kept"], [])

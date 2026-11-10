@@ -1,5 +1,14 @@
 # 變更紀錄
 
+## 2026-11-10（閘門加硬條件篩選）
+
+使用者 11/10 23:44（台北）原話（經總經理boy轉達）：「你依照原本的開單的條件跟頻率來撈單來做設定」。
+
+- 新增 `src/hardfilter.py`：prefilter 有候選時由 gate.py 呼叫，只擋程式能確定不符合的硬條件：黑名單、瘸師弟只有 1 根長黑、布鹿流停損套 3%／5% 下限後 RR < 1.5、布鹿流第一波沒有 3 倍量。不確定、缺資料一律留給 AI；限流、讀取失敗、輸出看不懂一律 WAKE。
+- `src/gate.py`：接上 hardfilter（`--hardfilter`，`off` 可停用），gate_log 多記被擋的候選與理由。新鮮度門檻不變。
+- 新增 `tests/test_hardfilter.py`、`tests/replay_hardfilter.py`、`tests/fixtures/hardfilter_replay_20261110.json`（11/10 實際候選回放，K 線為事後以公開 API 重建）、`docs/hardfilter.md`（規則出處、部署、回滾）。
+- 沒有改 prefilter、live_trader、routine prompt、30 分鐘排程、60 秒 watch、風控或策略門檻。沒有部署到 Mac。
+
 ## 2026-11-10（閘門失敗改為叫醒）
 
 收緊 `src/gate.py` 與 `live_trader.py status`：只有新鮮、可信、上一輪也明確是空倉，而且一般單與條件單都是 0，才 QUIET。讀取失敗、過期、前後矛盾、狀態檔損壞都改為 WAKE。

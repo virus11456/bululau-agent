@@ -6,7 +6,7 @@ from src.phase1.market_adapter import fetch_strategy_market, run_review_entry
 
 NOW = "2026-11-07T12:20:00+08:00"
 AS_OF = "2026-11-07T12:19:30+08:00"
-NOW_MS = 1762482000000
+NOW_MS = 1794025200000  # 2026-11-07T12:20:00+08:00，與 NOW 同一刻
 _STEP = {"15m": 15 * 60 * 1000, "1h": 60 * 60 * 1000, "4h": 4 * 60 * 60 * 1000, "1d": 24 * 60 * 60 * 1000}
 
 
@@ -55,7 +55,8 @@ class Run37ContextTest(unittest.TestCase):
 
             def public(symbol, interval, limit):
                 calls.append((symbol, interval, limit))
-                return _raw(interval, limit, NOW_MS, forming=True)
+                # 幣安回傳的 limit 根已含最後一根未收盤 K，所以已收盤的是 limit - 1 根。
+                return _raw(interval, limit - 1, NOW_MS, forming=True)
 
             empty = fetch_strategy_market(_private(*_book()), public, [], NOW_MS)
             self.assertEqual(calls, [])

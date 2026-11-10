@@ -91,9 +91,12 @@ class Run44SubmitTest(unittest.TestCase):
             trace_path = Path(tmp) / "parent-trace.json"
             judgment_path.write_text(json.dumps(judgment), encoding="utf-8")
             trace_path.write_text(json.dumps(trace), encoding="utf-8")
+            # run50 起正式 CLI 要先有持久 claim。舊 parent 已呼叫過，claim 只登記 owner，不再喚 parent。
+            self.assertEqual(main(["receive-claim", "--state-dir", tmp, "--event-id", EVENT, "--owner", "parent-44"]), 0)
             code = main([
                 "receive-submit", "--state-dir", tmp, "--event-id", EVENT,
                 "--judgment", str(judgment_path), "--trace", str(trace_path), "--now", NOW,
+                "--owner", "parent-44",
             ])
             self.assertEqual(code, 0)
             self.assertEqual(calls, ["parent"])
@@ -149,7 +152,7 @@ class Run44SubmitTest(unittest.TestCase):
                 "decision": "keep_original_ai", "orders_placed": False, "ai_execution_proven": False,
             }
             trace = {"event_id": EVENT, "evaluation_id": "s44", "trace": "parent wrote this trace", "envelope_sha256": digest}
-            result = submit_parent_files(store, EVENT, thin, trace, NOW)
+            result = submit_parent_files(store, EVENT, thin, trace, NOW, isolated_test=True)
             self.assertFalse(result["ack"])
             self.assertEqual(read_formal(store, EVENT)["status"], "pending")
             self.assertIsNone(read_parent_files(Store(tmp), EVENT))

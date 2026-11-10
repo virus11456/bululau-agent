@@ -1,5 +1,21 @@
 # 變更紀錄
 
+## 2026-11-10（PR #3 收尾：測試修到全綠）
+
+只改測試與合併 main，沒有改 `src/` 行為，沒有部署，沒有動 Mac、routine 或 60 秒 watch。PR #3 仍是離線、未上線。
+
+- 把 main 的 11-10 文件同步合進 PR #3 分支，解 CHANGELOG 衝突。
+- 全套 `python3 -m unittest discover -s tests -t .` 原本 176 個有 18 個失敗（上一輪只跑了 `test_run51_symbol_syntax`）。修好後 176 個全過；`gateway` 的 `npm test` 13 個全過。
+- 測試錯誤，不是程式錯誤：
+  - 六個測試檔的 `NOW_MS` 是 2025-11-07 的毫秒值，和 `NOW` 字串（2026-11-07）差一年，K 線新鮮度檢查因此必敗。改成 `1794025200000`。
+  - `test_legacy_root` 用 `os.chdir` 後沒換回來，後面用相對路徑讀 `gateway/` 的測試跟著壞。改成結束時還原。
+  - `test_run37_context` 的假行情多回一根已收盤 K；幣安回的 `limit` 根已含未收盤那根。
+- 跟上後來收緊的契約（程式維持原樣）：
+  - run50 起正式提交要先 claim。CLI 測試補上 `receive-claim --owner`；只走舊 mock 的函式測試明示 `isolated_test=True`。
+  - 依 setup 取 K 線後，沒有 setup 的持倉不抓 K、標 `unknown_setup` 並留原 AI；缺 K 的標記帶週期（例如 `klines:SOLUSDT:15m`）。
+  - envelope 與外層 id 不一致，現在在完整 context 驗證就以 `rejected_context` 擋下。
+  - 草稿改寫成「取消能力未驗證，不斷言平台沒有」與「不是已驗證的身分邊界」，測試對照新字句。
+
 ## 2026-11-10
 
 依使用者「全部上傳」，只更新文件，把 main 上已過時的「每 15 分鐘／實盤停止、只做紙上」改成已核對的現行操作。沒有改 `src/` 下單程式，沒有部署，沒有合併 [PR #3](https://github.com/virus11456/bululau-agent/pull/3)，也沒有改 Mac 或現行 routine。

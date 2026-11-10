@@ -24,7 +24,7 @@ from src.phase1.session import Store
 
 NOW = "2026-11-07T12:20:00+08:00"
 AS_OF = "2026-11-07T12:19:30+08:00"
-NOW_MS = 1762482000000
+NOW_MS = 1794025200000  # 2026-11-07T12:20:00+08:00，與 NOW 同一刻
 SENT = "2026-11-07T04:19:30Z"
 EVENT = "c-" + "ab" * 16
 INSTALL = "inst-local-1"
@@ -351,7 +351,7 @@ class Run33GateTest(unittest.TestCase):
                     return [{"symbol": "BTCUSDT", "side": "SELL", "type": "STOP_MARKET", "stopPrice": "9", "origQty": "1"}]
                 return []
 
-            def public(symbol):
+            def public(symbol, interval="15m", limit=20):
                 calls.append(symbol)
                 if symbol == "SOLUSDT":
                     return [[NOW_MS - 60_000, "1", "2"]]
@@ -371,12 +371,14 @@ class Run33GateTest(unittest.TestCase):
             self.assertIn("/fapi/v2/account", calls)
             self.assertIn("/fapi/v1/openOrders", calls)
             self.assertIn("/fapi/v1/openAlgoOrders", calls)
-            self.assertIn("ETHUSDT", calls)
-            self.assertIn("BTCUSDT", calls)
+            # 依 setup 取 K（run37 起）：候選與 BTC 參照會抓；沒有 setup 的持倉不抓，標成未知並留原 AI。
             self.assertIn("SOLUSDT", calls)
-            self.assertIn("klines:SOLUSDT", failed["missing"])
+            self.assertIn("BTCUSDT", calls)
+            self.assertNotIn("ETHUSDT", calls)
+            self.assertIn("unknown_setup:ETHUSDT", failed["missing"])
+            self.assertIn("klines:SOLUSDT:15m", failed["missing"])
 
-            def public_ok(symbol):
+            def public_ok(symbol, interval="15m", limit=20):
                 return _bars(NOW_MS - 60_000)
 
             none_query = run_review_entry(

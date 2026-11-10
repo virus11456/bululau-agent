@@ -16,7 +16,7 @@ from src.phase1.session import Store
 
 NOW = "2026-11-07T12:20:00+08:00"
 AS_OF = "2026-11-07T12:19:30+08:00"
-NOW_MS = 1762482000000
+NOW_MS = 1794025200000  # 2026-11-07T12:20:00+08:00，與 NOW 同一刻
 SENT = "2026-11-07T04:19:30Z"
 EVENT = "c-" + "ab" * 16
 
@@ -127,7 +127,9 @@ class Run34GapTest(unittest.TestCase):
         self.assertFalse(parent_package_ready(judgment, trace, context)["discretion_complete"])
         other = json.loads(json.dumps(context))
         other["envelope"]["event_id"] = "OTHER"
-        self.assertEqual(parent_package_ready(judgment, trace, other)["reason"], "binding_mismatch")
+        # envelope 與外層 id 不一致，現在在完整 context 驗證就被擋下（rejected_context），比 binding 檢查更早。
+        self.assertFalse(parent_package_ready(judgment, trace, other)["ready"])
+        self.assertEqual(parent_package_ready(judgment, trace, other)["reason"], "rejected_context")
         tampered = json.loads(json.dumps(context))
         tampered["envelope"]["snapshot"]["positions"] = 9
         self.assertEqual(parent_package_ready(judgment, trace, tampered)["reason"], "digest_mismatch")

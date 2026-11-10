@@ -14,6 +14,7 @@ from src.phase1.canonical import canonical_json
 from src.phase1.formal_receive import (
     PARENT_JUDGMENT_DEADLINE,
     PLATFORM_PARENT_AI,
+    claim_parent_run,
     expire_parent,
     formal_status,
     read_formal,
@@ -126,7 +127,7 @@ class Run47ParentDeadlineTest(unittest.TestCase):
             self.assertEqual(read_formal(Store(tmp), EVENT)["judgment_deadline"], deadline)
             judgment, trace = _pair(digest)
             with self.assertRaises(ValueError) as caught:
-                submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=later)
+                submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=later, isolated_test=True)
             self.assertEqual(str(caught.exception), "parent_deadline_expired")
             alert = json.loads(Path(tmp, "formal-alerts", EVENT + ".json").read_text(encoding="utf-8"))
             self.assertEqual(alert["alert_delivered"], False)
@@ -175,7 +176,7 @@ class Run47ParentDeadlineTest(unittest.TestCase):
             self.assertFalse(Path(tmp, "formal-alerts", EVENT + ".json").exists())
             judgment, trace = _pair(digest)
             early = _shift(T0, timedelta(seconds=1))
-            submitted = submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=early)
+            submitted = submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=early, isolated_test=True)
             self.assertEqual(submitted["status"], "publish_ready")
             path = Path(tmp, "formal-files", EVENT, "judgment.json")
             body = path.read_bytes()
@@ -183,6 +184,7 @@ class Run47ParentDeadlineTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 submit_parent_files(
                     Store(tmp), EVENT, {"replaced": True}, {"trace": "other"}, "2000-01-01T00:00:00Z", judgment_clock=late,
+                    isolated_test=True,
                 )
             self.assertEqual(path.read_bytes(), body)
             self.assertEqual(read_formal(Store(tmp), EVENT)["status"], "publish_ready")
@@ -194,12 +196,12 @@ class Run47ParentDeadlineTest(unittest.TestCase):
         past = _shift(T0, PARENT_JUDGMENT_DEADLINE + timedelta(seconds=1))
         with tempfile.TemporaryDirectory() as tmp:
             receive_delivery(Store(tmp), document, NOW, judgment_clock=T0)
-            result = submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=edge)
+            result = submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=edge, isolated_test=True)
             self.assertEqual(result["status"], "publish_ready")
         with tempfile.TemporaryDirectory() as tmp:
             receive_delivery(Store(tmp), document, NOW, judgment_clock=T0)
             with self.assertRaises(ValueError) as caught:
-                submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=past)
+                submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=past, isolated_test=True)
             self.assertEqual(str(caught.exception), "parent_deadline_expired")
             self.assertEqual(read_formal(Store(tmp), EVENT)["judgment_deadline"], edge)
 
@@ -228,16 +230,21 @@ class Run47ParentDeadlineTest(unittest.TestCase):
             trace_path = Path(tmp) / "trace.json"
             judgment_path.write_text(json.dumps(judgment), encoding="utf-8")
             trace_path.write_text(json.dumps(trace), encoding="utf-8")
+            code, _claim = _run(["receive-claim", "--state-dir", tmp, "--event-id", EVENT, "--owner", "parent-47"])
+            self.assertEqual(code, 0)
             code, body = _run([
                 "receive-submit", "--state-dir", tmp, "--event-id", EVENT,
                 "--judgment", str(judgment_path), "--trace", str(trace_path),
-                "--now", "2099-01-01T00:00:00Z",
+                "--now", "2099-01-01T00:00:00Z", "--owner", "parent-47",
             ])
             self.assertEqual(code, 0)
             self.assertEqual(body["status"], "publish_ready")
             self.assertEqual(read_formal(Store(tmp), EVENT)["judgment_deadline"], row["judgment_deadline"])
         with tempfile.TemporaryDirectory() as tmp:
-            receive_delivery(Store(tmp), document, NOW, judgment_clock=_shift(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), timedelta(minutes=-16)))
+            received_at = _shift(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), timedelta(minutes=-16))
+            receive_delivery(Store(tmp), document, NOW, judgment_clock=received_at)
+            # claim 在截止前就登記了；之後 CLI 用系統時鐘補交，必須因過截止被拒。
+            claim_parent_run(Store(tmp), EVENT, "parent-47", judgment_clock=received_at)
             deadline = read_formal(Store(tmp), EVENT)["judgment_deadline"]
             judgment_path = Path(tmp) / "judgment.json"
             trace_path = Path(tmp) / "trace.json"
@@ -246,7 +253,7 @@ class Run47ParentDeadlineTest(unittest.TestCase):
             code, body = _run([
                 "receive-submit", "--state-dir", tmp, "--event-id", EVENT,
                 "--judgment", str(judgment_path), "--trace", str(trace_path),
-                "--now", T0,
+                "--now", T0, "--owner", "parent-47",
             ])
             self.assertEqual(code, 1)
             self.assertEqual(body["reason"], "parent_deadline_expired")

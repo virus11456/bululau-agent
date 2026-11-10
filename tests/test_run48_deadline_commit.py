@@ -129,7 +129,7 @@ class Run48DeadlineCommitTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             receive_delivery(Store(tmp), document, NOW, judgment_clock=T0)
             with self.assertRaises(ValueError) as caught:
-                submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=clock)
+                submit_parent_files(Store(tmp), EVENT, judgment, trace, "2099-01-01T00:00:00Z", judgment_clock=clock, isolated_test=True)
             self.assertEqual(str(caught.exception), "parent_deadline_expired")
             self.assertEqual(ticks, [])
             stored = read_formal(Store(tmp), EVENT)
@@ -141,12 +141,12 @@ class Run48DeadlineCommitTest(unittest.TestCase):
             self.assertFalse(Path(tmp, "formal-files", EVENT, "trace.json").exists())
         with tempfile.TemporaryDirectory() as tmp:
             receive_delivery(Store(tmp), document, NOW, judgment_clock=T0)
-            ready = submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=edge)
+            ready = submit_parent_files(Store(tmp), EVENT, judgment, trace, edge, judgment_clock=edge, isolated_test=True)
             self.assertEqual(ready["status"], "publish_ready")
             path = Path(tmp, "formal-files", EVENT, "judgment.json")
             body = path.read_bytes()
             other, other_trace = _pair(digest, "replaced-body")
-            kept = submit_parent_files(Store(tmp), EVENT, other, other_trace, past, judgment_clock=edge)
+            kept = submit_parent_files(Store(tmp), EVENT, other, other_trace, past, judgment_clock=edge, isolated_test=True)
             self.assertEqual(kept["status"], "publish_ready")
             self.assertEqual(path.read_bytes(), body)
             self.assertNotIn(b"replaced-body", body)

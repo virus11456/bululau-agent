@@ -146,7 +146,9 @@ class LegacyRootTest(unittest.TestCase):
     def test_snapshot_reads_without_writing_or_creating_data(self):
         from src.phase1.legacy_snapshot import snapshot_file
         with tempfile.TemporaryDirectory() as tmp:
+            previous = os.getcwd()
             os.chdir(tmp)
+            self.addCleanup(os.chdir, previous)
             missing = snapshot_file(os.path.join(tmp, "state.json"), "2026-11-07T07:21:55Z")
             self.assertFalse(missing["ok"])
             self.assertEqual(missing["reason"], "missing_state")

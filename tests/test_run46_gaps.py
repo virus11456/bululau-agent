@@ -111,7 +111,7 @@ class Run46GapTest(unittest.TestCase):
             missing = main(["receive-readback", "--state-dir", tmp, "--event-id", EVENT])
             self.assertNotEqual(missing, 0)
             receive_delivery(Store(tmp), document, NOW)
-            submit_parent_files(Store(tmp), EVENT, judgment, trace, NOW)
+            submit_parent_files(Store(tmp), EVENT, judgment, trace, NOW, isolated_test=True)
             code = main(["receive-readback", "--state-dir", tmp, "--event-id", EVENT])
             self.assertEqual(code, 0)
 

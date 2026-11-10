@@ -1,5 +1,13 @@
 # 變更紀錄
 
+## 2026-11-10（省 token 閘門）
+
+新增 `src/gate.py`、`tests/test_gate.py`、`docs/gate.md`。依使用者要求另起精簡版，不依賴 PR #3。
+
+- 每輪由程式跑 `manage --live`、`status`、`prefilter --quiet`。全部明確是空的（0 倉、0 一般單、0 條件單、0 候選、沒有旗標、沒有錯誤，上一輪也是空的）才印 `QUIET`，其他一律印 `WAKE` 並附上輸出。
+- 不下單，不讀金鑰，不改 `live_trader.py` 與 live 資料目錄。策略條文與風控都沒有改。
+- 還沒部署到 Mac，也還沒改 routine prompt。部署步驟見 `docs/gate.md`。
+
 ## 2026-11-10
 
 依使用者「全部上傳」，只更新文件，把 main 上已過時的「每 15 分鐘／實盤停止、只做紙上」改成已核對的現行操作。沒有改 `src/` 下單程式，沒有部署，沒有合併 [PR #3](https://github.com/virus11456/bululau-agent/pull/3)，也沒有改 Mac 或現行 routine。

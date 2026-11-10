@@ -30,6 +30,10 @@
 
 日 K 均線用哪一條、大師兄與小師弟的出場 R、V 轉收不回時怎麼處理、連敗後縮小多少，都在策略文件的待確認區。這些沒有預設數字。
 
+## 省 token 閘門
+
+`src/gate.py` 讓 Grok 每輪先跑一個命令。新鮮、可信的空倉、0 單、0 候選時印 `QUIET`，Grok 直接結束本輪，不載入完整規則。其他情況印 `WAKE` 並附上 manage／status／prefilter 的結果，再照原本的 prompt 做。安裝與新的 routine prompt 見 [docs/gate.md](docs/gate.md)。這支程式不下單，也不必改 Mac 上的 `live_trader.py`。
+
 ## 環境需求
 
 - Python 3.9 或以上（建議 3.11）
@@ -62,6 +66,8 @@ src/prefilter.py                舊篩選，不是 11-06 的全市場掃描
 src/sentiment.py                情緒讀數，不下單
 src/position_manager.py         2026-10 紙上參數，不要拿來做出場
 src/config.py                   資料目錄與金鑰讀取
+src/gate.py                     省 token 閘門，空輪不叫 AI
+docs/gate.md                    閘門安裝、判斷條件與新的 routine prompt
 docs/strategy.md                2026-11-06 定稿，並附 11-07 起的操作變更
 docs/operation.md               現行實盤排程、啟停與尚未部署的目標架構
 docs/agent_prompt.md            現行實盤 routine 已核提示詞（機器代號已改佔位符）

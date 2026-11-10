@@ -1,5 +1,17 @@
 # 變更紀錄
 
+## 2026-11-10（閘門失敗改為叫醒）
+
+收緊 `src/gate.py` 與 `live_trader.py status`：只有新鮮、可信、上一輪也明確是空倉，而且一般單與條件單都是 0，才 QUIET。讀取失敗、過期、前後矛盾、狀態檔損壞都改為 WAKE。
+
+- `status` 讀條件單失敗時印「條件單讀取失敗」並以非 0 結束，不再把失敗印成「條件單 0」。manage、watch、flatten 讀條件單失敗的舊行為沒有改。
+- 空倉清掉殘留條件單時，manage 原本印的「孤兒條件單」現在會讓閘門 WAKE。
+- 閘門中途出錯時，已經拿到的 manage／status／prefilter 輸出會留在 WAKE 裡。
+- 狀態檔損壞、`last` 不可信，或中間有一輪沒讀到帳本，下一輪空倉會 WAKE。狀態檔根本不存在（第一次跑）仍可 QUIET。
+- status／prefilter 的時間過期或超前就 WAKE。8 分鐘年齡上限與 120 秒超前餘裕要擁有者確認，不是策略參數。
+- `tests/__init__.py` 讓 `python3 -m unittest discover` 能找到測試。
+- 沒有改 routine prompt、風控公式、60 秒 watch、30 分鐘排程，沒有部署到 Mac，測試沒有連網也沒有讀金鑰。
+
 ## 2026-11-10（省 token 閘門）
 
 新增 `src/gate.py`、`tests/test_gate.py`、`docs/gate.md`。依使用者要求另起精簡版，不依賴 PR #3。

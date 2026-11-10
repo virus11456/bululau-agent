@@ -123,11 +123,28 @@ def positions(acc):
     return [p for p in acc["positions"] if float(p["positionAmt"]) != 0]
 
 # ---------- 保護單（新版 Algo 端點，失敗退回舊端點） ----------
-def open_algo(symbol=None):
+# status 讀取失敗時印這一行再往上拋。gate 看到這句就 WAKE，不能把它當成 0 張條件單。
+ALGO_ORDERS_UNREADABLE = "條件單讀取失敗"
+
+def open_algo(symbol=None, *, fail_closed=False):
+    """讀條件單。
+
+    manage／watch／flatten 維持舊行為（fail_closed=False）：幣安錯誤只記 log 並回 []。
+    這次不改那些路徑，避免動到風控與 60 秒 watch。
+    status 必須 fail_closed=True：讀取失敗要往上拋，呼叫端不可印成 0 張。
+    """
     p = {"symbol": symbol} if symbol else {}
-    try: return req("GET", "/fapi/v1/openAlgoOrders", p, signed=True) or []
+    try:
+        data = req("GET", "/fapi/v1/openAlgoOrders", p, signed=True) or []
     except BinanceError as e:
-        log("warn", msg="openAlgoOrders 失敗", err=str(e)); return []
+        log("warn", msg="openAlgoOrders 失敗", err=str(e))
+        if fail_closed:
+            raise
+        return []
+    if fail_closed and not isinstance(data, list):
+        log("warn", msg="openAlgoOrders 不是清單")
+        raise BinanceError(None, None, "openAlgoOrders 不是清單")
+    return data
 def open_orders(symbol=None):
     p = {"symbol": symbol} if symbol else {}
     return req("GET", "/fapi/v1/openOrders", p, signed=True)
@@ -199,7 +216,13 @@ def cmd_status(a):
     print(f"停開新倉 {s['halted_new']}  全平旗標 {s['killed'] or os.path.exists(HALT_FLAG)}")
     print(f"持倉 {len(pos)}/{CFG['max_positions']}")
     for p in pos: print(f"  {p['symbol']} 數量 {p['positionAmt']} 進場 {p['entryPrice']} 未實現 {float(p['unrealizedProfit']):+.2f} 槓桿 {p['leverage']} 逐倉 {p['isolated']}")
-    oo = open_orders(); ao = open_algo()
+    oo = open_orders()
+    try:
+        ao = open_algo(fail_closed=True)
+    except BinanceError:
+        # 先印標記再拋出。main() 會以非 0 結束；即使有人忽略結束碼，這一行也不是「條件單 0」。
+        print(ALGO_ORDERS_UNREADABLE)
+        raise
     print(f"一般掛單 {len(oo)}  條件單 {len(ao)}")
     for o in oo: print(f"  {o['symbol']} {o['side']} {o['type']} 價 {o.get('price')} 觸發 {o.get('stopPrice')} 掛於 {tpe_ms(o.get('time'))} id {o.get('orderId')}")
     for o in ao:

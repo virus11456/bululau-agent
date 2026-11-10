@@ -32,7 +32,7 @@
 
 ## 省 token 閘門
 
-`src/gate.py` 讓 Grok 每輪先跑一個命令。新鮮、可信的空倉、0 單、0 候選時印 `QUIET`，Grok 直接結束本輪，不載入完整規則。其他情況印 `WAKE` 並附上 manage／status／prefilter 的結果，再照原本的 prompt 做。安裝與新的 routine prompt 見 [docs/gate.md](docs/gate.md)。這支程式不下單，也不必改 Mac 上的 `live_trader.py`。
+`src/gate.py` 讓 Grok 每輪先跑一個命令。新鮮、可信的空倉、0 單、0 候選時印 `QUIET`，Grok 直接結束本輪，不載入完整規則。其他情況印 `WAKE` 並附上 manage／status／prefilter 的結果，再照原本的 prompt 做。安裝見 [docs/gate.md](docs/gate.md)。這支程式不下單。倉庫裡的 `live_trader.py status` 在條件單讀取失敗時會非 0 結束；要讓這條生效，Mac 上的那份以後要換成這一版。這次沒有部署到 Mac。
 
 ## 環境需求
 

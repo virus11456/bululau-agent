@@ -12,8 +12,9 @@
 - **遇到不確定一律放行給 AI（fail-open to AI）。** 原文沒給數字、要看型態、欄位缺、K 線不夠、找不到訊號 K、重算和 prefilter 不一致，都保留候選。
 - 原文給的是區間時取較寬的一端，例如「小幣 4–5%」取 4%、「前 10–20 根」兩種都算、任一種達標就算有。
 - 單一候選讀 K 線出錯（非限流）：保留該候選。
-- 418／429 限流、輸入看不懂、hardfilter 自己壞掉、逾時、輸出和候選對不上：gate 一律 WAKE（`hardfilter_failed`），全部候選原封不動交給 AI。
-- 只讀幣安公開 `/fapi/v1/klines`，不簽章、不讀金鑰、不下單。只在有候選時才抓，每個候選最多 2 次請求。
+- 418／429 限流：同一輪最多再試 2 次（見下面「429／418 退避」）。仍失敗、或 Retry-After 超過上限：結束碼 2，gate 一律 WAKE（`hardfilter_failed`），全部候選原封不動交給 AI。
+- 輸入看不懂、hardfilter 自己壞掉、逾時、輸出和候選對不上：不重試，gate 一樣 WAKE。
+- 只讀幣安公開 `/fapi/v1/klines`，不簽章、不讀金鑰、不下單。只在有候選時才抓，每個候選最多 2 次請求（15m 與 1H 各一次）。429／418 的額外重試不算在這 2 次裡面，而且整輪加起來最多再多 2 次，不是每個幣各 2 次。
 
 ## 規則與原文出處
 
@@ -53,6 +54,22 @@ AI 在 20:30 與 21:29 兩輪用的是 prefilter 的 `target` 欄。那個價是
 - `gate_log.jsonl` 每列多一個 `hardfilter` 欄：`failed`、`before`（prefilter 原本幾個）、`blocked`（幣種、型態、規則、理由）。`n_candidates` 改為篩後數量。
 - `--hardfilter PATH`：預設是 gate.py 同目錄的 `hardfilter.py`。`--hardfilter off` 回到只看 prefilter 的舊行為。
 - routine 的命令與 `--prefilter` 路徑都不用改。
+- hardfilter 若在 429／418 之後重試過，`gate_log.jsonl` 的 `hardfilter` 欄多記 `retries`、`wait_s`、`waits_s`、`stopped`。仍失敗時 WAKE 理由仍是 `hardfilter_failed`，並多一個 `hardfilter_retries=N`。
+
+## 429／418 退避
+
+公開 K 線收到 HTTP 429 或 418 才重試。其他狀態（例如 500、逾時、DNS）不重試：單一候選仍保留給 AI；429／418 則整輪失敗、結束碼 2。
+
+同一輪 hardfilter（所有候選加起來，不是每個幣各算）最多再試 2 次。沒有正數的 `Retry-After` 就等 2 秒、再 6 秒；header 有正數就照它，`0` 或不是數字就改走 2／6 秒。
+
+| 上限 | 秒 | 超過時 |
+|---|---|---|
+| 單次等待 | 8 | Retry-After 大於 8 就不等，結束碼 2 |
+| 整輪累計等待 | 15 | 再等會超過 15 就不等，結束碼 2 |
+
+數字比閘門小，是因為 gate 只給 hardfilter 60 秒，而每次請求逾時 10 秒。最壞是 3 次請求都打滿 10 秒，再加上 15 秒等待，約 45 秒，留下約 15 秒，避免被閘門的逾時殺掉。正常沒有 429／418 時，請求次數不變。
+
+失敗的那一行 JSON 會帶 `rate_limit_retries`、`rate_limit_wait_s`、`rate_limit_waits_s`、`rate_limit_stopped`（`retries_exhausted` 或 `wait_cap`）。重試後成功也帶前三個，`rate_limit_stopped` 是 null。
 
 ## 部署計畫（總經理boy 審過後才做）
 

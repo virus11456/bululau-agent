@@ -29,6 +29,33 @@ prefilter 有候選時，閘門會再跑同目錄的 `hardfilter.py`，把確定
 
 「停開新倉」（當日虧損 7%）同一天只叫醒一次。「全平旗標」（30%）則每一輪都叫醒。
 
+## 幣安 429／418 時才重試 prefilter
+
+prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠結束碼重試**。閘門只在 stdout 或 stderr 認得出 429 或 418 時，才把整支 prefilter 再跑，最多再 2 次（一共最多 3 次）。其他失敗維持原來的 `prefilter_failed`，不重試。
+
+認得出的寫法只有這三種：
+
+- `rate_limited: 429` 或 `rate_limited: 418`。部署中的 public prefilter（`/Users/frank/quantboy-paper/discretionary/prefilter.py`，不在本倉庫、這次也不改）和本倉 `src/prefilter.py` 都是這句。11/10 21:01 的 `prefilter_log` 原文是 `rate_limited: 429 on /fapi/v1/klines`。
+- `429 on /fapi/`、`418 on /fapi/`。這是上面那支在丟出例外時的訊息本身。
+- `HTTP 429`、`HTTP Error 429`、`HTTP 418`、`HTTP Error 418`。這是 urllib 沒被接住、traceback 印在 stderr 時的寫法。
+
+沒有這些字樣（例如只有 `HTTPError`、`timeout after 429ms`、401、逾時、結束碼 2 但輸出是空的）不重試。
+
+沒有可用的 Retry-After 時，兩次重試分別等 5 秒、15 秒。stdout／stderr 若有 `Retry-After: <正數秒>` 就改等那個秒數。目前這支 prefilter 的錯誤 JSON **沒有**帶 Retry-After，所以實際多半是 5 秒和 15 秒。`Retry-After: 0` 或不是數字，也改走 5／15 秒。
+
+兩道上限，超過就**不再等，也不再打下一發**，直接走原來的失敗路徑：
+
+| 上限 | 秒 | 超過時 |
+|---|---|---|
+| 單次等待 | 45 | Retry-After 大於 45 就不等 |
+| 累計等待 | 60 | 再等會讓累計超過 60 就不等 |
+
+重試後仍失敗：WAKE，理由仍是 `prefilter_failed`，並多一個 `prefilter_retries=N`（N 是實際等到的次數）。重試後成功：照原來的規則決定 QUIET 或 WAKE，不因為重試過就叫醒。
+
+`gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`，成功時是 null）。
+
+平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。30 分鐘排程、60 秒 watch、新鮮度上限都沒有改。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
+
 ## 在 Mac 上安裝
 
 ```bash

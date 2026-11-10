@@ -159,10 +159,12 @@ class BlacklistAndRunTest(unittest.TestCase):
         with self.assertRaises(hf.RateLimited):
             hf.run({"candidates": [{"symbol": "XUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}]}, limited, T0)
 
-    def main_out(self, stdin_text, argv=None):
+    def main_out(self, stdin_text, argv=None, sleep=None):
         buf = io.StringIO()
+        if sleep is None:
+            sleep = lambda _s: None
         with mock.patch("sys.stdout", buf):
-            code = hf.main(argv or [], stdin=io.StringIO(stdin_text))
+            code = hf.main(argv or [], stdin=io.StringIO(stdin_text), sleep=sleep)
         return code, json.loads(buf.getvalue().strip().splitlines()[-1])
 
     def test_main_429_exits_2(self):
@@ -242,6 +244,202 @@ class ReplayEquivalenceTest(unittest.TestCase):
         self.assertTrue(all(r["consistent"] for r in rows), [r for r in rows if not r["consistent"]])
         quiet_now = [r["time"] for r in rounds if r["before"].startswith("WAKE") and r["after"].startswith("QUIET")]
         self.assertEqual(quiet_now, ["20:30", "22:28", "23:06"])
+
+
+CLOSED = [T0, "1", "2", "0.5", "1.5", "111", T0 + M15 - 1, "999", 5, "0", "0", "0"]
+
+
+class _Body:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def http_error(code, retry_after=None):
+    headers = {}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    return urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/klines", code, "err", headers, None)
+
+
+class KlineRateLimitRetryTest(unittest.TestCase):
+    def setUp(self):
+        self.sleeps = []
+        self.calls = 0
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+    def fetch(self, urlopen):
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen), \
+                mock.patch("hardfilter.time.sleep", side_effect=AssertionError("不該真的 sleep")):
+            return hf.fetch_klines("XUSDT", "15m", 2, end_ms=T0 + M15, sleep=self.sleep)
+
+    def main_with(self, urlopen, text, sleep=None):
+        buf = io.StringIO()
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen), mock.patch("sys.stdout", buf), \
+                mock.patch("hardfilter.time.sleep", side_effect=AssertionError("不該真的 sleep")):
+            code = hf.main([], stdin=io.StringIO(text), sleep=self.sleep if sleep is None else sleep)
+        line = buf.getvalue().strip().splitlines()[-1]
+        return code, json.loads(line)
+
+    def test_agreed_caps_fit_under_gate_timeout(self):
+        self.assertEqual(hf.HARDFILTER_MAX_RETRIES, 2)
+        self.assertEqual(hf.HARDFILTER_BACKOFF_S, (2.0, 6.0))
+        self.assertEqual(hf.HARDFILTER_WAIT_CAP_S, 8.0)
+        self.assertEqual(hf.HARDFILTER_TOTAL_WAIT_CAP_S, 15.0)
+        self.assertEqual(hf.REQUEST_TIMEOUT_S, 10)
+        # 3 次請求都打滿逾時，再加上累計等待，仍要比 gate 的 60 秒少約 15 秒。
+        worst = (hf.HARDFILTER_MAX_RETRIES + 1) * hf.REQUEST_TIMEOUT_S + hf.HARDFILTER_TOTAL_WAIT_CAP_S
+        self.assertLessEqual(worst, 60 - 15)
+        self.assertLessEqual(sum(hf.HARDFILTER_BACKOFF_S), hf.HARDFILTER_TOTAL_WAIT_CAP_S)
+        self.assertTrue(all(step <= hf.HARDFILTER_WAIT_CAP_S for step in hf.HARDFILTER_BACKOFF_S))
+
+    def test_429_then_success(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise http_error(429)
+            return _Body([CLOSED])
+        bars = self.fetch(urlopen)
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(self.sleeps, [2.0])
+        self.assertEqual(bars[0]["v"], 999.0)
+        # 同一種 429 後成功，再走 main，確認結束碼 0 且 JSON 帶重試次數。
+        self.calls = 0
+        self.sleeps = []
+        code, out = self.main_with(
+            urlopen,
+            json.dumps({"candidates": [{"symbol": "XUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}]}),
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["rate_limit_retries"], 1)
+        self.assertEqual(out["rate_limit_wait_s"], 2.0)
+        self.assertEqual(out["rate_limit_waits_s"], [2.0])
+        self.assertIsNone(out["rate_limit_stopped"])
+        self.assertEqual(self.sleeps, [2.0])
+
+    def test_418_then_success(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise http_error(418)
+            return _Body([CLOSED])
+        self.fetch(urlopen)
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(self.sleeps, [2.0])
+
+    def test_retries_exhausted_exits_2(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            raise http_error(429)
+        code, out = self.main_with(
+            urlopen,
+            json.dumps({"candidates": [{"symbol": "XUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"}]}),
+        )
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])
+        self.assertIn("rate_limited", out["error"])
+        self.assertIn("429", out["error"])
+        self.assertEqual(self.calls, 3)
+        self.assertEqual(self.sleeps, [2.0, 6.0])
+        self.assertEqual(out["rate_limit_retries"], 2)
+        self.assertEqual(out["rate_limit_wait_s"], 8.0)
+        self.assertEqual(out["rate_limit_stopped"], "retries_exhausted")
+
+    def test_retry_after_is_honored(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise http_error(429, retry_after=3)
+            return _Body([CLOSED])
+        self.fetch(urlopen)
+        self.assertEqual(self.sleeps, [3.0])
+        self.assertEqual(self.calls, 2)
+
+    def test_retry_after_zero_uses_backoff(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise http_error(429, retry_after=0)
+            return _Body([CLOSED])
+        self.fetch(urlopen)
+        self.assertEqual(self.sleeps, [2.0])
+
+    def test_retry_after_over_single_cap_does_not_wait(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            raise http_error(418, retry_after=9)
+        with self.assertRaises(hf.RateLimited):
+            self.fetch(urlopen)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_total_wait_cap_stops_before_the_next_sleep(self):
+        def urlopen(_req, timeout=None):
+            self.calls += 1
+            raise http_error(429, retry_after=8)
+        with self.assertRaises(hf.RateLimited):
+            self.fetch(urlopen)
+        # 第一次 8 秒剛好等於單次上限；第二次 8+8 超過累計 15 秒，不等。
+        self.assertEqual(self.sleeps, [8.0])
+        self.assertEqual(self.calls, 2)
+
+    def test_http_500_and_url_error_do_not_retry(self):
+        def denied(_req, timeout=None):
+            self.calls += 1
+            raise http_error(500)
+        with self.assertRaises(hf.DataError):
+            self.fetch(denied)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.sleeps, [])
+
+        self.calls = 0
+        def broken(_req, timeout=None):
+            self.calls += 1
+            raise urllib.error.URLError("timed out")
+        with self.assertRaises(hf.DataError):
+            self.fetch(broken)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_process_budget_is_shared_across_symbols(self):
+        """整輪最多再試 2 次。前兩個幣各用掉一次之後，第三個 429 不再等。"""
+        symbols = []
+
+        def urlopen(req, timeout=None):
+            self.calls += 1
+            symbols.append(req.full_url)
+            # 每個幣第一次 429，第二次成功；第三個幣不該有第二次。
+            so_far = symbols.count(req.full_url)
+            if "CUSDT" in req.full_url:
+                raise http_error(429)
+            if so_far == 1:
+                raise http_error(429)
+            return _Body([CLOSED])
+
+        text = json.dumps({"candidates": [
+            {"symbol": "AUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"},
+            {"symbol": "BUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"},
+            {"symbol": "CUSDT", "setup": "瘸師弟", "bar": "11-10 22:45"},
+        ]})
+        code, out = self.main_with(urlopen, text)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.sleeps, [2.0, 2.0])
+        self.assertEqual(out["rate_limit_retries"], 2)
+        self.assertEqual(out["rate_limit_wait_s"], 4.0)
+        self.assertEqual(out["rate_limit_stopped"], "retries_exhausted")
+        self.assertTrue(any("CUSDT" in url for url in symbols))
+        self.assertEqual(sum(1 for url in symbols if "CUSDT" in url), 1)
 
 
 if __name__ == "__main__":

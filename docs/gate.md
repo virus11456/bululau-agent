@@ -57,7 +57,7 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 
 重試後仍失敗：WAKE，理由仍是 `prefilter_failed`，並多一個 `prefilter_retries=N`（N 是實際等到的次數；一次都還沒等到就只有 `prefilter_failed`）。重試後成功：照原來的規則決定 QUIET 或 WAKE，不因為重試過就叫醒。
 
-`gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`，成功時是 null）。
+`gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`、`budget_exhausted`，成功時是 null）。
 
 平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。30 分鐘排程、60 秒 watch、新鮮度上限都沒有改。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
 

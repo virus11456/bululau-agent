@@ -70,7 +70,7 @@ AI 在 20:30 與 21:29 兩輪用的是 prefilter 的 `target` 欄。那個價是
 
 這支一開始就記下 t0。每次要睡之前，剩餘時間（60 秒減掉已經過的）必須蓋過「這次等待 + 一次請求逾時 10 秒 + 餘裕 5 秒」。不夠就不等，結束碼 2，gate 走 `hardfilter_failed`（fail-open，候選全部留下）。沒有一個固定的「最壞約 45 秒」：請求本身會吃掉這 60 秒，能不能再等，只看當下還剩多少。正常沒有 429／418 時，請求次數不變。
 
-失敗的那一行 JSON 會帶 `rate_limit_retries`、`rate_limit_wait_s`、`rate_limit_waits_s`、`rate_limit_stopped`（`retries_exhausted` 或 `wait_cap`）。重試後成功也帶前三個，`rate_limit_stopped` 是 null。
+失敗的那一行 JSON 會帶 `rate_limit_retries`、`rate_limit_wait_s`、`rate_limit_waits_s`、`rate_limit_stopped`（`retries_exhausted`、`wait_cap` 或 `budget_exhausted`）。重試後成功也帶前三個，`rate_limit_stopped` 是 null。
 
 ## 部署計畫（總經理boy 審過後才做）
 

@@ -10,11 +10,13 @@
 
 | 檔案 | Mac 原路徑 | Mac 原檔 sha1 | Mac 原檔 sha256 | repo 路徑 | repo 檔 sha1 | repo 檔 sha256 |
 |---|---|---|---|---|---|---|
-| `prefilter.py` | `/Users/frank/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` | `backups/mac/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` |
+| `prefilter.py` | `/Users/frank/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` | `backups/mac/quantboy-paper/discretionary/prefilter.py` | `7668d8f573713f32765166e6045e369c73705938` | `5708df9665c58a2b4b33225182421f4d07240a95084ee6dd0206e388e0b9a2ec` |
 | `common.py` | `/Users/frank/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` | `backups/mac/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` |
-| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `0032025b93b9316559eb9c9bafcf18454d14a552` | `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06` | `backups/mac/quantboy-gate/full_prompt.md` | `d35dc44e84fe555c468bd2066060168d4afebb82` | `784f5296ecafe01a0d3721b157d004cb89fcd32a33ae2e7c3ce0cba57c567dd9` |
+| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `0032025b93b9316559eb9c9bafcf18454d14a552` | `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06` | `backups/mac/quantboy-gate/full_prompt.md` | `5820c73c5b3a1721ec4101c41a175d22aa034a13` | `4784aae42d5d269098e47cf357a2853742e9957d0934bf453540cde3402403a7` |
 
-`prefilter.py` 原檔與 repo 檔逐位元組相同，12703 bytes。`common.py` 也是逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID，不需遮蔽。`full_prompt.md` 的 Mac 原檔是 2663 bytes；放進 repo 的是遮蔽版，2678 bytes，所以原檔雜湊與 repo 檔雜湊不同。遮蔽版相對原檔只改了下面兩處，其餘一字不改。三份都查過，沒有 API 金鑰、token、密碼。
+`common.py` 仍與 Mac 原檔逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID。`prefilter.py` 的 Mac 原檔是 12703 bytes；本 PR 改了瘸師弟長黑門檻之後，repo 檔不再等於 Mac 原檔。`full_prompt.md` 的 Mac 原檔是 2663 bytes；放進 repo 的是遮蔽版。遮蔽只動餘額與機器 ID。本 PR 再只改第 2 行的瘸師弟那一句，第 5 行 decision_log 留著。三份都查過，沒有 API 金鑰、token、密碼。
+
+Mac 上的檔在套 `deploy/pr15/` 之前，仍是上表「Mac 原檔」那一欄。`common.py` 沒有改。
 
 ## full_prompt.md 遮蔽了哪兩處
 
@@ -45,18 +47,22 @@ shasum -a 1 /Users/frank/quantboy-paper/discretionary/common.py
 shasum -a 1 ~/quantboy-gate/full_prompt.md
 ```
 
-`prefilter.py` 應等於 `c88941327c37af7e7e1593562458d0b16eea19fd`。`common.py` 應等於 `09463cbe52d279c02bbad04bd0650aee5a03bdf9`。`full_prompt.md` 應等於遮蔽前的 `0032025b93b9316559eb9c9bafcf18454d14a552`。sha256 同樣用 `shasum -a 256 <路徑>`，對上表的 sha256。舊版 `~/quantboy-gate/full_prompt.md.bak.20261111193428` 的 sha1 應仍是 `e9c573e06b7a097e71f5167bda8bb5040045c31d`。
+套 `deploy/pr15/` 之前：`prefilter.py` 應等於 `c88941327c37af7e7e1593562458d0b16eea19fd`。`common.py` 應等於 `09463cbe52d279c02bbad04bd0650aee5a03bdf9`。`full_prompt.md` 應等於 `0032025b93b9316559eb9c9bafcf18454d14a552`（2663 bytes，含第 5 行 decision_log）。舊版 `~/quantboy-gate/full_prompt.md.bak.20261111193428` 的 sha1 應仍是 `e9c573e06b7a097e71f5167bda8bb5040045c31d`。
 
-在本倉庫對快照本身：
+`deploy/pr15/full_prompt.md.patch` 沒有上下文，只換第 2 行的瘸師弟那一句，不含檔尾，所以第 5 行留在原處。
+
+套 patch 之後：`prefilter.py` 應等於 `7668d8f573713f32765166e6045e369c73705938`（這份沒有遮蔽，和 repo 檔相同）。`full_prompt.md` 的 Mac 原檔因為第 1 行仍是未遮蔽的餘額與機器 ID，而且第 5 行 decision_log 還在，sha 不會等於 repo 遮蔽版。`common.py` 不變。
+
+在本倉庫對現在這三個檔：
 
 ```bash
 sha1sum backups/mac/quantboy-paper/discretionary/prefilter.py backups/mac/quantboy-paper/discretionary/common.py backups/mac/quantboy-gate/full_prompt.md
 ```
 
-應分別等於 `c88941327c37af7e7e1593562458d0b16eea19fd`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `d35dc44e84fe555c468bd2066060168d4afebb82`。
+應分別等於 `7668d8f573713f32765166e6045e369c73705938`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `5820c73c5b3a1721ec4101c41a175d22aa034a13`。
 
 ## 測試與 import
 
 `backups/` 不是執行來源，也不是 Python 套件（底下沒有 `__init__.py`）。現有程式只把 `src/` 或 `tests/` 放進 `sys.path`，不會 import 這裡。
 
-現有測試用 `python3 -m unittest discover`，預設只收集檔名符合 `test*.py` 的模組。`backups/` 裡沒有這種檔，收集時不會載入 `prefilter.py` 或 `common.py`。pytest 預設只收集 `test_*.py` 與 `*_test.py`，同樣不會把這兩個檔當成測試匯入。
+`python3 -m unittest discover` 會收集 `tests/test_mac_prefilter_kuai.py`。那個測試把 `backups/mac/quantboy-paper/discretionary` 加進 `sys.path`，只呼叫瘸師弟的長黑判斷，並把 `common.get`、`common.klines` 換成會失敗的函式。`backups/` 仍然不是實盤執行來源。

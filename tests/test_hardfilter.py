@@ -37,40 +37,80 @@ class KuaiTest(unittest.TestCase):
         flat = [(100, 100, 10)] * 30
         return bars(flat + tail, M15)
 
-    def cand(self, k, idx, big=False):
-        return {"symbol": "XUSDT", "setup": "瘸師弟", "bar": label(k[idx]["t"]), "big": big}
+    def cand(self, k, idx, symbol="XUSDT"):
+        return {"symbol": symbol, "setup": "瘸師弟", "bar": label(k[idx]["t"])}
 
-    def test_single_long_black_blocked(self):
-        k = self.k15([(100, 100.5, 10), (100, 95, 50), (95, 96, 10)])
-        v, why = hf.rule_kuai_consecutive_blacks(self.cand(k, 31), k, k[-1]["ct"] + 1)
+    def ref(self, k):
+        return k[-1]["ct"] + 1
+
+    def test_btc_eth_single_2pct_passes_1_9_blocks(self):
+        # 收黑 (o/c-1)。102→100 是 2%；101.9→100 是 1.9%。量 40 / 前均量 10 = 4 倍。
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            k = self.k15([(102, 100, 40)])
+            v, why = hf.rule_kuai_long_black(self.cand(k, 30, symbol), k, self.ref(k))
+            self.assertEqual(v, "pass", (symbol, why))
+            k = self.k15([(101.9, 100, 40)])
+            v, why = hf.rule_kuai_long_black(self.cand(k, 30, symbol), k, self.ref(k))
+            self.assertEqual(v, "block", (symbol, why))
+            self.assertIn("不是單根長黑", why)
+
+    def test_small_coin_single_4pct_passes_3_9_blocks(self):
+        k = self.k15([(104, 100, 40)])
+        v, why = hf.rule_kuai_long_black(self.cand(k, 30), k, self.ref(k))
+        self.assertEqual(v, "pass", why)
+        k = self.k15([(103.9, 100, 40)])
+        v, why = hf.rule_kuai_long_black(self.cand(k, 30), k, self.ref(k))
         self.assertEqual(v, "block", why)
+        self.assertIn("不是單根長黑", why)
+        # 24h 成交額很大的小幣也不適用 2%
+        k = self.k15([(102, 100, 40)])
+        c = self.cand(k, 30, "SOLUSDT")
+        c["big"] = True
+        self.assertEqual(hf.rule_kuai_long_black(c, k, self.ref(k))[0], "block")
 
-    def test_two_consecutive_long_blacks_pass(self):
-        for tail, idx in (([(100, 95.5, 20), (95.5, 91, 50)], 31), ([(100, 95, 50), (95, 91, 20)], 30)):
-            k = self.k15(tail)
-            v, _ = hf.rule_kuai_consecutive_blacks(self.cand(k, idx), k, k[-1]["ct"] + 1)
-            self.assertEqual(v, "pass")
+    def test_neighbors_do_not_matter(self):
+        # 前後都是紅 K，訊號本身 4% 且爆量，單根就過
+        k = self.k15([(100, 101, 10), (104, 100, 40), (100, 101, 10)])
+        v, why = hf.rule_kuai_long_black(self.cand(k, 31), k, self.ref(k))
+        self.assertEqual(v, "pass", why)
 
-    def test_small_coin_threshold_is_4pct_big_is_2pct(self):
-        k = self.k15([(100, 97, 20), (97, 92, 50)])  # 前一根黑約 3.1%
-        self.assertEqual(hf.rule_kuai_consecutive_blacks(self.cand(k, 31, big=False), k, k[-1]["ct"] + 1)[0], "block")
-        self.assertEqual(hf.rule_kuai_consecutive_blacks(self.cand(k, 31, big=True), k, k[-1]["ct"] + 1)[0], "pass")
-        c = self.cand(k, 31); c.pop("big")  # 欄位缺 → 用較寬的 2%
-        self.assertEqual(hf.rule_kuai_consecutive_blacks(c, k, k[-1]["ct"] + 1)[0], "pass")
+    def test_long_black_without_volume_blocks(self):
+        k = self.k15([(104, 100, 29)])  # 4% 長黑，29/10 = 2.9 倍
+        v, why = hf.rule_kuai_long_black(self.cand(k, 30), k, self.ref(k))
+        self.assertEqual(v, "block", why)
+        self.assertIn("爆量不足", why)
+
+    def test_volume_without_long_black_blocks(self):
+        k = self.k15([(100, 100.5, 50)])  # 收紅，量 5 倍
+        v, why = hf.rule_kuai_long_black(self.cand(k, 30), k, self.ref(k))
+        self.assertEqual(v, "block", why)
+        self.assertIn("不是單根長黑", why)
+
+    def test_either_lookback_reaches_3x(self):
+        # 前 10 根安靜（量 10）、更早的 10 根很大：前 10 達 3 倍、前 20 不到，仍算有爆量
+        spec = [(100, 100, 100)] * 20 + [(100, 100, 10)] * 10 + [(104, 100, 30)]
+        k = bars(spec, M15)
+        v, why = hf.rule_kuai_long_black(self.cand(k, 30), k, self.ref(k))
+        self.assertEqual(v, "pass", why)
 
     def test_uncertain_cases_keep(self):
-        k = self.k15([(100, 95, 50)])
-        ref = k[-1]["ct"] + 1
+        k = self.k15([(104, 100, 40)])
+        ref = self.ref(k)
         for cand, kk in (
-            ({"symbol": "XUSDT", "setup": "瘸師弟", "bar": "99-99 99:99", "big": False}, k),
-            ({"symbol": "XUSDT", "setup": "瘸師弟", "big": False}, k),
-            ({"symbol": "XUSDT", "setup": "瘸師弟", "bar": label(T0 + 500 * M15), "big": False}, k),
-            (self.cand(k, 29), k),  # 29 是平的 K，重算不是長黑
+            ({"symbol": "XUSDT", "setup": "瘸師弟", "bar": "99-99 99:99"}, k),
+            ({"symbol": "XUSDT", "setup": "瘸師弟"}, k),
+            ({"symbol": "XUSDT", "setup": "瘸師弟", "bar": label(T0 + 500 * M15)}, k),
+            ({"setup": "瘸師弟", "bar": label(k[30]["t"])}, k),
             (self.cand(k, 30), None),
             (self.cand(k, 30), k[:2]),
         ):
             with self.subTest(cand=cand):
-                self.assertEqual(hf.rule_kuai_consecutive_blacks(cand, kk, ref)[0], "uncertain")
+                self.assertEqual(hf.rule_kuai_long_black(cand, kk, ref)[0], "uncertain")
+
+    def test_flat_signal_bar_is_blocked_not_uncertain(self):
+        k = self.k15([(104, 100, 40)])
+        v, why = hf.rule_kuai_long_black(self.cand(k, 29), k, self.ref(k))
+        self.assertEqual(v, "block", why)
 
 
 class BuluTest(unittest.TestCase):
@@ -234,16 +274,31 @@ class ReplayEquivalenceTest(unittest.TestCase):
     def test_default_blocks_hard_rule_rejections_except_documented_rr_target_cases(self):
         rows, rounds = replay_hardfilter.replay("prior_high")
         missed = [(r["time"], r["symbol"]) for r in rows if r["ai_hard"] and r["new"] != "擋"]
-        # 這兩筆 AI 用 prefilter 的 2R 截斷 target 算 RR；以前高算 RR 約 2.6，屬目標價定義待確認，放行給 AI。
-        self.assertEqual(missed, [("20:30", "MERLUSDT"), ("21:29", "MERLUSDT")])
+        # MERL 這兩筆：AI 用 prefilter 的 2R 截斷 target 算 RR；以前高算約 2.6，目標價定義待確認，放行給 AI。
+        # 2026-11-11 起瘸師弟改單根長黑。PLAY／BULLA／ARIA／CYBER 不再因「只有 1 根」被擋，交給 AI。
+        # AIN、CAP 仍被黑名單擋，所以不在這份放行清單。
+        self.assertEqual(missed, [
+            ("15:04", "PLAYUSDT"),
+            ("19:30", "BULLAUSDT"),
+            ("19:30", "ARIAUSDT"),
+            ("20:30", "CYBERUSDT"),
+            ("20:30", "MERLUSDT"),
+            ("21:29", "MERLUSDT"),
+        ])
         quiet_now = [r["time"] for r in rounds if r["before"].startswith("WAKE") and r["after"].startswith("QUIET")]
         self.assertEqual(quiet_now, ["22:28", "23:06"])
 
-    def test_plan_target_mode_matches_ai_fully(self):
+    def test_plan_target_mode_matches_ai_except_single_black(self):
         rows, rounds = replay_hardfilter.replay("plan_target")
-        self.assertTrue(all(r["consistent"] for r in rows), [r for r in rows if not r["consistent"]])
+        released = sorted((r["time"], r["symbol"]) for r in rows if not r["consistent"])
+        self.assertEqual(released, [
+            ("15:04", "PLAYUSDT"),
+            ("19:30", "ARIAUSDT"),
+            ("19:30", "BULLAUSDT"),
+            ("20:30", "CYBERUSDT"),
+        ])
         quiet_now = [r["time"] for r in rounds if r["before"].startswith("WAKE") and r["after"].startswith("QUIET")]
-        self.assertEqual(quiet_now, ["20:30", "22:28", "23:06"])
+        self.assertEqual(quiet_now, ["22:28", "23:06"])
 
 
 CLOSED = [T0, "1", "2", "0.5", "1.5", "111", T0 + M15 - 1, "999", 5, "0", "0", "0"]

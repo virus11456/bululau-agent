@@ -2,7 +2,7 @@
 
 ## 2026-11-11（Mac 實盤檔唯讀快照）
 
-- 新增 `backups/mac/`：Mac 上實盤仍在讀的 `prefilter.py`，以及遮蔽帳戶餘額與機器 ID 後的 `full_prompt.md`。只做對照，不改程式，也不改 Mac 路徑。見 `backups/mac/README.md`。
+- 新增 `backups/mac/`：Mac 上實盤仍在讀的 `prefilter.py`、同目錄的 `common.py`，以及遮蔽帳戶餘額與機器 ID 後的 `full_prompt.md`。只做對照，不改程式，也不改 Mac 路徑。見 `backups/mac/README.md`。
 
 ## 2026-11-11（429／418 有上限的退避重試）
 

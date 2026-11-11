@@ -12,6 +12,9 @@
   WAKE   → 其他所有情況（有倉、有單、有候選、狀態變化、風控旗標、任何錯誤或看不懂）。
            後面附上三支命令的輸出，Grok 直接用，不必重跑。
 
+prefilter 只有在 stdout／stderr 辨識得出幣安 429 或 418 時才退避重試（最多再 2 次）。
+結束碼 2 也代表其他行情失敗，不能單靠結束碼重試。重試後仍失敗一樣 WAKE。
+
 結束碼：0 = QUIET，10 = WAKE。閘門本身出錯也一律 WAKE，絕不把未知當成空倉。
 讀取失敗、過期、前後矛盾、上一輪狀態不可信，都是 WAKE。
 只用標準庫，Python 3.8+。不讀金鑰、不改 live_trader 的檔案、不自己下單。
@@ -36,6 +39,28 @@ STATUS_TIMEOUT_S = 90
 PREFILTER_TIMEOUT_S = 240
 # hardfilter 只在有候選時跑，只會減少候選。它在新鮮度檢查時間點之後才跑，所以不影響 READING_MAX_AGE。
 HARDFILTER_TIMEOUT_S = 60
+# prefilter 因 429／418 失敗才重試。結束碼 2 同時是限流與其他行情失敗，不能當辨識依據。
+# 最多再試 2 次（一共最多 3 次呼叫）。沒有可用的 Retry-After 就等 5 秒、再 15 秒。
+# 單次等待超過 45 秒，或累計睡眠會超過 60 秒：不等、也不再打下一發，直接走原本的失敗路徑。
+# 另外，重試帶來的額外牆鐘（從第一次辨識到 429／418 起算，不含第一次呼叫本身）最多 120 秒。
+# 第一次呼叫逾時維持 240 秒。進入重試後，每次逾時 = min(240, 剩餘的 120 秒預算)。
+# 剩餘 <= 0，或剩餘蓋不住這次等待（下一發會沒有時間），就不再重試，記 budget_exhausted。
+PREFILTER_MAX_RETRIES = 2
+PREFILTER_BACKOFF_S = (5.0, 15.0)
+PREFILTER_WAIT_CAP_S = 45.0
+PREFILTER_TOTAL_WAIT_CAP_S = 60.0
+PREFILTER_RETRY_WALL_S = 120.0
+# 部署中的 public prefilter（與 src/prefilter.py）失敗時印：
+#   {"error": "rate_limited: 429 on /fapi/v1/klines", ...}  結束碼 2
+# 11/10 21:01 的 prefilter_log 原文就是 "rate_limited: 429 on /fapi/v1/klines"。
+# 第三種是 urllib 沒被接住時的 "HTTP Error 429"。沒有這些字樣就不重試。
+_PREFILTER_RATE_LIMIT_RE = re.compile(
+    r"rate_limited:\s*(429|418)\b"
+    r"|\b(429|418)\s+on\s+/fapi/"
+    r"|HTTP(?:\s*Error)?\s+(429|418)\b",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_RE = re.compile(r"retry-after\s*[:=]\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 # status 的「時間」只印到分鐘，解析成該分鐘的 00 秒，年齡最多被多算不滿 1 分鐘。
 STATUS_MINUTE_TRUNCATION_S = 60
 # 待擁有者確認的餘裕。不是停損、倉位、下單或 30 分鐘排程的參數。
@@ -360,7 +385,156 @@ def decide(manage, status_run, status, prefilter_run, prefilter, previous, today
     return (not reasons), reasons
 
 
-def main(argv=None, runner=run_cmd, clock=now_tpe):
+def _combined_output(result):
+    return "{0}\n{1}".format(result.get("stdout") or "", result.get("stderr") or "")
+
+
+def identify_prefilter_rate_limit(result):
+    """從 prefilter 的 stdout／stderr 讀 429 或 418。讀不到回 None。
+
+    結束碼不夠：2 同時是限流和其他例外。只認上面常數註解裡的三種寫法。
+    """
+    if not isinstance(result, dict):
+        return None
+    match = _PREFILTER_RATE_LIMIT_RE.search(_combined_output(result))
+    if not match:
+        return None
+    for group in match.groups():
+        if group:
+            return int(group)
+    return None
+
+
+def prefilter_retry_after(result):
+    """stdout／stderr 裡最後一個正數的 Retry-After（秒）。沒有、不是數字、或 ≤ 0 就回 None。
+
+    部署中的 prefilter 目前不會印這個 header；沒有時改走 PREFILTER_BACKOFF_S。
+    """
+    if not isinstance(result, dict):
+        return None
+    found = None
+    for match in _RETRY_AFTER_RE.finditer(_combined_output(result)):
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            found = value
+    return found
+
+
+def prefilter_retry_wait(retry_index, retry_after, waited):
+    """第 retry_index 次重試（從 1 起）要睡幾秒。不該等就回 None，呼叫端直接走失敗路徑。"""
+    if retry_index > PREFILTER_MAX_RETRIES or retry_index < 1:
+        return None
+    if retry_after is None:
+        wait = float(PREFILTER_BACKOFF_S[retry_index - 1])
+    else:
+        wait = float(retry_after)
+    if wait > PREFILTER_WAIT_CAP_S:
+        return None
+    if waited + wait > PREFILTER_TOTAL_WAIT_CAP_S:
+        return None
+    return wait
+
+
+def _retry_wall_remaining(retry_t0, monotonic):
+    """距離 120 秒額外預算還剩幾秒。retry_t0 是第一次 429／418 辨識到的時刻。"""
+    if retry_t0 is None:
+        return PREFILTER_RETRY_WALL_S
+    return PREFILTER_RETRY_WALL_S - (monotonic() - retry_t0)
+
+
+def run_prefilter_with_retry(runner, argv, cwd, sleep, monotonic=None):
+    """呼叫 prefilter。只有辨識為 429／418 才退避重試，最多再 2 次。
+
+    牆鐘從第一次辨識到 429／418 起算，不含第一次呼叫。因此重試的等待與後續呼叫
+    合計不超過 PREFILTER_RETRY_WALL_S（120 秒）。第一次呼叫逾時仍是 240 秒。
+
+    回傳最後一次的執行結果，並附上 rate_limit_* 欄位給 gate_log。
+    monotonic 與 sleep 可注入；測試時 sleep 要推進同一支 monotonic。
+    """
+    if monotonic is None:
+        monotonic = time.monotonic
+    waits = []
+    limited = False
+    stopped = None
+    attempts = 0
+    result = {"code": None, "stdout": "", "stderr": ""}
+    retry_t0 = None
+    for attempt in range(1, PREFILTER_MAX_RETRIES + 2):
+        if retry_t0 is None:
+            timeout = PREFILTER_TIMEOUT_S
+        else:
+            remaining = _retry_wall_remaining(retry_t0, monotonic)
+            if remaining <= 0:
+                stopped = "budget_exhausted"
+                break
+            timeout = min(float(PREFILTER_TIMEOUT_S), remaining)
+        attempts = attempt
+        result = dict(runner(argv, timeout, cwd=cwd, lock_retries=0) or {})
+        if parse_prefilter(result) is not None or identify_prefilter_rate_limit(result) is None:
+            break
+        limited = True
+        if attempt > PREFILTER_MAX_RETRIES:
+            stopped = "retries_exhausted"
+            break
+        wait = prefilter_retry_wait(len(waits) + 1, prefilter_retry_after(result), sum(waits))
+        if wait is None:
+            stopped = "wait_cap"
+            break
+        if retry_t0 is None:
+            retry_t0 = monotonic()
+        remaining = _retry_wall_remaining(retry_t0, monotonic)
+        # 預估所需是這次等待。剩餘比等待還少（或已 <= 0）時，下一發逾時會是 0，不再重試。
+        if remaining <= 0 or remaining <= wait:
+            stopped = "budget_exhausted"
+            break
+        sleep(wait)
+        waits.append(wait)
+    result["rate_limit_limited"] = limited
+    result["rate_limit_attempts"] = attempts
+    result["rate_limit_retries"] = len(waits)
+    result["rate_limit_wait_s"] = round(sum(waits), 3)
+    result["rate_limit_waits_s"] = [round(item, 3) for item in waits]
+    result["rate_limit_stopped"] = stopped
+    return result
+
+
+def _last_json_dict(text):
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            body = json.loads(line)
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+    return None
+
+
+def hardfilter_retry_log(run):
+    """hardfilter stdout 最後一個 JSON 裡的重試統計。沒有就當 0。"""
+    body = _last_json_dict((run or {}).get("stdout"))
+    if not isinstance(body, dict):
+        return {"retries": 0, "wait_s": 0, "waits_s": [], "stopped": None}
+    retries = body.get("rate_limit_retries")
+    wait_s = body.get("rate_limit_wait_s")
+    waits = body.get("rate_limit_waits_s")
+    if type(retries) is not int or retries < 0:
+        retries = 0
+    if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)):
+        wait_s = 0
+    if not isinstance(waits, list):
+        waits = []
+    stopped = body.get("rate_limit_stopped")
+    if stopped is not None and not isinstance(stopped, str):
+        stopped = None
+    return {"retries": retries, "wait_s": wait_s, "waits_s": waits, "stopped": stopped}
+
+
+def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="省 token 閘門：空輪不叫 AI")
     ap.add_argument("--root", default=os.path.expanduser("~/quantboy-live"), help="live_trader.py 所在目錄")
@@ -372,6 +546,10 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
     ap.add_argument("--hardfilter", default=os.path.join(here, "hardfilter.py"),
                     help="硬條件篩選的路徑；寫 off 則不跑（回到只看 prefilter 的行為）")
     args = ap.parse_args(argv)
+    if sleep is None:
+        sleep = time.sleep
+    if monotonic is None:
+        monotonic = time.monotonic
 
     os.makedirs(args.state_dir, exist_ok=True)
     state_path = os.path.join(args.state_dir, "gate_state.json")
@@ -389,6 +567,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
     prefilter_run = {"code": None, "stdout": "", "stderr": ""}
     status = prefilter = None
     hardfilter_run = None
+    hf_retry = {"retries": 0, "wait_s": 0, "waits_s": [], "stopped": None}
     try:
         if args.no_manage:
             manage = {"code": 0, "stdout": "", "stderr": "", "skipped": True}
@@ -396,12 +575,19 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
             manage = runner([args.python, trader, "manage", "--live"], MANAGE_TIMEOUT_S, cwd=args.root)
         status_run = runner([args.python, trader, "status"], STATUS_TIMEOUT_S, cwd=args.root)
         status = parse_status(status_run.get("stdout")) if status_run.get("code") == 0 else None
-        prefilter_run = runner([args.python, prefilter_path, "--quiet"], PREFILTER_TIMEOUT_S, cwd=args.root, lock_retries=0)
+        prefilter_run = run_prefilter_with_retry(
+            runner, [args.python, prefilter_path, "--quiet"], args.root, sleep, monotonic,
+        )
         prefilter = parse_prefilter(prefilter_run)
         checked = clock()
         if prefilter is not None and args.hardfilter != "off":
             hardfilter_run = apply_hardfilter(prefilter, runner, args.python, args.hardfilter, args.root)
         quiet, reasons = decide(manage, status_run, status, prefilter_run, prefilter, previous, today, checked)
+        if "prefilter_failed" in reasons and prefilter_run.get("rate_limit_retries"):
+            reasons.append("prefilter_retries={0}".format(prefilter_run["rate_limit_retries"]))
+        hf_retry = hardfilter_retry_log(hardfilter_run)
+        if "hardfilter_failed" in reasons and hf_retry["retries"]:
+            reasons.append("hardfilter_retries={0}".format(hf_retry["retries"]))
     except Exception as exc:  # 閘門自己壞掉也只能叫 AI。已取得的輸出不要清掉。
         checked = clock()
         quiet, reasons = False, ["gate_error:{0}".format(type(exc).__name__)]
@@ -430,6 +616,13 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
             "reasons": reasons,
             "status": logged_status,
             "n_candidates": prefilter["n_candidates"] if prefilter else None,
+            "prefilter_retry": None if not prefilter_run.get("rate_limit_limited") else {
+                "attempts": prefilter_run.get("rate_limit_attempts"),
+                "retries": prefilter_run.get("rate_limit_retries"),
+                "wait_s": prefilter_run.get("rate_limit_wait_s"),
+                "waits_s": prefilter_run.get("rate_limit_waits_s"),
+                "stopped": prefilter_run.get("rate_limit_stopped"),
+            },
             "hardfilter": None if not prefilter or hardfilter_run is None else {
                 "failed": bool(prefilter.get("hardfilter_failed")),
                 "before": prefilter.get("n_candidates_before_hardfilter"),
@@ -437,6 +630,10 @@ def main(argv=None, runner=run_cmd, clock=now_tpe):
                     {"symbol": b.get("symbol"), "setup": b.get("setup"), "rule": b.get("blocked_by"), "why": b.get("why")}
                     for b in prefilter.get("hardfilter_blocked", [])
                 ],
+                "retries": hf_retry["retries"],
+                "wait_s": hf_retry["wait_s"],
+                "waits_s": hf_retry["waits_s"],
+                "stopped": hf_retry["stopped"],
             },
         })
     except OSError as exc:

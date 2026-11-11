@@ -37,10 +37,15 @@ MAJORS = {"BTCUSDT", "ETHUSDT"}
 # full_prompt.md：「布鹿流…爆量至少3倍」；strategy.md：「爆量至少是前量的 3 倍…【布神原文】是前 10–20 根平均量的 3–10 倍。3 倍是最低」
 BULU_VOL_X = 3.0
 BULU_VOL_LOOKBACKS = (10, 20)  # 原文「前 10–20 根」：兩種都算，任一種達 3 倍就算有（取寬，不加嚴）
-# full_prompt.md：「瘸師弟15m連2–3長黑」；strategy.md：「大幣長黑大約 2%，小幣 4–5% 以上」「15m 連續 2–3 根長黑」
-KUAI_MIN_CONSEC = 2
-KUAI_LONG_BLACK_BIG = 2.0    # %
-KUAI_LONG_BLACK_SMALL = 4.0  # %：原文 4–5%，取 4%（較寬，不加嚴）
+# user_notes2.txt：「長黑 = 瞬間單根較大跌勢，大幣（BTC、ETH）約 2–3%、小幣 4–5% 以上。」
+# 「爆量 + 長黑，缺一不可。」「爆量 = 平均量 N 倍（機器人用前 20 根平均判定，成交量是相對值不是絕對值）。」
+# four_strategies.md：「長黑為瞬間單根較大跌勢（大幣平均2%、小幣4-5%以上）」「爆量＋長黑，缺一不可」「爆量判定為平均量Ｎ倍」
+# 2026-11-11 使用者決定取範圍下緣：BTCUSDT／ETHUSDT 2%，其餘小幣 4%。不再要求連續 2–3 根。
+KUAI_LONG_BLACK_BIG = 2.0    # %：BTCUSDT、ETHUSDT。PDF 寫平均 2%，筆記寫約 2–3%，取 2%
+KUAI_LONG_BLACK_SMALL = 4.0  # %：其餘。原文 4–5% 以上，取 4%（較寬，不加嚴）
+# 爆量倍數與回看維持現狀，不改成別的 N、也不改成只看 20 根：前 10 或前 20 根均量，任一種達 3 倍即可
+KUAI_VOL_X = 3.0
+KUAI_VOL_LOOKBACKS = (10, 20)
 # strategy.md 11-03 補充：「黑名單維持不做：程式裡的 INITUSDT、EWZUSDT，以及 lessons 點名的 CAP、TAG、APR、BREV、XAN、AIN、DOOD、INIT」
 BLACKLIST_BASES = {"INIT", "EWZ", "CAP", "TAG", "APR", "BREV", "XAN", "AIN", "DOOD"}
 # 布鹿流 RR 的目標價。prior_high＝prefilter 自己算 rr 用的前高（原文「回檔離前高很近仍然可以進。過不了前高再出場」）。
@@ -232,42 +237,43 @@ def _bar_start_ms(label, ref_ms):
         return None
 
 
-def rule_kuai_consecutive_blacks(cand, k15, ref_ms):
-    """瘸師弟：訊號 K 必須和相鄰的已收 15m K 組成至少連 2 根長黑。
+def rule_kuai_long_black(cand, k15, ref_ms):
+    """瘸師弟：訊號 K 本身是瞬間單根長黑，而且爆量達標。兩者缺一不可。不看相鄰根數。
 
-    原文：full_prompt.md「瘸師弟15m連2–3長黑、訊號量至少前10–20根3倍」；
-    strategy.md「篩網：15m 連續 2–3 根長黑，而且量至少是前量的 3 倍」「大幣長黑大約 2%，小幣 4–5% 以上」。
-    訊號 K 本身的 3 倍量 prefilter 已驗。相鄰那根只看長黑幅度，不另要求 3 倍量（原文沒說每根都要，取寬）。
+    user_notes2.txt：「長黑 = 瞬間單根較大跌勢，大幣（BTC、ETH）約 2–3%、小幣 4–5% 以上。」
+    「爆量 + 長黑，缺一不可。」
+    four_strategies.md：「長黑為瞬間單根較大跌勢（大幣平均2%、小幣4-5%以上）」「爆量＋長黑，缺一不可」。
+    門檻看幣種，不看 prefilter 的 big：BTCUSDT／ETHUSDT 用 2%，其餘用 4%。
+    爆量倍數不改：訊號量 ≥ 前 10 根或前 20 根均量的 3 倍，任一種達標即可。
     """
-    if not k15 or len(k15) < 3:
+    if not k15:
         return "uncertain", "15m K 線不足"
+    sym = cand.get("symbol")
+    if not isinstance(sym, str) or not sym.endswith("USDT"):
+        return "uncertain", "symbol 讀不到"
     start = _bar_start_ms(cand.get("bar"), ref_ms)
     if start is None:
         return "uncertain", "訊號 K 時間讀不到"
     idx = next((i for i, b in enumerate(k15) if b["t"] == start), None)
     if idx is None:
         return "uncertain", "訊號 K 不在已收 K 線裡"
-    big = cand.get("big")
-    th = KUAI_LONG_BLACK_SMALL if big is False else KUAI_LONG_BLACK_BIG  # 欄位缺就用較寬的 2%
-    if black_pct(k15[idx]) < th:
-        return "uncertain", "訊號 K 重算不是長黑（資料與 prefilter 不一致）"
-    run = 1
-    j = idx - 1
-    while j >= 0 and black_pct(k15[j]) >= th:
-        run += 1
-        j -= 1
-    j = idx + 1
-    while j < len(k15) and black_pct(k15[j]) >= th:
-        run += 1
-        j += 1
-    if run >= KUAI_MIN_CONSEC:
+    th = KUAI_LONG_BLACK_BIG if sym in MAJORS else KUAI_LONG_BLACK_SMALL
+    pct = black_pct(k15[idx])
+    if pct + 1e-6 < th:
+        return "block", "不是單根長黑（收黑 {0:.2f}% < {1:g}%）".format(pct, th)
+    ratios = []
+    for n in KUAI_VOL_LOOKBACKS:
+        if idx < n:
+            continue
+        avg = sum(x["v"] for x in k15[idx - n:idx]) / n
+        if avg > 0:
+            ratios.append((n, k15[idx]["v"] / avg))
+    if not ratios:
+        return "uncertain", "爆量算不出來（前 10／20 根不足或均量為 0）"
+    if max(r for _n, r in ratios) + 1e-9 >= KUAI_VOL_X:
         return "pass", None
-    def desc(i):
-        if i < 0 or i >= len(k15):
-            return "尚未收／無"
-        b = black_pct(k15[i])
-        return "收黑 {0:.2f}%".format(b) if b > 0 else "收紅 {0:.2f}%".format(-b)
-    return "block", "只有 1 根長黑（長黑門檻 {0}%；前一根{1}、後一根{2}）".format(th, desc(idx - 1), desc(idx + 1))
+    detail = "、".join("前{0}根 {1:.2f} 倍".format(n, r) for n, r in ratios)
+    return "block", "長黑成立但爆量不足（{0}；要至少 3 倍）".format(detail)
 
 
 def rule_bulu_volume(cand, k1h):
@@ -326,8 +332,8 @@ def evaluate(cand, get_klines, ref_ms, rr_target=None):
     setup = cand.get("setup")
     if setup == "瘸師弟":
         k15 = get_klines(cand["symbol"], "15m", 60)
-        verdict, why = rule_kuai_consecutive_blacks(cand, k15, ref_ms)
-        details.append(("kuai_consecutive_blacks", verdict, why))
+        verdict, why = rule_kuai_long_black(cand, k15, ref_ms)
+        details.append(("kuai_long_black", verdict, why))
         if verdict == "block":
             return "block", details
     elif setup == "布鹿流":

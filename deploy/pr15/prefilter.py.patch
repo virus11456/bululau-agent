@@ -1,0 +1,24 @@
+--- a/prefilter.py
++++ b/prefilter.py
+@@ -33,9 +33,10 @@
+             return {"blocked": True, "why": f"BTC broke 20-bar low {lo:.0f} on {b['v']/av:.1f}x vol at {ts(b['t'])}"}
+     return {"blocked": False}
+ 
+-def kuai_shidi(k15, rs):
++def kuai_shidi(k15, rs, symbol):
+     """瘸師弟: strong coin, 15m volume spike + long black in last 2 bars -> ladder limit plan below prior low."""
+-    big = rs["big"]; body_min = 2.0 if big else 4.0
++    # 長黑＝瞬間單根較大跌勢（user_notes2.txt／four_strategies.md）。門檻取下緣：BTC、ETH 2%，其餘 4%。爆量仍是前 20 根均量的 3 倍。
++    big = rs["big"]; body_min = 2.0 if symbol in ("BTCUSDT", "ETHUSDT") else 4.0
+     for i in (-1, -2):
+         b = k15[i]; prior = k15[i - 20:i]
+         av = sum(x["v"] for x in prior) / 20
+@@ -180,7 +181,7 @@
+             (cands if c else near).append(dict(symbol=s, **(c or {"setup": "小師弟", "fail": why}), **rs))
+         strong = rs["rs24"] > 0 and rs["rs4h"] > -1
+         if strong and kuai_today() < 2:
+-            c = kuai_shidi(k, rs)
++            c = kuai_shidi(k, rs, s)
+             if c: cands.append(dict(symbol=s, **c, **rs))
+         fr = prem.get(s, 0)
+         hourly_extreme = fint.get(s) == 1 and abs(fr) >= 0.01 and not end

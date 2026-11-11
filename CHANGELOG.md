@@ -1,5 +1,15 @@
 # 變更紀錄
 
+## 2026-11-11（瘸師弟長黑改回布神原文：單根）
+
+使用者 19:19（台北）原話：「我們要模糊的正確 不要精準的錯誤」。19:23 原話：「prompt 和 quantboy-paper 的初篩都一起改成單根長黑，驗證審過再部署」「布神原版筆記怎麼寫就怎麼改」。
+
+- `src/hardfilter.py` R2：瘸師弟不再要求 15m 連續 2–3 根長黑。訊號 K 本身是單根長黑即可。BTCUSDT、ETHUSDT 門檻 2%，其餘小幣 4%。長黑與爆量仍須同時成立；爆量仍是前 10 或前 20 根均量的 3 倍，倍數不改。理由代碼由 `kuai_consecutive_blacks` 改為 `kuai_long_black`。
+- Mac 實盤快照 `backups/mac/quantboy-gate/full_prompt.md`：只改瘸師弟那一句，改成瞬間單根較大跌勢，並寫出 BTC／ETH 約 2–3%（程式取 2%）、小幣 4–5% 以上（程式取 4%）、長黑與爆量缺一不可。同一句裡的訊號量倍數、盲掛、停損、1.5R 全平沒有改。遮蔽的餘額與機器 ID 沒有動。
+- Mac 實盤快照 `backups/mac/quantboy-paper/discretionary/prefilter.py`：瘸師弟長黑門檻從「24 小時成交額達標的大幣 2%、否則 4%」改成「BTCUSDT／ETHUSDT 2%、其餘 4%」。原本就是最近兩根各自判斷，不是連續根數。爆量仍是前 20 根均量的 3 倍。階梯、停損、其他型態沒有改。
+- 倉庫 `src/prefilter.py` 沒有連續長黑邏輯，沒有改。`src/gate.py`、重試、盲掛、停損、出場、RR、風控、頻率、watch、下單流程沒有改。`docs/sources/` 沒有改。
+- 可套到 Mac 原檔的 diff 在 `deploy/pr15/`。`full_prompt.md.patch` 沒有上下文，只換第 2 行，不含檔尾。Mac 原檔套用前 sha1 應為 `0032025b93b9316559eb9c9bafcf18454d14a552`。repo 遮罩檔以含第 5 行 decision_log 的版本為底，只改第 2 行。還沒部署。
+
 ## 2026-11-11（同步 full_prompt.md 遮罩備份）
 
 2026-11-11 19:34（台北），使用者同意後，Mac 上的 `~/quantboy-gate/full_prompt.md` 在檔尾加了一個換行與一句話，呼叫 `decision_log.py`（Refs #13）。

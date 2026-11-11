@@ -2,7 +2,9 @@
 
 這是 2026-11-11 19:21（台北）從 Mac 抄下來的唯讀快照，給事後對照用。實盤仍讀 Mac 上的原路徑，路徑沒有改。執行、排程、閘門都不要改去讀 `backups/`。
 
-這次放三個檔。`common.py` 於 19:22（台北）補進同一份快照。沒有改 Mac 上的任何檔案。
+這次放三個檔。`common.py` 於 19:22（台北）補進同一份快照。`prefilter.py` 與 `common.py` 之後沒有再改。
+
+`full_prompt.md` 於 2026-11-11 19:34（台北）、使用者同意後，在 Mac 原檔檔尾加了一個換行與一句話，呼叫 `python3 ~/quantboy-gate/decision_log.py`。本倉庫只同步遮蔽版。Mac 舊版（sha1 `e9c573e06b7a097e71f5167bda8bb5040045c31d`，2223 bytes）已備份為 `~/quantboy-gate/full_prompt.md.bak.20261111193428`。
 
 ## 檔案與雜湊
 
@@ -10,9 +12,9 @@
 |---|---|---|---|---|---|---|
 | `prefilter.py` | `/Users/frank/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` | `backups/mac/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` |
 | `common.py` | `/Users/frank/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` | `backups/mac/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` |
-| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `e9c573e06b7a097e71f5167bda8bb5040045c31d` | `db9366fd031789d95191090b2504f494469c03da29c92def64f6e46959080e61` | `backups/mac/quantboy-gate/full_prompt.md` | `47074b5292626917177733e13942003c167518a3` | `8f47a892a916f6acfacf105f00c884ff99f673b1169ca7d88359b662737f7521` |
+| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `0032025b93b9316559eb9c9bafcf18454d14a552` | `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06` | `backups/mac/quantboy-gate/full_prompt.md` | `d35dc44e84fe555c468bd2066060168d4afebb82` | `784f5296ecafe01a0d3721b157d004cb89fcd32a33ae2e7c3ce0cba57c567dd9` |
 
-`prefilter.py` 原檔與 repo 檔逐位元組相同，12703 bytes。`common.py` 也是逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID，不需遮蔽。`full_prompt.md` 的 Mac 原檔是 2223 bytes；放進 repo 的是遮蔽版，2238 bytes，所以原檔雜湊與 repo 檔雜湊不同。遮蔽版相對原檔只改了下面兩處，其餘一字不改。三份都查過，沒有 API 金鑰、token、密碼。
+`prefilter.py` 原檔與 repo 檔逐位元組相同，12703 bytes。`common.py` 也是逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID，不需遮蔽。`full_prompt.md` 的 Mac 原檔是 2663 bytes；放進 repo 的是遮蔽版，2678 bytes，所以原檔雜湊與 repo 檔雜湊不同。遮蔽版相對原檔只改了下面兩處，其餘一字不改。三份都查過，沒有 API 金鑰、token、密碼。
 
 ## full_prompt.md 遮蔽了哪兩處
 
@@ -43,7 +45,7 @@ shasum -a 1 /Users/frank/quantboy-paper/discretionary/common.py
 shasum -a 1 ~/quantboy-gate/full_prompt.md
 ```
 
-`prefilter.py` 應等於 `c88941327c37af7e7e1593562458d0b16eea19fd`。`common.py` 應等於 `09463cbe52d279c02bbad04bd0650aee5a03bdf9`。`full_prompt.md` 應等於遮蔽前的 `e9c573e06b7a097e71f5167bda8bb5040045c31d`。sha256 同樣用 `shasum -a 256 <路徑>`，對上表的 sha256。
+`prefilter.py` 應等於 `c88941327c37af7e7e1593562458d0b16eea19fd`。`common.py` 應等於 `09463cbe52d279c02bbad04bd0650aee5a03bdf9`。`full_prompt.md` 應等於遮蔽前的 `0032025b93b9316559eb9c9bafcf18454d14a552`。sha256 同樣用 `shasum -a 256 <路徑>`，對上表的 sha256。舊版 `~/quantboy-gate/full_prompt.md.bak.20261111193428` 的 sha1 應仍是 `e9c573e06b7a097e71f5167bda8bb5040045c31d`。
 
 在本倉庫對快照本身：
 
@@ -51,7 +53,7 @@ shasum -a 1 ~/quantboy-gate/full_prompt.md
 sha1sum backups/mac/quantboy-paper/discretionary/prefilter.py backups/mac/quantboy-paper/discretionary/common.py backups/mac/quantboy-gate/full_prompt.md
 ```
 
-應分別等於 `c88941327c37af7e7e1593562458d0b16eea19fd`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `47074b5292626917177733e13942003c167518a3`。
+應分別等於 `c88941327c37af7e7e1593562458d0b16eea19fd`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `d35dc44e84fe555c468bd2066060168d4afebb82`。
 
 ## 測試與 import
 

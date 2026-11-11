@@ -62,7 +62,7 @@ python3 src/decision_log.py \
   --symbol ONEUSDT \
   --pattern 瘸師弟 \
   --decision reject \
-  --reason "只有1根長黑" \
+  --reason="只有1根長黑" \
   --round-time 2026-11-11T09:30:00+08:00
 ```
 
@@ -125,7 +125,7 @@ with open(dec, encoding="utf-8") as handle:
      --symbol ONEUSDT \
      --pattern 瘸師弟 \
      --decision reject \
-     --reason "部署試寫，不是實盤判斷" \
+     --reason="部署試寫，不是實盤判斷" \
      --round-time "2026-11-11T09:30:00+08:00" \
      --log /tmp/decision_log_smoke.jsonl
    echo "exit $?"
@@ -144,8 +144,10 @@ with open(dec, encoding="utf-8") as handle:
 建議加在 `full_prompt.md` 全文最後，獨立一段。下面這句是草稿原文，尚未寫入任何提示詞：
 
 ```text
-每輪對每個候選判斷完之後，立刻執行 python3 ~/quantboy-gate/decision_log.py --symbol <幣種> --pattern <型態> --decision <reject、enter、skip_other 三選一> --reason "<理由原文，不要改寫>" --round-time <本輪 ~/quantboy-gate/gate_log.jsonl 裡 decision 為 WAKE 那一列的 time>；這個命令只追加紀錄，失敗就跳過，下單、出場、風控與本輪其他判斷都照原來的規則繼續。
+每輪對每個候選判斷完之後，立刻執行 python3 ~/quantboy-gate/decision_log.py --symbol <幣種> --pattern <型態> --decision <reject、enter、skip_other 三選一> --reason="<理由原文，不要改寫>" --round-time <本輪 ~/quantboy-gate/gate_log.jsonl 裡 decision 為 WAKE 那一列的 time>；這個命令只追加紀錄，失敗就跳過，下單、出場、風控與本輪其他判斷都照原來的規則繼續。
 ```
+
+理由開頭是「--」時，用空格寫法（`--reason "..."`）會被當成缺值，所以要用等號寫法（`--reason="..."`）。
 
 狀態：草稿，待使用者核准。
 

@@ -1,5 +1,9 @@
 # 變更紀錄
 
+## 2026-11-11（Mac 實盤檔唯讀快照）
+
+- 新增 `backups/mac/`：Mac 上實盤仍在讀的 `prefilter.py`、同目錄的 `common.py`，以及遮蔽帳戶餘額與機器 ID 後的 `full_prompt.md`。只做對照，不改程式，也不改 Mac 路徑。見 `backups/mac/README.md`。
+
 ## 2026-11-11（429／418 有上限的退避重試）
 
 11/11 02:03（台北）一輪幣安公開 K 線回 429，prefilter 失敗，閘門以 `prefilter_failed` WAKE。

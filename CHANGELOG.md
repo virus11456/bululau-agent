@@ -1,5 +1,13 @@
 # 變更紀錄
 
+## 2026-11-11（AI 判斷紀錄）
+
+2026-11-11 稽核（issue #13）：閘門 WAKE 之後，AI 否決候選的理由沒有寫進任何檔案。
+
+- 新增 `src/decision_log.py`：獨立小工具。AI 每輪判斷完一個候選後自行呼叫，把幣種、型態、決策（`reject`／`enter`／`skip_other`）、理由原文追加成一行 jsonl。預設路徑 `~/quantboy-gate/decision_log.jsonl`，與 `gate_log.jsonl` 同目錄。`reason` 超過 500 字只留前 500 字。輸入不合法時結束碼非 0，錯誤印到 stderr。只用標準庫，Python 3.9 相容。`gate.py` 不匯入它。
+- 新增 `tests/test_decision_log.py`、`docs/decision_log.md`。文件說明怎麼用 `round_time` 對回 `gate_log.jsonl` 的 `time`。
+- 沒有改 `src/gate.py`、`src/hardfilter.py`、`src/prefilter.py` 的判斷、門檻、重試、逾時、結束碼。沒有改下單、風控、watch、排程、routine。沒有改 `docs/strategy.md`、`docs/agent_prompt.md`。沒有呼叫幣安，沒有讀金鑰。沒有部署到 Mac，也沒有改 Mac 上的 `full_prompt.md`。要開始記錄，還得使用者另外同意在那份提示詞加一句（草稿見 `docs/decision_log.md`）。
+
 ## 2026-11-11（Mac 實盤檔唯讀快照）
 
 - 新增 `backups/mac/`：Mac 上實盤仍在讀的 `prefilter.py`、同目錄的 `common.py`，以及遮蔽帳戶餘額與機器 ID 後的 `full_prompt.md`。只做對照，不改程式，也不改 Mac 路徑。見 `backups/mac/README.md`。

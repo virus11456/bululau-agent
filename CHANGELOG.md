@@ -1,5 +1,14 @@
 # 變更紀錄
 
+## 2026-11-11（同步 full_prompt.md 遮罩備份）
+
+2026-11-11 19:34（台北），使用者同意後，Mac 上的 `~/quantboy-gate/full_prompt.md` 在檔尾加了一個換行與一句話，呼叫 `decision_log.py`（Refs #13）。
+
+- 用遮蔽版逐位元組取代 `backups/mac/quantboy-gate/full_prompt.md`。相對上一份遮罩備份，差別只有檔尾這一個換行與這一句。帳戶餘額與機器 ID 的遮蔽沒有改。
+- Mac 新原檔 sha1 `0032025b93b9316559eb9c9bafcf18454d14a552`、sha256 `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06`、2663 bytes。repo 遮罩檔 sha1 `d35dc44e84fe555c468bd2066060168d4afebb82`、sha256 `784f5296ecafe01a0d3721b157d004cb89fcd32a33ae2e7c3ce0cba57c567dd9`、2678 bytes。
+- Mac 舊版（sha1 `e9c573e06b7a097e71f5167bda8bb5040045c31d`）已備份為 `~/quantboy-gate/full_prompt.md.bak.20261111193428`。
+- 更新 `backups/mac/README.md` 的雜湊與大小。沒有改其他檔案，沒有改程式，沒有部署到 Mac。
+
 ## 2026-11-11（AI 判斷紀錄）
 
 2026-11-11 稽核（issue #13）：閘門 WAKE 之後，AI 否決候選的理由沒有寫進任何檔案。

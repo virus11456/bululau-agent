@@ -67,7 +67,7 @@ repo 遮罩檔只改第 2 行裡「合理好球帶內盲掛、結構停損1–2%
 
 套到 Mac 未遮罩真檔時，第 1 行餘額與機器 ID 不在這個 patch 裡。第 2 行已是瞬間單根長黑（與本 repo 遮罩檔套用前相同），用 `deploy/patches/stop_sentence.patch`。
 
-Mac 未遮罩檔套完後的 sha1 無法在本倉庫算出，因為第 1 行不在 repo。套完請在 Mac 上 `shasum -a 1 ~/quantboy-gate/full_prompt.md`。
+Mac 已套用 `deploy/patches/stop_sentence.patch`。讀回 `~/quantboy-gate/full_prompt.md` 的 sha1 是 `a8c3693a93427d661c62b61c505cc40dc04da1d6`，3121 bytes。第 1 行仍是未遮罩的餘額與機器 ID，所以不會等於 repo 遮罩檔。
 
 ## 測試與 import
 

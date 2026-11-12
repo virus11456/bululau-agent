@@ -17,6 +17,14 @@ prefilter 只有在 stdout／stderr 辨識得出幣安 429 或 418 時才退避�
 
 結束碼：0 = QUIET，10 = WAKE。閘門本身出錯也一律 WAKE，絕不把未知當成空倉。
 讀取失敗、過期、前後矛盾、上一輪狀態不可信，都是 WAKE。
+
+帳戶狀態不可信（401、讀不到持倉／掛單、讀數過期）時，公開 prefilter 仍照跑。
+這時只把候選的幣種、型態、訊號 K 記進狀態，不記階梯、停損、目標。
+持倉／掛單恢復可信、而且這輪 prefilter 與 hardfilter 都跑完之後的第一輪，
+才把「當時記過、且這輪重跑後仍留在 kept」的候選交給 AI（理由 catchup_review）。
+交給 AI 的是這輪現算的候選，不是斷線期間存下的舊掛單價。狀態仍不可信就不補審。
+訊號若已不在這輪 prefilter 的結果裡，就不補審，也不另放寬窗口。
+
 只用標準庫，Python 3.8+。不讀金鑰、不改 live_trader 的檔案、不自己下單。
 """
 import argparse
@@ -297,6 +305,140 @@ def apply_hardfilter(prefilter, runner, python, path, cwd):
     return run
 
 
+def candidate_identity(cand):
+    """候選的公開身份。不帶走 ladder、stop、target、entry 這類價格。"""
+    if not isinstance(cand, dict):
+        return None
+    symbol = cand.get("symbol")
+    setup = cand.get("setup")
+    if not isinstance(symbol, str) or not isinstance(setup, str):
+        return None
+    symbol, setup = symbol.strip().upper(), setup.strip()
+    if not symbol or not setup:
+        return None
+    bar = cand.get("bar")
+    row = {"symbol": symbol, "setup": setup}
+    if isinstance(bar, str) and bar.strip():
+        row["bar"] = bar.strip()
+    return row
+
+
+def load_pending_catchup(state):
+    """讀斷線期間記下來的候選身份。壞掉的項目略過，不把整份狀態判成不可信。"""
+    raw = state.get("pending_catchup") if isinstance(state, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out = []
+    seen = set()
+    for item in raw:
+        ident = candidate_identity(item)
+        if ident is None:
+            continue
+        key = (ident["symbol"], ident["setup"])
+        if key in seen:
+            continue
+        seen.add(key)
+        seen_at = item.get("seen_at") if isinstance(item, dict) else None
+        if isinstance(seen_at, str) and seen_at.strip():
+            ident["seen_at"] = seen_at.strip()
+        out.append(ident)
+    return out
+
+
+def _merge_pending(pending, candidates, seen_at):
+    """只併入幣種、型態、訊號 K、看到的時間。呼叫端傳來的價格欄位在這裡丟掉。"""
+    index = {(row["symbol"], row["setup"]): row for row in pending}
+    out = list(pending)
+    recorded = []
+    for cand in candidates or []:
+        ident = candidate_identity(cand)
+        if ident is None:
+            continue
+        row = {"symbol": ident["symbol"], "setup": ident["setup"], "seen_at": seen_at}
+        if ident.get("bar"):
+            row["bar"] = ident["bar"]
+        key = (row["symbol"], row["setup"])
+        if key in index:
+            index[key].clear()
+            index[key].update(row)
+        else:
+            out.append(row)
+            index[key] = row
+        recorded.append(dict(row))
+    return out, recorded
+
+
+def _caught_candidates(prefilter):
+    """prefilter 這輪抓到的候選。hardfilter 擋下的也算「曾抓到」，但價格不往外帶。"""
+    caught = list(prefilter.get("candidates") or [])
+    for item in prefilter.get("hardfilter_blocked") or []:
+        caught.append(item)
+    return caught
+
+
+def settle_catchup(pending, observed, prefilter, seen_at, hardfilter_enabled, prefilter_fresh):
+    """斷線時只記身份。帳戶可信且這輪 prefilter、hardfilter 都跑完，才做一次補審。
+
+    review 裡的物件是這輪 kept 的原物件（含這輪現算的價格）。
+    pending 裡永遠沒有價格。重跑後不在 kept 的，dropped，不交給 AI。
+    prefilter 失敗、hardfilter 失敗、行情不新鮮、或 hardfilter 被關掉：名單留著，這輪不補審。
+    """
+    pending = list(pending)
+    if observed == "unknown":
+        if prefilter is None:
+            return {"pending": pending, "review": [], "dropped": [], "held": False, "recorded": []}
+        pending, recorded = _merge_pending(pending, _caught_candidates(prefilter), seen_at)
+        return {"pending": pending, "review": [], "dropped": [], "held": False, "recorded": recorded}
+    if not pending:
+        return {"pending": [], "review": [], "dropped": [], "held": False, "recorded": []}
+    can_recheck = (
+        hardfilter_enabled
+        and prefilter is not None
+        and prefilter_fresh
+        and not prefilter.get("hardfilter_failed")
+    )
+    if not can_recheck:
+        return {"pending": pending, "review": [], "dropped": [], "held": True, "recorded": []}
+    fresh = {}
+    for cand in prefilter.get("candidates") or []:
+        ident = candidate_identity(cand)
+        if ident is None:
+            continue
+        fresh[(ident["symbol"], ident["setup"])] = cand
+    review, dropped = [], []
+    for row in pending:
+        key = (row["symbol"], row["setup"])
+        if key in fresh:
+            review.append(fresh[key])
+        else:
+            dropped.append({"symbol": row["symbol"], "setup": row["setup"]})
+    return {"pending": [], "review": review, "dropped": dropped, "held": False, "recorded": []}
+
+
+def catchup_log(catchup, pending_before):
+    """gate_log 用。只有這輪真的有記、有補審、有丟棄或有留著，才寫。不含價格。"""
+    recorded = catchup.get("recorded") or []
+    review = catchup.get("review") or []
+    dropped = catchup.get("dropped") or []
+    held = bool(catchup.get("held"))
+    if not (pending_before or recorded or review or dropped or held):
+        return None
+
+    def brief(cand):
+        ident = candidate_identity(cand) or {}
+        row = {"symbol": ident.get("symbol"), "setup": ident.get("setup")}
+        if ident.get("bar"):
+            row["bar"] = ident["bar"]
+        return row
+
+    return {
+        "recorded": recorded,
+        "reviewed": [brief(cand) for cand in review],
+        "dropped": dropped,
+        "held": held,
+    }
+
+
 def load_state(path):
     """讀上一輪。檔案根本不存在是第一次跑（_absent）。
 
@@ -557,6 +699,9 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
     started = clock()
     today = started.strftime("%Y-%m-%d")
     previous = load_state(state_path)
+    pending = load_pending_catchup(previous)
+    pending_before = len(pending)
+    catchup = {"review": [], "dropped": [], "held": False, "recorded": []}
 
     trader = os.path.join(args.root, args.live_trader)
     prefilter_path = args.prefilter if os.path.isabs(args.prefilter) else os.path.join(args.root, args.prefilter)
@@ -588,6 +733,19 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         hf_retry = hardfilter_retry_log(hardfilter_run)
         if "hardfilter_failed" in reasons and hf_retry["retries"]:
             reasons.append("hardfilter_retries={0}".format(hf_retry["retries"]))
+        # 補審用的是「帳戶現在信不信得過」，不是策略門檻。不可信只記身份；可信且重跑完成才交 AI。
+        catchup = settle_catchup(
+            pending,
+            book_observation(status, checked),
+            prefilter,
+            started.isoformat(timespec="seconds"),
+            args.hardfilter != "off",
+            prefilter is not None and reading_is_fresh(prefilter.get("as_of"), checked),
+        )
+        pending = catchup["pending"]
+        if catchup["review"]:
+            reasons.append("catchup_review")
+            quiet = False
     except Exception as exc:  # 閘門自己壞掉也只能叫 AI。已取得的輸出不要清掉。
         checked = clock()
         quiet, reasons = False, ["gate_error:{0}".format(type(exc).__name__)]
@@ -598,6 +756,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         "last_run": started.isoformat(timespec="seconds"),
         "last_decision": "QUIET" if quiet else "WAKE",
         "halt_reported_day": previous.get("halt_reported_day"),
+        "pending_catchup": pending,
     }
     # 過期的 status 不能拿來銷掉「今天已經回報過停開新倉」，否則下一輪新鮮讀數會被靜音。
     if "halted_new_today" in reasons and observed != "unknown":
@@ -635,6 +794,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
                 "waits_s": hf_retry["waits_s"],
                 "stopped": hf_retry["stopped"],
             },
+            "catchup": catchup_log(catchup, pending_before),
         })
     except OSError as exc:
         if quiet:
@@ -648,6 +808,12 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
 
     print("WAKE " + ",".join(reasons))
     print("以下是閘門剛跑過的結果（台北 {0}）。manage --live 已經跑過，不必重跑。".format(started.strftime("%Y-%m-%d %H:%M")))
+    if catchup.get("review"):
+        print("補審：斷線期間 prefilter 曾抓到，且本輪以最新行情重跑 prefilter 與 hardfilter 後仍留下。只列幣種與型態。階梯、停損、目標用下面本輪 prefilter 的結果，不沿用斷線期間的舊掛單價。")
+        for cand in catchup["review"]:
+            ident = candidate_identity(cand) or {}
+            suffix = " bar={0}".format(ident["bar"]) if ident.get("bar") else ""
+            print("- {0} {1}{2}".format(ident.get("symbol"), ident.get("setup"), suffix))
     sections = (
         ("manage --live", manage),
         ("status", status_run),

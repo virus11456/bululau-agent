@@ -27,6 +27,21 @@ prefilter 有候選時，閘門會再跑同目錄的 `hardfilter.py`，把確定
 
 不確定的狀況永遠算 WAKE，不會被當成空倉。
 
+## 斷線之後的補審
+
+repo 沒有 Mac 上 `gate.py` 的備份。這段以本倉庫 `src/gate.py` 為準。`docs/hardfilter.md` 裡寫過一個部署前 sha1，那是較早的檔，不是這次的對照本。這支 `src/gate.py` 的 sha1 是 `5a3c5a8eab52e0bb92ff3cedc20a3a31523b80c3`。部署只覆蓋 `~/quantboy-gate/gate.py`。不要動 `live_trader.py`、prefilter、`full_prompt.md`、排程或 60 秒 watch。
+
+`main()` 在 `manage`、`status` 失敗之後仍會呼叫公開 prefilter（只讀行情，不簽章）。11/12 那種幣安 401／-2015 不會把 prefilter 跳過。先前 `gate_log.jsonl` 只記 `n_candidates` 這個數字，不記是哪一個幣，下一輪也讀不回 WAKE 印出來的 JSON。所以斷線期間雖然有跑 prefilter，閘門自己沒有留下可補審的名單。
+
+這次補上的只有名單，沒有改門檻、頻率、60 秒 watch、下單或 `live_trader`：
+
+- 帳戶不可信（`status` 讀不到、過期，或這輪帳本是 `unknown`）時，照舊 WAKE，不補審。公開 prefilter 若有抓到候選，只把幣種、型態、訊號 K 的時間、看到的時間寫進 `gate_state.json` 的 `pending_catchup`。不寫階梯、停損、目標、進場價。
+- 持倉／掛單恢復可信，而且這輪 prefilter 與 hardfilter 都跑完（hardfilter 沒失敗、行情時間仍新鮮、`--hardfilter` 不是 `off`）的第一輪，才拿名單去對這輪 hardfilter 留下的候選。幣種與型態都對上的，理由加 `catchup_review`，WAKE。印給 AI 的價格是這輪 prefilter 現算的，不是名單裡的舊價。對上之後名單清空。
+- 對不上的（這輪 prefilter 沒再吐出、或 hardfilter 擋下）不補審，名單也在這一輪清空。prefilter 只看最近兩根 15m；訊號若已經不在這個窗口，這輪重跑就不會出現，本程式不另開窗口、也不用舊的掛單價再審一次。同一幣種若是新的一根訊號、但這輪 prefilter 與 hardfilter 仍留下，交出去的是這根新訊號的現算結果。要不要改成「必須同一根 K」請審查者定，這次不加這條。
+- 這輪 prefilter 失敗、hardfilter 失敗、行情不新鮮，或 hardfilter 被關掉：不算那「第一輪」，名單留著，這輪不補審。
+
+「仍合格」在這支程式裡就是：這輪 prefilter 吐出、而且 hardfilter 留在 `kept`。沒有另外判斷「窗口外但結構還在」。
+
 「停開新倉」（當日虧損 7%）同一天只叫醒一次。「全平旗標」（30%）則每一輪都叫醒。
 
 ## 幣安 429／418 時才重試 prefilter

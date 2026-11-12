@@ -857,3 +857,204 @@ class PrefilterRetryWallTest(unittest.TestCase):
         self.assertEqual(result["rate_limit_attempts"], 1)
         self.assertEqual(result["rate_limit_retries"], 1)
         self.assertEqual(result["rate_limit_stopped"], "budget_exhausted")
+
+
+OLD_STOP = "OLD-STOP-0.111222333"
+NEW_STOP = "NEW-STOP-0.998877665"
+OPG_STOP = "OPG-STOP-0.333444555"
+OLD_LADDER = ["OLD-L1", "OLD-L2", "OLD-L3"]
+NEW_LADDER = ["NEW-L1", "NEW-L2", "NEW-L3"]
+
+
+def kuai_candidate(symbol, stop, ladder, bar):
+    return {
+        "symbol": symbol,
+        "setup": "瘸師弟",
+        "bar": bar,
+        "ladder": ladder,
+        "stop": stop,
+        "target": 8.7654321,
+        "rr": 1.5,
+    }
+
+
+def block_all(input_text):
+    cands = json.loads(input_text)["candidates"]
+    blocked = []
+    for cand in cands:
+        item = dict(cand)
+        item["blocked_by"] = "kuai_long_black"
+        blocked.append(item)
+    return ok(json.dumps({"ok": True, "kept": [], "blocked": blocked}, ensure_ascii=False))
+
+
+class CatchupReviewTest(GateTest):
+    """401／狀態不可信時只記公開 prefilter 的身份。恢復後用這輪重算的結果補審，不沿用舊價。"""
+
+    def state(self):
+        with open(os.path.join(self.tmp.name, "gate_state.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def log_row(self):
+        with open(os.path.join(self.tmp.name, "gate_log.jsonl"), encoding="utf-8") as handle:
+            return json.loads(handle.read().strip().splitlines()[-1])
+
+    def untrusted(self, candidates):
+        body = quiet_prefilter(
+            self.when,
+            call_ai=bool(candidates),
+            n_candidates=len(candidates),
+            candidates=candidates,
+        )
+        return self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": "幣安錯誤: HTTP 401 code -2015"},
+            status={"code": 1, "stdout": "", "stderr": "幣安錯誤: HTTP 401 code -2015"},
+            prefilter=body,
+        )
+
+    def trusted(self, candidates, hardfilter=None):
+        body = quiet_prefilter(
+            self.when,
+            call_ai=bool(candidates),
+            n_candidates=len(candidates),
+            candidates=candidates,
+        )
+        kwargs = {"prefilter": body}
+        if hardfilter is not None:
+            kwargs["hardfilter"] = hardfilter
+        return self.fresh_runner(**kwargs)
+
+    def test_identity_drops_prices(self):
+        ident = gate.candidate_identity({
+            "symbol": "dosusdt",
+            "setup": "瘸師弟",
+            "bar": "11-12 03:15",
+            "ladder": OLD_LADDER,
+            "stop": OLD_STOP,
+            "target": 8.7654321,
+        })
+        self.assertEqual(ident, {"symbol": "DOSUSDT", "setup": "瘸師弟", "bar": "11-12 03:15"})
+        self.assertNotIn("stop", ident)
+        self.assertNotIn("ladder", ident)
+
+    def test_outage_still_runs_public_prefilter_and_stores_no_prices(self):
+        dos = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        opg = kuai_candidate("OPGUSDT", OPG_STOP, [0.301, 0.302, 0.303], "11-12 03:15")
+        runner = self.untrusted([dos, opg])
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn(("prefilter",), runner.calls)
+        self.assertIn("manage_failed", out.splitlines()[0])
+        self.assertIn("status_untrusted", out.splitlines()[0])
+        self.assertNotIn("catchup_review", out.splitlines()[0])
+        self.assertNotIn("補審", out)
+        saved = self.state()
+        self.assertEqual(saved["last"], "unknown")
+        blob = json.dumps(saved, ensure_ascii=False)
+        self.assertNotIn(str(OLD_STOP), blob)
+        self.assertNotIn(str(OPG_STOP), blob)
+        self.assertNotIn("ladder", blob)
+        self.assertNotIn("target", blob)
+        pending = {(row["symbol"], row["setup"], row["bar"]) for row in saved["pending_catchup"]}
+        self.assertEqual(pending, {("DOSUSDT", "瘸師弟", "11-12 03:15"), ("OPGUSDT", "瘸師弟", "11-12 03:15")})
+        for row in saved["pending_catchup"]:
+            self.assertEqual(set(row), {"symbol", "setup", "bar", "seen_at"})
+
+    def test_still_untrusted_does_not_catch_up(self):
+        old = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        self.run_gate(self.untrusted([old]))
+        fresh = kuai_candidate("DOSUSDT", NEW_STOP, NEW_LADDER, "11-12 03:30")
+        code, out = self.run_gate(self.untrusted([fresh]))
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("status_untrusted", out.splitlines()[0])
+        self.assertNotIn("catchup_review", out.splitlines()[0])
+        self.assertNotIn("補審", out)
+        saved = self.state()
+        self.assertEqual(saved["last"], "unknown")
+        blob = json.dumps(saved, ensure_ascii=False)
+        self.assertNotIn(str(OLD_STOP), blob)
+        self.assertNotIn(str(NEW_STOP), blob)
+        self.assertEqual(len(saved["pending_catchup"]), 1)
+        self.assertEqual(saved["pending_catchup"][0]["bar"], "11-12 03:30")
+
+    def test_recovery_reviews_fresh_calculation_not_old_prices(self):
+        dos = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        opg = kuai_candidate("OPGUSDT", OPG_STOP, [0.301, 0.302, 0.303], "11-12 03:15")
+        self.run_gate(self.untrusted([dos, opg]))
+        fresh = kuai_candidate("DOSUSDT", NEW_STOP, NEW_LADDER, "11-12 03:45")
+        runner = self.trusted([fresh])
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE, out)
+        first = out.splitlines()[0]
+        self.assertIn("catchup_review", first)
+        self.assertIn("candidates", first)
+        self.assertIn("補審", out)
+        self.assertIn("DOSUSDT 瘸師弟 bar=11-12 03:45", out)
+        self.assertNotIn("OPGUSDT", out)
+        self.assertIn(str(NEW_STOP), out)
+        self.assertIn(str(NEW_LADDER[0]), out)
+        self.assertNotIn(str(OLD_STOP), out)
+        self.assertNotIn(str(OLD_LADDER[0]), out)
+        self.assertNotIn(str(OPG_STOP), out)
+        sent = "\n".join(runner.hardfilter_inputs)
+        self.assertIn(str(NEW_STOP), sent)
+        self.assertNotIn(str(OLD_STOP), sent)
+        self.assertEqual(self.state()["pending_catchup"], [])
+        reviewed = self.log_row()["catchup"]["reviewed"]
+        self.assertEqual(reviewed, [{"symbol": "DOSUSDT", "setup": "瘸師弟", "bar": "11-12 03:45"}])
+        self.assertEqual(self.log_row()["catchup"]["dropped"], [{"symbol": "OPGUSDT", "setup": "瘸師弟"}])
+        self.assertNotIn("stop", json.dumps(self.log_row()["catchup"]))
+
+    def test_rerun_outside_result_is_not_reviewed(self):
+        old = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        self.run_gate(self.untrusted([old]))
+        code, out = self.run_gate(self.trusted([]))
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("previous_state_untrusted", out.splitlines()[0])
+        self.assertNotIn("catchup_review", out.splitlines()[0])
+        self.assertNotIn("補審", out)
+        self.assertNotIn("DOSUSDT", out)
+        self.assertNotIn(str(OLD_STOP), out)
+        self.assertEqual(self.state()["pending_catchup"], [])
+        self.assertEqual(self.log_row()["catchup"]["dropped"], [{"symbol": "DOSUSDT", "setup": "瘸師弟"}])
+        self.assertEqual(self.log_row()["catchup"]["reviewed"], [])
+
+    def test_hardfilter_block_on_rerun_is_not_reviewed(self):
+        old = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        self.run_gate(self.untrusted([old]))
+        fresh = kuai_candidate("DOSUSDT", NEW_STOP, NEW_LADDER, "11-12 03:45")
+        code, out = self.run_gate(self.trusted([fresh], hardfilter=block_all))
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertNotIn("catchup_review", out.splitlines()[0])
+        self.assertNotIn("補審", out)
+        self.assertNotIn(str(OLD_STOP), out)
+        self.assertEqual(self.state()["pending_catchup"], [])
+        self.assertEqual(self.log_row()["catchup"]["reviewed"], [])
+        self.assertEqual(self.log_row()["catchup"]["dropped"], [{"symbol": "DOSUSDT", "setup": "瘸師弟"}])
+
+    def test_failed_rerun_holds_pending_until_a_complete_round(self):
+        old = kuai_candidate("DOSUSDT", OLD_STOP, OLD_LADDER, "11-12 03:15")
+        self.run_gate(self.untrusted([old]))
+        failed = self.fresh_runner(prefilter={"code": 2, "stdout": "", "stderr": "timeout"})
+        code, out = self.run_gate(failed)
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("prefilter_failed", out.splitlines()[0])
+        self.assertNotIn("catchup_review", out.splitlines()[0])
+        self.assertEqual(len(self.state()["pending_catchup"]), 1)
+        self.assertNotIn(str(OLD_STOP), json.dumps(self.state()))
+        fresh = kuai_candidate("DOSUSDT", NEW_STOP, NEW_LADDER, "11-12 04:00")
+        code, out = self.run_gate(self.trusted([fresh]))
+        self.assertEqual(code, gate.WAKE, out)
+        self.assertIn("catchup_review", out.splitlines()[0])
+        self.assertIn(str(NEW_STOP), out)
+        self.assertNotIn(str(OLD_STOP), out)
+        self.assertEqual(self.state()["pending_catchup"], [])
+
+    def test_garbage_pending_does_not_wake_a_flat_round(self):
+        path = os.path.join(self.tmp.name, "gate_state.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"last": "flat", "pending_catchup": {"stop": OLD_STOP}}, handle)
+        code, out = self.run_gate(self.fresh_runner())
+        self.assertEqual(code, gate.QUIET, out)
+        self.assertNotIn(str(OLD_STOP), out)
+        self.assertEqual(self.state()["pending_catchup"], [])

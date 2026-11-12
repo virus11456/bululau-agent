@@ -13,6 +13,7 @@
 - 空倉跳過持倉／風控 AI 沒有寫進這份 prompt，見 operation.md。
 - 小師弟「1.5–2R 出場」是這份 prompt 的原文；定稿仍把該出場 R 列為待確認。
 - 2026-11-11 使用者決定瘸師弟改回瞬間單根長黑。下面正文仍是 11/07 21:29 的快照，沒有改寫，雜湊才對得起來。要部署的句子在 [backups/mac/quantboy-gate/full_prompt.md](../backups/mac/quantboy-gate/full_prompt.md)。Mac 上的 `~/quantboy-gate/full_prompt.md` 要等審過，再套 `deploy/pr15/full_prompt.md.patch`。
+- 2026-11-12 只再改瘸師弟停損那一句（低掛深度不是停損上限）。下面正文仍不改。套 Mac 用 `deploy/patches/stop_sentence.patch`；若 Mac 第 2 行還是「連2–3長黑」，改套 `deploy/patches/stop_sentence.mac-0032025b.patch`。
 
 ## 提示詞正文
 

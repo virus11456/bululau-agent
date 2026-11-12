@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|---|
 | `prefilter.py` | `/Users/frank/quantboy-paper/discretionary/prefilter.py` | `c88941327c37af7e7e1593562458d0b16eea19fd` | `acd73578bbb9381040639ebaea910740c97113f13731d2e1c61b6aae1eab4794` | `backups/mac/quantboy-paper/discretionary/prefilter.py` | `7668d8f573713f32765166e6045e369c73705938` | `5708df9665c58a2b4b33225182421f4d07240a95084ee6dd0206e388e0b9a2ec` |
 | `common.py` | `/Users/frank/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` | `backups/mac/quantboy-paper/discretionary/common.py` | `09463cbe52d279c02bbad04bd0650aee5a03bdf9` | `b5ea01792d02d0af0d87a4b912696d7015bc2dd3d833d79c74f6fc687be5697a` |
-| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `0032025b93b9316559eb9c9bafcf18454d14a552` | `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06` | `backups/mac/quantboy-gate/full_prompt.md` | `5820c73c5b3a1721ec4101c41a175d22aa034a13` | `4784aae42d5d269098e47cf357a2853742e9957d0934bf453540cde3402403a7` |
+| `full_prompt.md` | `~/quantboy-gate/full_prompt.md` | `0032025b93b9316559eb9c9bafcf18454d14a552` | `4eecf875f775cdc79b2bc0aa5885dbe189a0edf53e2c21cdffdae21c15b0cb06` | `backups/mac/quantboy-gate/full_prompt.md` | `b7771801d0c8bd1ea109d0b9e09a5859472fe8eb` | `e26bf9f53e4156a30804bd42aa4eca067744f38ca0efe11dbe0c15af92b6028e` |
 
 `common.py` 仍與 Mac 原檔逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID。`prefilter.py` 的 Mac 原檔是 12703 bytes；本 PR 改了瘸師弟長黑門檻之後，repo 檔不再等於 Mac 原檔。`full_prompt.md` 的 Mac 原檔是 2663 bytes；放進 repo 的是遮蔽版。遮蔽只動餘額與機器 ID。本 PR 再只改第 2 行的瘸師弟那一句，第 5 行 decision_log 留著。三份都查過，沒有 API 金鑰、token、密碼。
 
@@ -59,7 +59,15 @@ shasum -a 1 ~/quantboy-gate/full_prompt.md
 sha1sum backups/mac/quantboy-paper/discretionary/prefilter.py backups/mac/quantboy-paper/discretionary/common.py backups/mac/quantboy-gate/full_prompt.md
 ```
 
-應分別等於 `7668d8f573713f32765166e6045e369c73705938`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `5820c73c5b3a1721ec4101c41a175d22aa034a13`。
+應分別等於 `7668d8f573713f32765166e6045e369c73705938`、`09463cbe52d279c02bbad04bd0650aee5a03bdf9` 與 `b7771801d0c8bd1ea109d0b9e09a5859472fe8eb`。
+
+## 瘸師弟停損那一句（2026-11-12）
+
+repo 遮罩檔只改第 2 行裡「合理好球帶內盲掛、結構停損1–2%（BTC/ETH至少3%）、1.5R全平，不平一半。」這一段。單根長黑、訊號量、RR1.5、風控、第 5 行 decision_log 沒有改。遮蔽沒有改。3136 bytes。
+
+套到 Mac 未遮罩真檔時，第 1 行餘額與機器 ID 不在這個 patch 裡。第 2 行已是瞬間單根長黑（與本 repo 遮罩檔套用前相同），用 `deploy/patches/stop_sentence.patch`。
+
+Mac 已套用 `deploy/patches/stop_sentence.patch`。讀回 `~/quantboy-gate/full_prompt.md` 的 sha1 是 `a8c3693a93427d661c62b61c505cc40dc04da1d6`，3121 bytes。第 1 行仍是未遮罩的餘額與機器 ID，所以不會等於 repo 遮罩檔。
 
 ## 測試與 import
 

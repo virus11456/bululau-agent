@@ -6,14 +6,14 @@
 
 核對要點：
 
-- routine：`automation-1793375356389`，每 30 分鐘（`*/30`，彈性 ±7 分鐘），與 60 秒機械 watch 分開。
+- routine：`automation-1793375356389`。2026-11-11 19:09（台北）起每 15 分鐘（`*/15`，彈性 ±3）。11/7 19:44 到當時是每 30 分鐘（`*/30`，彈性 ±7）。與 60 秒機械 watch 分開。
 - 11/7 19:44 只改排程，prompt 當時逐字未改。11/10 10:03 恢復排程時，操盤手稱策略與風控未改。本輪沒有在 21:29 之後再向平台重讀 prompt。
 - 機器代號已改為 `{{MAC_MINI_MACHINE_ID}}`。原文 SHA256（含真實機器代號、UTF-8、不含結尾換行）是 `db9366fd031789d95191090b2504f494469c03da29c92def64f6e46959080e61`。
 - 「剛查可用 699.44 USDT」是歷史敘述，不是現況。
 - 空倉跳過持倉／風控 AI 沒有寫進這份 prompt，見 operation.md。
 - 小師弟「1.5–2R 出場」是這份 prompt 的原文；定稿仍把該出場 R 列為待確認。
-- 2026-11-11 使用者決定瘸師弟改回瞬間單根長黑。下面正文仍是 11/07 21:29 的快照，沒有改寫，雜湊才對得起來。要部署的句子在 [backups/mac/quantboy-gate/full_prompt.md](../backups/mac/quantboy-gate/full_prompt.md)。Mac 上的 `~/quantboy-gate/full_prompt.md` 要等審過，再套 `deploy/pr15/full_prompt.md.patch`。
-- 2026-11-12 只再改瘸師弟停損那一句（低掛深度不是停損上限）。下面正文仍不改。套 Mac 用 `deploy/patches/stop_sentence.patch`。
+- 2026-11-11 使用者決定瘸師弟改回瞬間單根長黑。下面正文仍是 11/07 21:29 的快照，沒有改寫，雜湊才對得起來。要部署的句子在 [backups/mac/quantboy-gate/full_prompt.md](../backups/mac/quantboy-gate/full_prompt.md)。`deploy/pr15/full_prompt.md.patch` 只適用 Mac 原檔 sha1 仍是 `0032025b93b9316559eb9c9bafcf18454d14a552` 的舊檔。現行檔不要再套這份。
+- 2026-11-12 只再改瘸師弟停損那一句（低掛深度不是停損上限）。下面正文仍不改。套 Mac 用 `deploy/patches/stop_sentence.patch`。Mac 已於 2026-11-12 12:16（台北）部署，讀回 sha1 `a8c3693a93427d661c62b61c505cc40dc04da1d6`。
 
 ## 提示詞正文
 

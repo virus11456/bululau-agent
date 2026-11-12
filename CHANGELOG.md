@@ -1,5 +1,16 @@
 # 變更紀錄
 
+## 2026-11-12（操作文件改成現行 */15 與已部署狀態）
+
+只改文件。程式、門檻、風控、下單、watch 沒有改。歷史快照正文沒有改。
+
+- 現行掃描寫成 `*/15`、彈性 ±3（2026-11-11 19:09 起）。11/7 的 `*/30`、±7 留在沿革裡。
+- 閘門是 main 的 `src/gate.py`，Mac 的 gate_log 顯示已在跑。[PR #3](https://github.com/virus11456/bululau-agent/pull/3) 於 2026-11-12 12:21（台北）關閉、未合併。
+- `deploy/pr15/full_prompt.md.patch` 只適用 sha1 `0032025b93b9316559eb9c9bafcf18454d14a552` 的舊檔。現行停損句用 `deploy/patches/stop_sentence.patch`。
+- 停損句：Mac 已於 2026-11-12 12:16（台北）部署，讀回 sha1 `a8c3693a93427d661c62b61c505cc40dc04da1d6`。
+- `docs/hardfilter.md` 的 `db982148…` 是 2026-11-10 的舊 sha。以後與當時要部署的 main 比對。
+- `docs/decision_log.md`：提示詞第 5 行已接上，Mac 已在用。
+
 ## 2026-11-12（401 -2015 寫明 ip_not_whitelisted，並每輪記對外 IP）
 
 11/12 03:30–11:36（台北）帳戶請求一直是 401／-2015。gate 只記 `manage_failed`、`status_untrusted`，錯誤文字裡的 request ip 沒有進 `gate_log`。
@@ -14,7 +25,7 @@
 
 只改 `backups/mac/quantboy-gate/full_prompt.md` 第 2 行裡瘸師弟的「合理好球帶內盲掛、結構停損1–2%（BTC/ETH至少3%）」那一段。改成：低掛是前低下方的掛單深度（布神例：前低 100 掛 97、96、95），不是停損上限；停損自設、嚴格執行、不可擴大；沒有 1–2% 上限；結構太近才往外推。1.5R 全平、單根長黑、訊號量、其他門檻、第 5 行 decision_log 沒有改。
 
-可套到 Mac 未遮罩檔的 diff 在 `deploy/patches/stop_sentence.patch`（第 2 行已是瞬間單根長黑）。沒有改程式，沒有部署。
+可套到 Mac 未遮罩檔的 diff 在 `deploy/patches/stop_sentence.patch`（第 2 行已是瞬間單根長黑）。沒有改程式。Mac 已於 2026-11-12 12:16（台北）部署，讀回 `~/quantboy-gate/full_prompt.md` sha1 `a8c3693a93427d661c62b61c505cc40dc04da1d6`（3121 bytes；第 1 行仍是未遮罩的餘額與機器 ID）。
 
 ## 2026-11-12（帳戶斷線恢復後補審仍合格的候選）
 
@@ -32,7 +43,7 @@
 - Mac 實盤快照 `backups/mac/quantboy-gate/full_prompt.md`：只改瘸師弟那一句，改成瞬間單根較大跌勢，並寫出 BTC／ETH 約 2–3%（程式取 2%）、小幣 4–5% 以上（程式取 4%）、長黑與爆量缺一不可。同一句裡的訊號量倍數、盲掛、停損、1.5R 全平沒有改。遮蔽的餘額與機器 ID 沒有動。
 - Mac 實盤快照 `backups/mac/quantboy-paper/discretionary/prefilter.py`：瘸師弟長黑門檻從「24 小時成交額達標的大幣 2%、否則 4%」改成「BTCUSDT／ETHUSDT 2%、其餘 4%」。原本就是最近兩根各自判斷，不是連續根數。爆量仍是前 20 根均量的 3 倍。階梯、停損、其他型態沒有改。
 - 倉庫 `src/prefilter.py` 沒有連續長黑邏輯，沒有改。`src/gate.py`、重試、盲掛、停損、出場、RR、風控、頻率、watch、下單流程沒有改。`docs/sources/` 沒有改。
-- 可套到 Mac 原檔的 diff 在 `deploy/pr15/`。`full_prompt.md.patch` 沒有上下文，只換第 2 行，不含檔尾。Mac 原檔套用前 sha1 應為 `0032025b93b9316559eb9c9bafcf18454d14a552`。repo 遮罩檔以含第 5 行 decision_log 的版本為底，只改第 2 行。還沒部署。
+- 可套到 Mac 原檔的 diff 在 `deploy/pr15/`。`full_prompt.md.patch` 沒有上下文，只換第 2 行，不含檔尾。只適用套用前 Mac 原檔 sha1 仍是 `0032025b93b9316559eb9c9bafcf18454d14a552` 的舊檔。現行檔不要再套這份；停損句用 `deploy/patches/stop_sentence.patch`。repo 遮罩檔以含第 5 行 decision_log 的版本為底，只改第 2 行。
 
 ## 2026-11-11（同步 full_prompt.md 遮罩備份）
 

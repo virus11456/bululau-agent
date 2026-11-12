@@ -65,10 +65,7 @@ sha1sum backups/mac/quantboy-paper/discretionary/prefilter.py backups/mac/quantb
 
 repo 遮罩檔只改第 2 行裡「合理好球帶內盲掛、結構停損1–2%（BTC/ETH至少3%）、1.5R全平，不平一半。」這一段。單根長黑、訊號量、RR1.5、風控、第 5 行 decision_log 沒有改。遮蔽沒有改。3136 bytes。
 
-套到 Mac 未遮罩真檔時，第 1 行餘額與機器 ID 不在這個 patch 裡：
-
-- 第 2 行若已是瞬間單根長黑（與本 repo 遮罩檔套用前相同），用 `deploy/patches/stop_sentence.patch`。
-- 第 2 行若仍是「連2–3長黑」、sha1 仍是上表 Mac 原檔 `0032025b93b9316559eb9c9bafcf18454d14a552`，用 `deploy/patches/stop_sentence.mac-0032025b.patch`。這份只換停損那一段，不把長黑改成單根。
+套到 Mac 未遮罩真檔時，第 1 行餘額與機器 ID 不在這個 patch 裡。第 2 行已是瞬間單根長黑（與本 repo 遮罩檔套用前相同），用 `deploy/patches/stop_sentence.patch`。
 
 Mac 未遮罩檔套完後的 sha1 無法在本倉庫算出，因為第 1 行不在 repo。套完請在 Mac 上 `shasum -a 1 ~/quantboy-gate/full_prompt.md`。
 

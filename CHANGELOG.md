@@ -4,7 +4,7 @@
 
 只改 `backups/mac/quantboy-gate/full_prompt.md` 第 2 行裡瘸師弟的「合理好球帶內盲掛、結構停損1–2%（BTC/ETH至少3%）」那一段。改成：低掛是前低下方的掛單深度（布神例：前低 100 掛 97、96、95），不是停損上限；停損自設、嚴格執行、不可擴大；沒有 1–2% 上限；結構太近才往外推。1.5R 全平、單根長黑、訊號量、其他門檻、第 5 行 decision_log 沒有改。
 
-可套到 Mac 未遮罩檔的 diff 在 `deploy/patches/stop_sentence.patch`（第 2 行已是瞬間單根長黑時）與 `deploy/patches/stop_sentence.mac-0032025b.patch`（Mac 原檔 sha1 仍是 `0032025b93b9316559eb9c9bafcf18454d14a552`、第 2 行仍是連 2–3 長黑時）。沒有改程式，沒有部署。
+可套到 Mac 未遮罩檔的 diff 在 `deploy/patches/stop_sentence.patch`（第 2 行已是瞬間單根長黑）。沒有改程式，沒有部署。
 
 ## 2026-11-12（帳戶斷線恢復後補審仍合格的候選）
 

@@ -83,6 +83,7 @@ class KlineRetryBudget:
         self.retries = 0
         self.wait_s = 0.0
         self.waits_s = []
+        self.statuses = []
         self.stopped = None
 
     def remaining(self):
@@ -143,6 +144,7 @@ def _retry_fields(budget):
         "rate_limit_wait_s": budget.wait_s,
         "rate_limit_waits_s": list(budget.waits_s),
         "rate_limit_stopped": budget.stopped,
+        "rate_limit_statuses": list(budget.statuses),
     }
 
 
@@ -167,6 +169,7 @@ def fetch_klines(symbol, interval, limit, end_ms=None, sleep=None, budget=None, 
         except urllib.error.HTTPError as exc:
             if exc.code not in (418, 429):
                 raise DataError("HTTP {0} on klines {1}".format(exc.code, symbol))
+            budget.statuses.append(int(exc.code))
             seen += 1
             wait = budget.plan(seen, _retry_after_header(exc))
             if wait is None:

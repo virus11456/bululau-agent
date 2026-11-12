@@ -1,5 +1,11 @@
 # 變更紀錄
 
+## 2026-11-12（gate_log 分開記 429 與 418）
+
+- `prefilter_retry.statuses` 與 `hardfilter.statuses` 依序記下這一輪看到的 429 與 418。退避秒數、次數、上限都沒有改。
+- `tests/test_gate.py` 的假 hardfilter 預設理由改為 `kuai_long_black`。
+- #24 已合併。部署要兩支一起覆蓋：`src/gate.py` sha1 `98f4164139763a56bf3948ff6d9ad91c5a27996b`、`src/hardfilter.py` sha1 `420811f8fecc6b0b7fd3d1ed22759e6c3d3b3497`。還沒部署到 Mac。
+
 ## 2026-11-12（布鹿流 RR 1.2–1.5 紙上彙整腳本）
 
 - 新增 `src/bulu_rr_paper.py`。只讀 gate_log 與 decision_log，整理 RR 在 1.2 以上、不到 1.5 的布鹿流。實盤門檻仍是 1.5。不改 gate，不進排程。
@@ -24,7 +30,7 @@
 - 沒有 401 -2015 時，ipify 最多每小時一次，上次查詢時間在 `gate_state.json` 的 `public_ip_checked_at`。IP 變了只寫 `ip_changed`，不加 WAKE 理由。查不到就不改狀態檔裡的上一筆。
 - 查詢在新鮮度時鐘與 QUIET／WAKE 定案之後。不改閱讀年齡、門檻、重試、頻率、60 秒 watch、下單、`live_trader`。
 - 選 ipify 是因為公開、不用帳號、回應是單行 IP。幣安印出的 request ip 才是白名單該對的地址，所以有 request ip 就不再查。
-- 測試不連網。還沒部署。部署檔只有 `src/gate.py`，覆蓋 `~/quantboy-gate/gate.py`。預期 sha1 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`。
+- 測試不連網。還沒部署。部署檔只有 `src/gate.py`，覆蓋 `~/quantboy-gate/gate.py`。預期 sha1 `98f4164139763a56bf3948ff6d9ad91c5a27996b`（含限流狀態碼；hardfilter.py 另見上一節）。
 
 ## 2026-11-12（瘸師弟停損句不再被讀成 1–2% 上限）
 

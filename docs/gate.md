@@ -29,7 +29,7 @@ prefilter 有候選時，閘門會再跑同目錄的 `hardfilter.py`，把確定
 
 ## 斷線之後的補審
 
-repo 沒有 Mac 上 `gate.py` 的備份。這段以本倉庫 `src/gate.py` 為準。`docs/hardfilter.md` 裡寫過一個部署前 sha1，那是較早的檔，不是這次的對照本。這支 `src/gate.py` 的 sha1 是 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`（含斷線補審，也含下面的對外 IP 紀錄）。部署只覆蓋 `~/quantboy-gate/gate.py`。不要動 `live_trader.py`、prefilter、`full_prompt.md`、排程或 60 秒 watch。
+repo 沒有 Mac 上 `gate.py` 的備份。這段以本倉庫 `src/gate.py` 為準。`docs/hardfilter.md` 裡寫過一個部署前 sha1，那是較早的檔，不是這次的對照本。這支 `src/gate.py` 的 sha1 是 `98f4164139763a56bf3948ff6d9ad91c5a27996b`（含斷線補審、對外 IP，以及限流狀態碼）。同一次還要覆蓋 `hardfilter.py`，見下面「對外 IP」一節。不要動 `live_trader.py`、prefilter、`full_prompt.md`、排程或 60 秒 watch。
 
 `main()` 在 `manage`、`status` 失敗之後仍會呼叫公開 prefilter（只讀行情，不簽章）。11/12 那種幣安 401／-2015 不會把 prefilter 跳過。先前 `gate_log.jsonl` 只記 `n_candidates` 這個數字，不記是哪一個幣，下一輪也讀不回 WAKE 印出來的 JSON。所以斷線期間雖然有跑 prefilter，閘門自己沒有留下可補審的名單。
 
@@ -72,9 +72,9 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 
 重試後仍失敗：WAKE，理由仍是 `prefilter_failed`，並多一個 `prefilter_retries=N`（N 是實際等到的次數；一次都還沒等到就只有 `prefilter_failed`）。重試後成功：照原來的規則決定 QUIET 或 WAKE，不因為重試過就叫醒。
 
-`gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`、`budget_exhausted`，成功時是 null）。
+`gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`statuses`（這一輪看到的 429 與 418，依順序分開記）、`stopped`（`retries_exhausted`、`wait_cap`、`budget_exhausted`，成功時是 null）。hardfilter 有跑時，`hardfilter.statuses` 同樣只記 429 與 418。退避秒數與次數沒有改。
 
-平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。該次重試沒有改排程、60 秒 watch、新鮮度上限。現行排程是 `*/15`、彈性 ±3（2026-11-11 19:09 起）。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
+平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。這次只加 `statuses`，沒有改退避秒數、次數、60 秒 watch、新鮮度上限。現行排程是 `*/15`、彈性 ±3（2026-11-11 19:09 起）。11/7 19:44 到那時是每 30 分鐘；這份文件不再把 30 分鐘當成現行排程。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
 
 ## 對外 IP 與 401 -2015
 
@@ -100,7 +100,7 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 
 查詢放在新鮮度時鐘（`checked`）和 QUIET／WAKE 定案之後。那 2 秒不計入 status／prefilter 的年齡，也不改各命令逾時、重試、`READING_MAX_AGE`、排程或 60 秒 watch。查詢失敗不會把一輪改成 WAKE。狀態檔的 `public_ip` 只在這輪拿到合法 IP 時更新；這輪是「未取得」就留著上一筆。
 
-不讀金鑰，不對幣安送簽章請求。部署檔仍只有 `src/gate.py`，預期 sha1 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`。
+不讀金鑰，不對幣安送簽章請求。這次部署要兩支一起覆蓋，不能只換 gate.py：`src/gate.py` → `~/quantboy-gate/gate.py`，sha1 `98f4164139763a56bf3948ff6d9ad91c5a27996b`；`src/hardfilter.py` → `~/quantboy-gate/hardfilter.py`，sha1 `420811f8fecc6b0b7fd3d1ed22759e6c3d3b3497`。只換 gate.py 時，hardfilter 看到的 429／418 不會進 `gate_log`。還沒部署到 Mac。
 
 ## 在 Mac 上安裝
 

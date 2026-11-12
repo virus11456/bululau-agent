@@ -2,7 +2,7 @@
 
 ## 為什麼要這支
 
-現行 Grok routine 每 30 分鐘醒一次，一天 48 輪。每一輪都要讀完整份實盤 prompt，再跑 `manage --live`、`status`、prefilter，然後逐條審核。空倉又沒有候選時，這些工作的結論永遠是「沒事」，等於白花 token。
+現行 Grok routine 每 15 分鐘醒一次（`*/15`，彈性 ±3，2026-11-11 19:09 起），一天 96 輪。11/7 19:44 到當時是每 30 分鐘、一天 48 輪。每一輪都要讀完整份實盤 prompt，再跑 `manage --live`、`status`、prefilter，然後逐條審核。空倉又沒有候選時，這些工作的結論永遠是「沒事」，等於白花 token。
 
 `src/gate.py` 把這些機械步驟改由程式來跑。空輪時 Grok 只要執行一個命令、看到第一行是 `QUIET`，就結束本輪。
 
@@ -74,7 +74,7 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 
 `gate_log.jsonl` 在有辨識到 429／418 的那一輪多一個 `prefilter_retry`：`attempts`（呼叫幾次）、`retries`（實際等了幾次）、`wait_s`、`waits_s`、`stopped`（`retries_exhausted`、`wait_cap`、`budget_exhausted`，成功時是 null）。
 
-平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。30 分鐘排程、60 秒 watch、新鮮度上限都沒有改。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
+平常沒有 429／418 時，prefilter 仍只呼叫一次。不讀金鑰、不簽章。該次重試沒有改排程、60 秒 watch、新鮮度上限。現行排程是 `*/15`、彈性 ±3（2026-11-11 19:09 起）。累計最多睡 60 秒；manage 在 prefilter 之前就結束，這段等待不佔 live_trader 的檔案鎖。
 
 ## 對外 IP 與 401 -2015
 
@@ -110,7 +110,7 @@ cp src/gate.py ~/quantboy-gate/gate.py
 python3 ~/quantboy-gate/gate.py --help
 ```
 
-條件單讀取失敗要變成非 0，Mac 上的 `live_trader.py` 也要換成倉庫這一版裡的 `status` 行為。只換 `gate.py`、不換 `live_trader.py` 的話，舊的 `status` 仍可能在讀取失敗時印「條件單 0」並以 0 結束，閘門會把它當成空倉。這份文件沒有把檔案拷到 Mac，也沒有改 30 分鐘排程或 60 秒 watch。
+條件單讀取失敗要變成非 0，Mac 上的 `live_trader.py` 也要換成倉庫這一版裡的 `status` 行為。只換 `gate.py`、不換 `live_trader.py` 的話，舊的 `status` 仍可能在讀取失敗時印「條件單 0」並以 0 結束，閘門會把它當成空倉。這份文件沒有改排程或 60 秒 watch。現行排程是 `*/15`、彈性 ±3。Mac 是否已換成倉庫這版 `live_trader.py`，未取得。
 
 預設的路徑如下，不一樣時用參數改：
 
@@ -131,7 +131,7 @@ python3 ~/quantboy-gate/gate.py --no-manage
 
 ## 新的 routine prompt
 
-**排程不用改**，一樣每 30 分鐘、彈性 ±7 分鐘。60 秒 watch 也不用動。
+**排程維持現行** `*/15`、彈性 ±3（2026-11-11 19:09 起）。這份文件不把排程改回每 30 分鐘，也不改 60 秒 watch。
 
 把現行的完整 prompt（[agent_prompt.md](agent_prompt.md) 的提示詞正文）原封不動存成 Mac 上的 `~/quantboy-gate/full_prompt.md`。routine 的 prompt 改成下面這段：
 

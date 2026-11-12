@@ -6,13 +6,13 @@
 
 `src/decision_log.py` 只做一件事：把 AI 對一個候選的判斷追加成一行 JSON。它不決定進不進場，不改門檻，也不下單。
 
-閘門、硬條件篩選、預篩、下單、風控、60 秒 watch、30 分鐘排程、實盤 routine 都維持原樣。`gate.py`、`hardfilter.py`、`prefilter.py` 不匯入這支程式，這支程式也不匯入它們。不讀金鑰、不讀 env 檔、不連網、不做簽章請求。
+閘門、硬條件篩選、預篩、下單、風控、60 秒 watch、現行 `*/15`（彈性 ±3）排程、實盤 routine 都維持原樣。`gate.py`、`hardfilter.py`、`prefilter.py` 不匯入這支程式，這支程式也不匯入它們。不讀金鑰、不讀 env 檔、不連網、不做簽章請求。
 
 ## 什麼時候呼叫
 
 一個候選一行。同一輪有多個候選就各呼叫一次，`--round-time` 用同一個。沒有候選就不要呼叫。
 
-這支程式要等呼叫端自己執行。現在的實盤 routine 還不會呼叫它。要開始留紀錄，得先改 Mac 上的 `full_prompt.md`，見下面「草稿，待使用者核准」。
+這支程式要等呼叫端自己執行。Mac 的 `~/quantboy-gate/full_prompt.md` 第 5 行已經要求每輪判斷完候選就呼叫它，Mac 已在用。
 
 ## 欄位
 
@@ -111,7 +111,7 @@ with open(dec, encoding="utf-8") as handle:
    ts=$(date +%Y%m%d%H%M%S)
    if [ -f decision_log.py ]; then cp -p decision_log.py "decision_log.py.bak.$ts"; fi
    ```
-2. 放檔：把合併後 main 的 `src/decision_log.py` 複製成 `~/quantboy-gate/decision_log.py`。避開整點／半點 ±7 分鐘（routine 可能正在跑），先寫成 `decision_log.py.new` 再 `mv`。
+2. 放檔：把合併後 main 的 `src/decision_log.py` 複製成 `~/quantboy-gate/decision_log.py`。避開 `*/15` 刻度前後 3 分鐘（routine 可能正在跑），先寫成 `decision_log.py.new` 再 `mv`。
 3. 讀回驗證：
    ```bash
    shasum ~/quantboy-gate/decision_log.py
@@ -133,15 +133,15 @@ with open(dec, encoding="utf-8") as handle:
    ```
    結束碼應為 0。這一步不打幣安、不讀金鑰、不跑閘門。
 
-複製檔案本身不會開始記錄。AI 還沒有被要求呼叫它。
+複製檔案本身不會開始記錄。提示詞第 5 行已接上，Mac 已在用。
 
 要拿掉：把 `decision_log.py` 刪掉，或用備份蓋回去。`decision_log.jsonl` 留著也不影響下單，沒有任何交易程式讀它。
 
-## 要開始記錄，還差一句（草稿，待使用者核准）
+## 提示詞第 5 行已接上
 
-要真正寫入，需要在 Mac `~/quantboy-gate/full_prompt.md` 加一句，請 AI 每輪判斷完候選後呼叫這支工具。那份檔案是實盤 routine 讀的規則文字，必須使用者另外同意。本 PR 不改它，也不改倉庫裡的 [agent_prompt.md](agent_prompt.md)、[strategy.md](strategy.md)。
+Mac `~/quantboy-gate/full_prompt.md` 第 5 行已經是下面這句，Mac 已在用。倉庫遮罩備份 `backups/mac/quantboy-gate/full_prompt.md` 第 5 行是同一句。[agent_prompt.md](agent_prompt.md) 的正文仍是 11/07 快照，沒有改寫。
 
-建議加在 `full_prompt.md` 全文最後，獨立一段。下面這句是草稿原文，尚未寫入任何提示詞：
+下面這句是已經寫進提示詞第 5 行的原文：
 
 ```text
 每輪對每個候選判斷完之後，立刻執行 python3 ~/quantboy-gate/decision_log.py --symbol <幣種> --pattern <型態> --decision <reject、enter、skip_other 三選一> --reason="<理由原文，不要改寫>" --round-time <本輪 ~/quantboy-gate/gate_log.jsonl 裡 decision 為 WAKE 那一列的 time>；這個命令只追加紀錄，失敗就跳過，下單、出場、風控與本輪其他判斷都照原來的規則繼續。
@@ -149,7 +149,7 @@ with open(dec, encoding="utf-8") as handle:
 
 理由開頭是「--」時，用空格寫法（`--reason "..."`）會被當成缺值，所以要用等號寫法（`--reason="..."`）。
 
-狀態：草稿，待使用者核准。
+狀態：已寫入 Mac 提示詞第 5 行，Mac 已在用。
 
 ## 測試
 

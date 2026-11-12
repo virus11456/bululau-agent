@@ -4,7 +4,7 @@
 
 `src/hardfilter.py` 接在 prefilter 之後，由 `gate.py` 呼叫。prefilter 給的是「近似」候選；這支只把**程式算得出來、而且確定不符合現行開單硬條件**的候選拿掉。剩下的照舊交給 AI。全部被拿掉、而且帳戶是新鮮可信的 0 倉 0 單，閘門才會 QUIET。
 
-頻率仍每 30 分鐘（±7）。風控、60 秒 watch、下單流程不動。2026-11-11 只改 R2：瘸師弟長黑從「連續 2–3 根」改回布神原文的瞬間單根。爆量倍數、盲掛、停損、出場、RR 都不改。倉庫裡的 `src/prefilter.py` 沒有連續長黑邏輯，沒有改；Mac 實盤那份初篩另見 `backups/mac/quantboy-paper/discretionary/prefilter.py`。
+頻率現行是每 15 分鐘（`*/15`，彈性 ±3，2026-11-11 19:09 起）。11/10 寫這支時是每 30 分鐘（±7）。風控、60 秒 watch、下單流程不動。2026-11-11 只改 R2：瘸師弟長黑從「連續 2–3 根」改回布神原文的瞬間單根。爆量倍數、盲掛、停損、出場、RR 都不改。倉庫裡的 `src/prefilter.py` 沒有連續長黑邏輯，沒有改；Mac 實盤那份初篩另見 `backups/mac/quantboy-paper/discretionary/prefilter.py`。
 
 ## 原則
 
@@ -85,9 +85,9 @@ AI 在 20:30 與 21:29 兩輪用的是 prefilter 的 `target` 欄。那個價是
    cp -p gate.py gate.py.bak.$ts
    cp -p gate_state.json gate_state.json.bak.$ts
    cp -p gate_log.jsonl gate_log.jsonl.bak.$ts
-   shasum gate.py   # 部署前應為 db9821487e5cad2dc9ea9db92e2c4aa5fdbc33fa
+   shasum gate.py   # db9821487e5cad2dc9ea9db92e2c4aa5fdbc33fa 是 2026-11-10 寫下這段時的舊檔。部署前與當時要部署的 main 上的 src/gate.py 比對，不要拿這個舊 sha 當現在的檢查。
    ```
-2. 放檔：把合併後 main 的 `src/gate.py` 覆蓋 `~/quantboy-gate/gate.py`，新增 `src/hardfilter.py` 為 `~/quantboy-gate/hardfilter.py`。避開整點／半點 ±7 分鐘（routine 可能正在跑），先寫成 `.new` 再 `mv`。
+2. 放檔：把合併後 main 的 `src/gate.py` 覆蓋 `~/quantboy-gate/gate.py`，新增 `src/hardfilter.py` 為 `~/quantboy-gate/hardfilter.py`。避開 `*/15` 刻度前後 3 分鐘（routine 可能正在跑），先寫成 `.new` 再 `mv`。
 3. 讀回驗證：
    ```bash
    shasum ~/quantboy-gate/gate.py ~/quantboy-gate/hardfilter.py      # 和 main 上的檔案比對

@@ -16,7 +16,7 @@
 
 `common.py` 仍與 Mac 原檔逐位元組相同，1944 bytes，沒有金鑰、帳戶資訊或機器 ID。`prefilter.py` 的 Mac 原檔是 12703 bytes；本 PR 改了瘸師弟長黑門檻之後，repo 檔不再等於 Mac 原檔。`full_prompt.md` 的 Mac 原檔是 2663 bytes；放進 repo 的是遮蔽版。遮蔽只動餘額與機器 ID。本 PR 再只改第 2 行的瘸師弟那一句，第 5 行 decision_log 留著。三份都查過，沒有 API 金鑰、token、密碼。
 
-Mac 上的檔在套 `deploy/pr15/` 之前，仍是上表「Mac 原檔」那一欄。`common.py` 沒有改。
+`deploy/pr15/` 只適用套用前 Mac `full_prompt.md` sha1 仍是 `0032025b93b9316559eb9c9bafcf18454d14a552` 的舊檔。現行不要再套。停損句用 `deploy/patches/stop_sentence.patch`，Mac 已於 2026-11-12 12:16（台北）套上，讀回 sha1 `a8c3693a93427d661c62b61c505cc40dc04da1d6`。`common.py` 沒有改。上表「Mac 原檔」是套 `deploy/pr15/` 之前的雜湊。
 
 ## full_prompt.md 遮蔽了哪兩處
 
@@ -49,7 +49,7 @@ shasum -a 1 ~/quantboy-gate/full_prompt.md
 
 套 `deploy/pr15/` 之前：`prefilter.py` 應等於 `c88941327c37af7e7e1593562458d0b16eea19fd`。`common.py` 應等於 `09463cbe52d279c02bbad04bd0650aee5a03bdf9`。`full_prompt.md` 應等於 `0032025b93b9316559eb9c9bafcf18454d14a552`（2663 bytes，含第 5 行 decision_log）。舊版 `~/quantboy-gate/full_prompt.md.bak.20261111193428` 的 sha1 應仍是 `e9c573e06b7a097e71f5167bda8bb5040045c31d`。
 
-`deploy/pr15/full_prompt.md.patch` 沒有上下文，只換第 2 行的瘸師弟那一句，不含檔尾，所以第 5 行留在原處。
+`deploy/pr15/full_prompt.md.patch` 沒有上下文，只換第 2 行的瘸師弟那一句，不含檔尾，所以第 5 行留在原處。它只適用上面那個 `0032025b…` 舊檔。現行檔已過這一版，改指 `deploy/patches/stop_sentence.patch`。
 
 套 patch 之後：`prefilter.py` 應等於 `7668d8f573713f32765166e6045e369c73705938`（這份沒有遮蔽，和 repo 檔相同）。`full_prompt.md` 的 Mac 原檔因為第 1 行仍是未遮蔽的餘額與機器 ID，而且第 5 行 decision_log 還在，sha 不會等於 repo 遮蔽版。`common.py` 不變。
 

@@ -4,11 +4,11 @@
 
 11/12 03:30–11:36（台北）帳戶請求一直是 401／-2015。gate 只記 `manage_failed`、`status_untrusted`，錯誤文字裡的 request ip 沒有進 `gate_log`。
 
-- `src/gate.py`：每輪把對外 IP 寫進 `gate_log.jsonl` 的 `public_ip`。manage 或 status **同一份輸出**同時有 HTTP 401 與 code -2015 時，理由加上 `ip_not_whitelisted`。原本的 `manage_failed`、`status_untrusted` 留著，結果仍是 WAKE。IP 優先解析錯誤文字的 `request ip`（來源 `binance_error`）。沒有才向 `https://api.ipify.org` 要一行 IP：HTTPS、不登入、不簽章、逾時 2 秒。失敗寫「未取得」。
-- 跟上一次成功記到的 IP 不同、而且這輪不是 401 -2015：不新增 WAKE 理由，只在 `ip_changed` 記 `from`／`to`。查不到就不改狀態檔裡的上一筆，也不把「未取得」當成變動。
+- `src/gate.py`：只認 live_trader 的 `HTTP 401 code -2015`（`幣安錯誤: HTTP 401 code -2015: …`）。錢包 `401.00`、未實現 `-2015.00` 不加 `ip_not_whitelisted`，也不因此把 QUIET 改成 WAKE。認到才追加理由。原本的 `manage_failed`、`status_untrusted` 留著。IP 優先解析該句的 `request ip`（來源 `binance_error`）。沒有 request ip 才向 `https://api.ipify.org` 要一行 IP：HTTPS、不登入、不簽章、逾時 2 秒。失敗寫「未取得」。
+- 沒有 401 -2015 時，ipify 最多每小時一次，上次查詢時間在 `gate_state.json` 的 `public_ip_checked_at`。IP 變了只寫 `ip_changed`，不加 WAKE 理由。查不到就不改狀態檔裡的上一筆。
 - 查詢在新鮮度時鐘與 QUIET／WAKE 定案之後。不改閱讀年齡、門檻、重試、頻率、60 秒 watch、下單、`live_trader`。
 - 選 ipify 是因為公開、不用帳號、回應是單行 IP。幣安印出的 request ip 才是白名單該對的地址，所以有 request ip 就不再查。
-- 測試不連網。還沒部署。部署檔只有 `src/gate.py`，覆蓋 `~/quantboy-gate/gate.py`。預期 sha1 `682ee0c11eb6fc536266d12c42c6be5bafda2591`。
+- 測試不連網。還沒部署。部署檔只有 `src/gate.py`，覆蓋 `~/quantboy-gate/gate.py`。預期 sha1 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`。
 
 ## 2026-11-12（瘸師弟停損句不再被讀成 1–2% 上限）
 

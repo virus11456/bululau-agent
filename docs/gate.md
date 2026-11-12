@@ -29,7 +29,7 @@ prefilter 有候選時，閘門會再跑同目錄的 `hardfilter.py`，把確定
 
 ## 斷線之後的補審
 
-repo 沒有 Mac 上 `gate.py` 的備份。這段以本倉庫 `src/gate.py` 為準。`docs/hardfilter.md` 裡寫過一個部署前 sha1，那是較早的檔，不是這次的對照本。這支 `src/gate.py` 的 sha1 是 `682ee0c11eb6fc536266d12c42c6be5bafda2591`（含斷線補審，也含下面的對外 IP 紀錄）。部署只覆蓋 `~/quantboy-gate/gate.py`。不要動 `live_trader.py`、prefilter、`full_prompt.md`、排程或 60 秒 watch。
+repo 沒有 Mac 上 `gate.py` 的備份。這段以本倉庫 `src/gate.py` 為準。`docs/hardfilter.md` 裡寫過一個部署前 sha1，那是較早的檔，不是這次的對照本。這支 `src/gate.py` 的 sha1 是 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`（含斷線補審，也含下面的對外 IP 紀錄）。部署只覆蓋 `~/quantboy-gate/gate.py`。不要動 `live_trader.py`、prefilter、`full_prompt.md`、排程或 60 秒 watch。
 
 `main()` 在 `manage`、`status` 失敗之後仍會呼叫公開 prefilter（只讀行情，不簽章）。11/12 那種幣安 401／-2015 不會把 prefilter 跳過。先前 `gate_log.jsonl` 只記 `n_candidates` 這個數字，不記是哪一個幣，下一輪也讀不回 WAKE 印出來的 JSON。所以斷線期間雖然有跑 prefilter，閘門自己沒有留下可補審的名單。
 
@@ -88,17 +88,19 @@ prefilter 結束碼 2 同時代表限流和其他行情失敗，**不能單靠�
 | `public_ip_source` | `binance_error`（錯誤文字裡的 request ip）或 `ipify`（下面的公開查詢）。沒拿到是 null。 |
 | `ip_changed` | 跟上一次成功記到的 IP 不同時為 `{"from","to"}`。沒變、或這輪沒拿到，是 null。 |
 
+只認 live_trader 印出的那一句：`HTTP 401 code -2015`（前面通常是 `幣安錯誤: `）。錢包 `401.00`、未實現 `-2015.00` 不是這一句，不加 `ip_not_whitelisted`，QUIET／WAKE 維持原判定。`HTTP 401` 與 `code -2015` 拆在 manage、status 兩份輸出裡也不算。只有 401，或 code 是 -2014／-1021，也不算。
+
 採用順序：
 
-1. manage 或 status 的輸出**同一份**裡同時有 `401` 和 `-2015`，而且有合法的 `request ip`：用那個 IP，來源 `binance_error`。這是幣安自己看到的地址，比外部查詢準。有了就不再查。
-2. 否則向 `https://api.ipify.org` 要一行 IP。選它是因為 HTTPS、不用登入、不用 API key、回應是單行 IP、沒有 HTML。逾時 2 秒。失敗、逾時、或回應不是 IP，記「未取得」。
-3. 只有 401、或 code 是 -2014／-1021 這類，不算這個原因。401 和 -2015 拆在 manage、status 兩份輸出裡也不算；必須同一份裡兩個都有。
+1. 同一份輸出有 `HTTP 401 code -2015`，而且有合法的 `request ip`：用那個 IP，來源 `binance_error`。這是幣安自己看到的地址。有了就不查 ipify。
+2. 有 `HTTP 401 code -2015` 但沒有 request ip：這輪就向 `https://api.ipify.org` 要一行 IP。選它是因為 HTTPS、不用登入、不用 API key、回應是單行 IP。逾時 2 秒。失敗記「未取得」。
+3. 沒有 401 -2015：ipify 最多每小時一次，只為了 `ip_changed`。上次查詢時間寫在 `gate_state.json` 的 `public_ip_checked_at`。這一小時內不再查，log 沿用上一筆 IP，`ip_changed` 是 null。滿一小時才再查。查到不同的 IP 才寫 `ip_changed`，不加 WAKE 理由。
 
-401 -2015 時理由追加 `ip_not_whitelisted`。`manage_failed`、`status_untrusted` 留著。這種輪本來就是 WAKE，結束碼仍是 10。WAKE 的第二行會印對外 IP 和來源，方便操盤手第一輪就回報。IP 只變、沒有 401 -2015 時，**不加理由**，QUIET 還是 QUIET，第一行也不改；變動只在 `ip_changed`。
+401 -2015 時理由追加 `ip_not_whitelisted`。`manage_failed`、`status_untrusted` 留著。這種輪本來就是 WAKE，結束碼仍是 10。WAKE 的第二行會印對外 IP 和來源。IP 只變、沒有 401 -2015 時，QUIET 還是 QUIET。
 
-查詢放在新鮮度時鐘（`checked`）和 QUIET／WAKE 定案之後。那 2 秒不計入 status／prefilter 的年齡，也不改各命令逾時、重試、`READING_MAX_AGE`、排程或 60 秒 watch。查詢失敗不會把一輪改成 WAKE。狀態檔 `gate_state.json` 的 `public_ip` 只在這輪拿到合法 IP 時更新；這輪是「未取得」就留著上一筆，不會把「未取得」當成 IP 變了。
+查詢放在新鮮度時鐘（`checked`）和 QUIET／WAKE 定案之後。那 2 秒不計入 status／prefilter 的年齡，也不改各命令逾時、重試、`READING_MAX_AGE`、排程或 60 秒 watch。查詢失敗不會把一輪改成 WAKE。狀態檔的 `public_ip` 只在這輪拿到合法 IP 時更新；這輪是「未取得」就留著上一筆。
 
-不讀金鑰，不對幣安送簽章請求。部署檔仍只有 `src/gate.py`，預期 sha1 `682ee0c11eb6fc536266d12c42c6be5bafda2591`。
+不讀金鑰，不對幣安送簽章請求。部署檔仍只有 `src/gate.py`，預期 sha1 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`。
 
 ## 在 Mac 上安裝
 

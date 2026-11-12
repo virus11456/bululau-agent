@@ -25,11 +25,11 @@ prefilter 只有在 stdout／stderr 辨識得出幣安 429 或 418 時才退避�
 交給 AI 的是這輪現算的候選，不是斷線期間存下的舊掛單價。狀態仍不可信就不補審。
 訊號若已不在這輪 prefilter 的結果裡，就不補審，也不另放寬窗口。
 
-每輪另記對外 IP。manage／status 出現 HTTP 401 且 code -2015 時，理由多一個
-ip_not_whitelisted（本來就會 WAKE，不改其他理由）。IP 優先取錯誤文字裡的
-request ip；沒有才查公開的 ipify，2 秒逾時，失敗記「未取得」。查詢在新鮮度
-時鐘與 QUIET／WAKE 定案之後，不改閱讀年齡，也不因 IP 變動改判定。變了但不是
-401 -2015，只在 gate_log 記 ip_changed。
+每輪可記對外 IP。只認 live_trader 的 `HTTP 401 code -2015`（幣安錯誤那一句），
+錢包 401.00、未實現 -2015.00 不算。認到才加 ip_not_whitelisted，本來就會 WAKE。
+IP 優先取該句裡的 request ip。沒有 request ip 才查 ipify。沒有 401 -2015 時，
+ipify 最多每小時一次，用來記 ip_changed，不改 QUIET／WAKE。查詢在新鮮度時鐘
+與判定之後。失敗記「未取得」。
 
 只用標準庫，Python 3.8+。不讀金鑰、不改 live_trader 的檔案、不自己下單。
 """
@@ -92,14 +92,15 @@ READING_MAX_AGE = timedelta(seconds=(
 # 查詢在 decide() 與 checked 時鐘之後，失敗記「未取得」，不改 QUIET／WAKE。
 PUBLIC_IP_URL = "https://api.ipify.org"
 PUBLIC_IP_TIMEOUT_S = 2.0
+PUBLIC_IP_LOOKUP_INTERVAL = timedelta(hours=1)
 PUBLIC_IP_UNKNOWN = "未取得"
 PUBLIC_IP_SOURCE_BINANCE = "binance_error"
 PUBLIC_IP_SOURCE_LOOKUP = "ipify"
 IP_NOT_WHITELISTED = "ip_not_whitelisted"
-# live_trader 失敗時印：幣安錯誤: HTTP 401 code -2015: ... request ip: x.x.x.x
-# 兩個數字都要有。只有 401 或只有別的 code（例如 -2014）不算白名單這一種。
-_HTTP_401_RE = re.compile(r"(?<!\d)401(?!\d)")
-_CODE_2015_RE = re.compile(r"(?<!\d)-2015(?!\d)")
+# live_trader.BinanceError 的字串是 "HTTP {status} code {code}: {msg}"，
+# main() 再印 "幣安錯誤: {e}"。只認這一句裡的 "HTTP 401 code -2015"。
+# 後面若緊接數字或小數點（401.00、-2015.00）不算。
+_IP_WHITELIST_RE = re.compile(r"HTTP 401 code -2015(?![\d.])")
 _REQUEST_IP_RE = re.compile(r"request\s*ip\s*[:=]\s*([0-9A-Fa-f:.]+)", re.IGNORECASE)
 
 # manage 輸出出現這些字，代表這輪有動作或風控，要叫 AI 回報。
@@ -711,10 +712,13 @@ def normalize_ip(text):
 
 
 def is_ip_whitelist_rejection(text):
-    """manage／status 的 stdout 或 stderr 同時有 HTTP 401 與 code -2015。"""
+    """同一份輸出裡有 live_trader 的 `HTTP 401 code -2015`。
+
+    不認分開的 401 與 -2015，也不認錢包 401.00、未實現 -2015.00。
+    """
     if not isinstance(text, str) or not text:
         return False
-    return _HTTP_401_RE.search(text) is not None and _CODE_2015_RE.search(text) is not None
+    return _IP_WHITELIST_RE.search(text) is not None
 
 
 def extract_request_ip(text):
@@ -753,11 +757,11 @@ def lookup_public_ip(timeout=PUBLIC_IP_TIMEOUT_S, url=PUBLIC_IP_URL, urlopen=Non
         return None
 
 
-def resolve_round_ip(manage, status_run, lookup):
-    """回傳 (ip 或 None, source 或 None, 是否 401 -2015)。
+def whitelist_from_account(manage, status_run):
+    """回傳 (是否 401 -2015, request ip 或 None)。
 
-    request ip 只從「同時含 401 與 -2015」的 manage／status 輸出拿。有就不再查公開服務。
-    沒有才呼叫 lookup。lookup 失敗或丟例外都當成沒拿到。
+    request ip 只從含 `HTTP 401 code -2015` 的那一份 manage／status 輸出拿。
+    這裡不查網路。
     """
     rejected = False
     parsed = None
@@ -771,17 +775,35 @@ def resolve_round_ip(manage, status_run, lookup):
         ip = extract_request_ip(blob)
         if ip:
             parsed = ip
-    if parsed:
-        return parsed, PUBLIC_IP_SOURCE_BINANCE, rejected
-    looked = None
+    return rejected, parsed
+
+
+def _public_ip_checked_at(state):
+    if not isinstance(state, dict):
+        return None
+    text = state.get("public_ip_checked_at")
+    if not isinstance(text, str) or not text.strip():
+        return None
     try:
-        if lookup is not None:
-            looked = normalize_ip(lookup())
-    except Exception:
-        looked = None
-    if looked:
-        return looked, PUBLIC_IP_SOURCE_LOOKUP, rejected
-    return None, None, rejected
+        parsed = datetime.fromisoformat(text.strip())
+    except ValueError:
+        return None
+    return _as_tpe(parsed)
+
+
+def public_ip_lookup_due(state, now, rejected, request_ip):
+    """有 request ip 不查。401 -2015 但沒有 request ip 這輪就查。
+
+    沒有 401 -2015 時最多每小時查一次，用來更新 ip_changed。
+    """
+    if request_ip:
+        return False
+    if rejected:
+        return True
+    checked = _public_ip_checked_at(state)
+    if checked is None or now is None:
+        return checked is None
+    return _as_tpe(now) - checked >= PUBLIC_IP_LOOKUP_INTERVAL
 
 
 def _stored_public_ip(state):
@@ -868,14 +890,40 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, i
 
     # 新鮮度用的 checked 已經定案。這裡才看 IP，所以查詢的 2 秒不會把讀數算老，
     # 也不會改 manage／status／prefilter 的逾時。401 -2015 本來就 WAKE，只多一個理由。
-    ip_value, ip_source, ip_rejected = resolve_round_ip(manage, status_run, ip_lookup)
+    ip_rejected, request_ip = whitelist_from_account(manage, status_run)
+    previous_ip = _stored_public_ip(previous)
+    queried = False
+    looked = None
+    if request_ip:
+        ip_value, ip_source = request_ip, PUBLIC_IP_SOURCE_BINANCE
+    elif public_ip_lookup_due(previous, started, ip_rejected, request_ip):
+        queried = True
+        try:
+            looked = normalize_ip(ip_lookup()) if ip_lookup is not None else None
+        except Exception:
+            looked = None
+        ip_value = looked
+        ip_source = PUBLIC_IP_SOURCE_LOOKUP if looked else None
+    else:
+        ip_value, ip_source = None, None
     if ip_rejected and IP_NOT_WHITELISTED not in reasons:
         reasons.append(IP_NOT_WHITELISTED)
         quiet = False
-    previous_ip = _stored_public_ip(previous)
+    observed_ip = request_ip or looked
     ip_changed = None
-    if ip_value and previous_ip and ip_value != previous_ip:
-        ip_changed = {"from": previous_ip, "to": ip_value}
+    if observed_ip and previous_ip and observed_ip != previous_ip:
+        ip_changed = {"from": previous_ip, "to": observed_ip}
+    if queried:
+        checked_at = started.isoformat(timespec="seconds")
+    else:
+        previous_checked = previous.get("public_ip_checked_at") if isinstance(previous, dict) else None
+        checked_at = previous_checked if isinstance(previous_checked, str) else None
+    if observed_ip:
+        logged_ip = observed_ip
+    elif queried:
+        logged_ip = None
+    else:
+        logged_ip = previous_ip
 
     observed = book_observation(status, checked)
     new_state = {
@@ -884,7 +932,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, i
         "last_decision": "QUIET" if quiet else "WAKE",
         "halt_reported_day": previous.get("halt_reported_day"),
         "pending_catchup": pending,
-        "public_ip": ip_value or previous_ip,
+        "public_ip": observed_ip or previous_ip,
+        "public_ip_checked_at": checked_at,
     }
     # 過期的 status 不能拿來銷掉「今天已經回報過停開新倉」，否則下一輪新鮮讀數會被靜音。
     if "halted_new_today" in reasons and observed != "unknown":
@@ -923,7 +972,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, i
                 "stopped": hf_retry["stopped"],
             },
             "catchup": catchup_log(catchup, pending_before),
-            "public_ip": ip_value if ip_value else PUBLIC_IP_UNKNOWN,
+            "public_ip": logged_ip if logged_ip else PUBLIC_IP_UNKNOWN,
             "public_ip_source": ip_source,
             "ip_changed": ip_changed,
         })

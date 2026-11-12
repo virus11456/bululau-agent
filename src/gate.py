@@ -621,6 +621,7 @@ def run_prefilter_with_retry(runner, argv, cwd, sleep, monotonic=None):
     if monotonic is None:
         monotonic = time.monotonic
     waits = []
+    statuses = []
     limited = False
     stopped = None
     attempts = 0
@@ -637,9 +638,11 @@ def run_prefilter_with_retry(runner, argv, cwd, sleep, monotonic=None):
             timeout = min(float(PREFILTER_TIMEOUT_S), remaining)
         attempts = attempt
         result = dict(runner(argv, timeout, cwd=cwd, lock_retries=0) or {})
-        if parse_prefilter(result) is not None or identify_prefilter_rate_limit(result) is None:
+        status_code = identify_prefilter_rate_limit(result)
+        if parse_prefilter(result) is not None or status_code is None:
             break
         limited = True
+        statuses.append(status_code)
         if attempt > PREFILTER_MAX_RETRIES:
             stopped = "retries_exhausted"
             break
@@ -661,6 +664,7 @@ def run_prefilter_with_retry(runner, argv, cwd, sleep, monotonic=None):
     result["rate_limit_retries"] = len(waits)
     result["rate_limit_wait_s"] = round(sum(waits), 3)
     result["rate_limit_waits_s"] = [round(item, 3) for item in waits]
+    result["rate_limit_statuses"] = list(statuses)
     result["rate_limit_stopped"] = stopped
     return result
 
@@ -682,7 +686,7 @@ def hardfilter_retry_log(run):
     """hardfilter stdout 最後一個 JSON 裡的重試統計。沒有就當 0。"""
     body = _last_json_dict((run or {}).get("stdout"))
     if not isinstance(body, dict):
-        return {"retries": 0, "wait_s": 0, "waits_s": [], "stopped": None}
+        return {"retries": 0, "wait_s": 0, "waits_s": [], "stopped": None, "statuses": []}
     retries = body.get("rate_limit_retries")
     wait_s = body.get("rate_limit_wait_s")
     waits = body.get("rate_limit_waits_s")
@@ -695,7 +699,13 @@ def hardfilter_retry_log(run):
     stopped = body.get("rate_limit_stopped")
     if stopped is not None and not isinstance(stopped, str):
         stopped = None
-    return {"retries": retries, "wait_s": wait_s, "waits_s": waits, "stopped": stopped}
+    raw_statuses = body.get("rate_limit_statuses")
+    statuses = []
+    if isinstance(raw_statuses, list):
+        for item in raw_statuses:
+            if item in (429, 418):
+                statuses.append(item)
+    return {"retries": retries, "wait_s": wait_s, "waits_s": waits, "stopped": stopped, "statuses": statuses}
 
 
 def normalize_ip(text):
@@ -958,6 +968,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, i
                 "wait_s": prefilter_run.get("rate_limit_wait_s"),
                 "waits_s": prefilter_run.get("rate_limit_waits_s"),
                 "stopped": prefilter_run.get("rate_limit_stopped"),
+                "statuses": list(prefilter_run.get("rate_limit_statuses") or []),
             },
             "hardfilter": None if not prefilter or hardfilter_run is None else {
                 "failed": bool(prefilter.get("hardfilter_failed")),
@@ -970,6 +981,7 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, i
                 "wait_s": hf_retry["wait_s"],
                 "waits_s": hf_retry["waits_s"],
                 "stopped": hf_retry["stopped"],
+                "statuses": list(hf_retry.get("statuses") or []),
             },
             "catchup": catchup_log(catchup, pending_before),
             "public_ip": logged_ip if logged_ip else PUBLIC_IP_UNKNOWN,

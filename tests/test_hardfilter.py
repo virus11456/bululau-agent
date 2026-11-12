@@ -388,6 +388,7 @@ class KlineRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(out["rate_limit_retries"], 1)
         self.assertEqual(out["rate_limit_wait_s"], 2.0)
         self.assertEqual(out["rate_limit_waits_s"], [2.0])
+        self.assertEqual(out["rate_limit_statuses"], [429])
         self.assertIsNone(out["rate_limit_stopped"])
         self.assertEqual(self.sleeps, [2.0])
 
@@ -397,9 +398,10 @@ class KlineRateLimitRetryTest(unittest.TestCase):
             if self.calls == 1:
                 raise http_error(418)
             return _Body([CLOSED])
-        self.fetch(urlopen)
+        budget_bars = self.fetch(urlopen)
         self.assertEqual(self.calls, 2)
         self.assertEqual(self.sleeps, [2.0])
+        self.assertEqual(len(budget_bars), 1)
 
     def test_retries_exhausted_exits_2(self):
         def urlopen(_req, timeout=None):
@@ -417,6 +419,8 @@ class KlineRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(self.sleeps, [2.0, 6.0])
         self.assertEqual(out["rate_limit_retries"], 2)
         self.assertEqual(out["rate_limit_wait_s"], 8.0)
+        self.assertEqual(out["rate_limit_waits_s"], [2.0, 6.0])
+        self.assertEqual(out["rate_limit_statuses"], [429, 429, 429])
         self.assertEqual(out["rate_limit_stopped"], "retries_exhausted")
 
     def test_retry_after_is_honored(self):

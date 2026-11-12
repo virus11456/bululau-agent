@@ -370,7 +370,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def blocked_rec(cand, rule="kuai_consecutive_blacks", why="只有 1 根長黑"):
+def blocked_rec(cand, rule="kuai_long_black", why="只有 1 根長黑"):
     return {"symbol": cand["symbol"], "setup": cand.get("setup"), "blocked_by": rule, "why": why, "checks": []}
 
 
@@ -615,6 +615,7 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(row["prefilter_retry"]["retries"], 1)
         self.assertEqual(row["prefilter_retry"]["wait_s"], 5.0)
         self.assertEqual(row["prefilter_retry"]["waits_s"], [5.0])
+        self.assertEqual(row["prefilter_retry"]["statuses"], [429])
         self.assertIsNone(row["prefilter_retry"]["stopped"])
 
     def test_418_then_success_uses_same_backoff(self):
@@ -623,6 +624,22 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
         self.assertEqual(code, gate.QUIET, out)
         self.assertEqual(self.sleeps, [5.0])
         self.assertEqual(self.log_row()["prefilter_retry"]["retries"], 1)
+        self.assertEqual(self.log_row()["prefilter_retry"]["statuses"], [418])
+
+    def test_429_then_418_keeps_backoff_and_records_both_codes(self):
+        runner = ScriptRunner(
+            [limited_prefilter(429), limited_prefilter(418), quiet_prefilter(self.when)],
+            self.when,
+        )
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.QUIET, out)
+        self.assertEqual(self.sleeps, [5.0, 15.0])
+        row = self.log_row()["prefilter_retry"]
+        self.assertEqual(row["statuses"], [429, 418])
+        self.assertEqual(row["retries"], 2)
+        self.assertEqual(row["wait_s"], 20.0)
+        self.assertEqual(gate.PREFILTER_BACKOFF_S, (5.0, 15.0))
+        self.assertEqual(gate.PREFILTER_MAX_RETRIES, 2)
 
     def test_retries_exhausted_still_wakes(self):
         runner = ScriptRunner([limited_prefilter(429), limited_prefilter(429), limited_prefilter(429)], self.when)

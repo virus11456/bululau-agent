@@ -1,5 +1,13 @@
 # 變更紀錄
 
+## 2026-11-12（帳戶斷線恢復後補審仍合格的候選）
+
+11/12 03:30 起幣安 401／-2015 時，gate 因 `manage_failed`／`status_untrusted` WAKE。公開 prefilter 在 `manage`、`status` 失敗後仍會跑，但 `gate_log` 只記候選張數，下一輪對不到是哪一個幣，也沒有舊掛單價可以沿用。
+
+- `src/gate.py`：帳戶不可信時，把 prefilter 抓到的幣種、型態、訊號 K 記進 `gate_state.json`，不記價格。持倉／掛單恢復可信、且這輪 prefilter 與 hardfilter 都跑完的第一輪，只把重跑後仍留在 kept 的候選交給 AI（`catchup_review`）。價格用這輪現算的結果。狀態仍不可信、或重跑後不在 kept，不補審。不改門檻、頻率、60 秒 watch、下單、`live_trader`。
+- repo 沒有 Mac `gate.py` 備份，這次以 `src/gate.py` 為準。
+- 新增 `tests/test_gate.py` 的補審測試。不連網、不簽章。
+
 ## 2026-11-11（瘸師弟長黑改回布神原文：單根）
 
 使用者 19:19（台北）原話：「我們要模糊的正確 不要精準的錯誤」。19:23 原話：「prompt 和 quantboy-paper 的初篩都一起改成單根長黑，驗證審過再部署」「布神原版筆記怎麼寫就怎麼改」。

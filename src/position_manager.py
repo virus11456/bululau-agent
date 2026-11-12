@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """紙上倉位檢查。讀資料目錄的 positions.json，用已收盤的 15m K 棒檢查停損、止盈、時間停損。
+止盈（高點碰到 target 就平）是 2026-10 參數，未接現行監控。
 RULES 是 2026-10 紙上參數，和 2026-11-03 實盤出場不一致。實盤不要用這支決定減倉或移動停損，請看 docs/strategy.md。
 有事件時結束碼 10，沒有是 0，資料錯誤是 2。用法：python3 src/position_manager.py [--dry]
 """

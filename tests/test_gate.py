@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta
 from contextlib import redirect_stdout
 
@@ -103,16 +104,19 @@ class GateTest(unittest.TestCase):
     def busy(self):
         return status_text(self.when, positions=1, pos_rows=BUSY_POS, algo=2, order_rows=BUSY_ORDERS)
 
-    def run_gate(self, runner, clock=None, sleep=None):
+    def run_gate(self, runner, clock=None, sleep=None, ip_lookup=None):
         out = io.StringIO()
         if sleep is None:
             sleep = lambda _s: None
+        if ip_lookup is None:
+            ip_lookup = lambda: None
         with redirect_stdout(out):
             code = gate.main(
                 ["--state-dir", self.tmp.name, "--root", self.tmp.name],
                 runner=runner,
                 clock=clock or self.clock,
                 sleep=sleep,
+                ip_lookup=ip_lookup,
             )
         return code, out.getvalue()
 
@@ -236,6 +240,7 @@ class GateTest(unittest.TestCase):
             code = gate.main(
                 ["--root", root, "--state-dir", os.path.join(root, "gate")],
                 clock=self.clock,
+                ip_lookup=lambda: None,
             )
         self.assertEqual(code, gate.QUIET, out.getvalue())
 
@@ -395,7 +400,7 @@ class GateHardfilterTest(unittest.TestCase):
             sleep = lambda _s: None
         argv = ["--state-dir", self.tmp.name, "--root", self.tmp.name, "--hardfilter", self.hf_path] + (extra or [])
         with redirect_stdout(out):
-            code = gate.main(argv, runner=runner, clock=self.clock, sleep=sleep)
+            code = gate.main(argv, runner=runner, clock=self.clock, sleep=sleep, ip_lookup=lambda: None)
         return code, out.getvalue()
 
     def log_rows(self):
@@ -580,6 +585,7 @@ class PrefilterRateLimitRetryTest(unittest.TestCase):
                 clock=lambda: self.when,
                 sleep=self.sleeps.append if sleep is None else sleep,
                 monotonic=monotonic,
+                ip_lookup=lambda: None,
             )
         return code, out.getvalue()
 
@@ -786,6 +792,7 @@ class PrefilterRetryWallTest(unittest.TestCase):
                 clock=lambda: self.when,
                 sleep=clock.sleep,
                 monotonic=clock,
+                ip_lookup=lambda: None,
             )
         return code, out.getvalue()
 
@@ -1058,3 +1065,234 @@ class CatchupReviewTest(GateTest):
         self.assertEqual(code, gate.QUIET, out)
         self.assertNotIn(str(OLD_STOP), out)
         self.assertEqual(self.state()["pending_catchup"], [])
+
+
+# 文件用的測試網段（RFC 5737）。不是任何一台機器的對外 IP。
+IP_A = "203.0.113.10"
+IP_B = "203.0.113.20"
+IP_C = "203.0.113.30"
+
+
+def binance_whitelist_error(ip=None, code="-2015", status=401):
+    msg = "Invalid API-key, IP, or permissions for action"
+    if ip:
+        msg += ", request ip: {0}".format(ip)
+    return "幣安錯誤: HTTP {0} code {1}: {2}".format(status, code, msg)
+
+
+class _Body:
+    def __init__(self, data):
+        self.data = data
+
+    def read(self, _n):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class PublicIpAlertTest(GateTest):
+    """401 -2015 多一個理由與 IP。IP 變動本身不改 QUIET／WAKE。不連網。"""
+
+    def state(self):
+        with open(os.path.join(self.tmp.name, "gate_state.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def log_rows(self):
+        with open(os.path.join(self.tmp.name, "gate_log.jsonl"), encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def test_normalize_and_extract_do_not_use_the_network(self):
+        self.assertEqual(gate.normalize_ip(" 203.0.113.10 "), IP_A)
+        self.assertEqual(gate.normalize_ip("2001:db8::1"), "2001:db8::1")
+        self.assertIsNone(gate.normalize_ip("999.1.1.1"))
+        self.assertIsNone(gate.normalize_ip("未取得"))
+        self.assertIsNone(gate.normalize_ip(None))
+        text = binance_whitelist_error(IP_A) + "\nrequest ip: 999.1.1.1\nrequest ip: " + IP_B
+        self.assertTrue(gate.is_ip_whitelist_rejection(text))
+        self.assertEqual(gate.extract_request_ip(text), IP_B)
+        self.assertFalse(gate.is_ip_whitelist_rejection("幣安錯誤: HTTP 401 code -2014"))
+        self.assertFalse(gate.is_ip_whitelist_rejection("code -2015 only"))
+        self.assertFalse(gate.is_ip_whitelist_rejection("HTTP 401 only"))
+
+    def test_401_parses_request_ip_and_does_not_call_lookup(self):
+        calls = []
+
+        def lookup():
+            calls.append("lookup")
+            return IP_B
+
+        err = binance_whitelist_error(IP_A)
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": err},
+            status={"code": 1, "stdout": "", "stderr": "幣安錯誤: HTTP 401 code -2015"},
+        )
+        code, out = self.run_gate(runner, ip_lookup=lookup)
+        self.assertEqual(code, gate.WAKE)
+        first = out.splitlines()[0]
+        self.assertIn("manage_failed", first)
+        self.assertIn("status_untrusted", first)
+        self.assertIn("ip_not_whitelisted", first)
+        self.assertNotIn("ip_changed", first)
+        self.assertIn(IP_A, out)
+        self.assertEqual(calls, [])
+        row = self.log_rows()[-1]
+        self.assertEqual(row["decision"], "WAKE")
+        self.assertEqual(row["public_ip"], IP_A)
+        self.assertEqual(row["public_ip_source"], "binance_error")
+        self.assertIsNone(row["ip_changed"])
+        self.assertEqual(self.state()["public_ip"], IP_A)
+
+    def test_401_without_request_ip_uses_lookup(self):
+        calls = []
+
+        def lookup():
+            calls.append(1)
+            return IP_B
+
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": binance_whitelist_error()},
+            status={"code": 1, "stdout": "", "stderr": ""},
+        )
+        code, out = self.run_gate(runner, ip_lookup=lookup)
+        self.assertEqual(code, gate.WAKE)
+        self.assertIn("ip_not_whitelisted", out.splitlines()[0])
+        self.assertEqual(calls, [1])
+        row = self.log_rows()[-1]
+        self.assertEqual(row["public_ip"], IP_B)
+        self.assertEqual(row["public_ip_source"], "ipify")
+        self.assertIn("公開查詢 ipify", out)
+
+    def test_401_lookup_failure_records_unknown_and_stays_wake(self):
+        def lookup():
+            raise OSError("down")
+
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": binance_whitelist_error()},
+            status={"code": 1, "stdout": "", "stderr": ""},
+        )
+        code, out = self.run_gate(runner, ip_lookup=lookup)
+        self.assertEqual(code, gate.WAKE)
+        self.assertIn("ip_not_whitelisted", out.splitlines()[0])
+        self.assertIn("未取得", out)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["public_ip"], "未取得")
+        self.assertIsNone(row["public_ip_source"])
+        self.assertIsNone(self.state()["public_ip"])
+
+    def test_other_failures_do_not_use_the_whitelist_reason(self):
+        cases = [
+            {"code": 1, "stdout": "", "stderr": "幣安錯誤: HTTP 401 code -2014: API-key format invalid"},
+            {"code": 1, "stdout": "", "stderr": "幣安錯誤: HTTP 400 code -1021: Timestamp"},
+            {"code": 1, "stdout": "request ip: {0}".format(IP_A), "stderr": ""},
+        ]
+        for manage in cases:
+            with self.subTest(manage=manage):
+                code, out = self.run_gate(self.fresh_runner(manage=manage), ip_lookup=lambda: IP_B)
+                self.assertEqual(code, gate.WAKE)
+                self.assertNotIn("ip_not_whitelisted", out.splitlines()[0])
+                row = self.log_rows()[-1]
+                self.assertNotIn("ip_not_whitelisted", row["reasons"])
+                self.assertEqual(row["public_ip_source"], "ipify")
+                self.assertEqual(row["public_ip"], IP_B)
+
+    def test_split_401_and_2015_across_commands_is_not_enough(self):
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": "HTTP 401"},
+            status={"code": 1, "stdout": "", "stderr": "code -2015 request ip: {0}".format(IP_A)},
+        )
+        code, out = self.run_gate(runner, ip_lookup=lambda: IP_B)
+        self.assertEqual(code, gate.WAKE)
+        self.assertNotIn("ip_not_whitelisted", out.splitlines()[0])
+        self.assertEqual(self.log_rows()[-1]["public_ip"], IP_B)
+        self.assertEqual(self.log_rows()[-1]["public_ip_source"], "ipify")
+
+    def test_ip_change_without_401_stays_quiet(self):
+        seen = []
+
+        def lookup():
+            seen.append(1)
+            return IP_A if len(seen) == 1 else IP_B
+
+        code, out = self.run_gate(self.fresh_runner(), ip_lookup=lookup)
+        self.assertEqual(code, gate.QUIET)
+        self.assertTrue(out.startswith("QUIET"))
+        self.assertNotIn("ip_", out)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["reasons"], [])
+        self.assertEqual(row["public_ip"], IP_A)
+        self.assertIsNone(row["ip_changed"])
+
+        code, out = self.run_gate(self.fresh_runner(), ip_lookup=lookup)
+        self.assertEqual(code, gate.QUIET, out)
+        self.assertTrue(out.startswith("QUIET"))
+        self.assertNotIn("ip_not_whitelisted", out)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["reasons"], [])
+        self.assertEqual(row["decision"], "QUIET")
+        self.assertEqual(row["ip_changed"], {"from": IP_A, "to": IP_B})
+        self.assertEqual(self.state()["public_ip"], IP_B)
+
+        code, _out = self.run_gate(self.fresh_runner(), ip_lookup=lambda: IP_B)
+        self.assertEqual(code, gate.QUIET)
+        self.assertIsNone(self.log_rows()[-1]["ip_changed"])
+
+    def test_lookup_miss_keeps_previous_ip_and_does_not_wake(self):
+        self.run_gate(self.fresh_runner(), ip_lookup=lambda: IP_A)
+        code, out = self.run_gate(self.fresh_runner(), ip_lookup=lambda: None)
+        self.assertEqual(code, gate.QUIET, out)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["public_ip"], "未取得")
+        self.assertIsNone(row["ip_changed"])
+        self.assertEqual(row["reasons"], [])
+        self.assertEqual(self.state()["public_ip"], IP_A)
+        code, _out = self.run_gate(self.fresh_runner(), ip_lookup=lambda: IP_C)
+        self.assertEqual(code, gate.QUIET)
+        self.assertEqual(self.log_rows()[-1]["ip_changed"], {"from": IP_A, "to": IP_C})
+
+    def test_ip_change_and_401_keep_wake_and_record_both(self):
+        self.run_gate(self.fresh_runner(), ip_lookup=lambda: IP_A)
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": binance_whitelist_error(IP_B)},
+            status={"code": 1, "stdout": "", "stderr": ""},
+        )
+        code, out = self.run_gate(runner, ip_lookup=lambda: IP_C)
+        self.assertEqual(code, gate.WAKE)
+        first = out.splitlines()[0]
+        self.assertIn("manage_failed", first)
+        self.assertIn("status_untrusted", first)
+        self.assertNotIn("previous_state_untrusted", first)
+        self.assertIn("ip_not_whitelisted", first)
+        self.assertNotIn("ip_changed", first)
+        row = self.log_rows()[-1]
+        self.assertEqual(row["public_ip"], IP_B)
+        self.assertEqual(row["public_ip_source"], "binance_error")
+        self.assertEqual(row["ip_changed"], {"from": IP_A, "to": IP_B})
+        self.assertNotIn(IP_C, json.dumps(row))
+
+    def test_invalid_request_ip_falls_back_to_lookup(self):
+        err = "幣安錯誤: HTTP 401 code -2015: request ip: 999.1.1.1"
+        runner = self.fresh_runner(
+            manage={"code": 1, "stdout": "", "stderr": err},
+            status={"code": 1, "stdout": "", "stderr": ""},
+        )
+        code, _out = self.run_gate(runner, ip_lookup=lambda: IP_A)
+        self.assertEqual(code, gate.WAKE)
+        row = self.log_rows()[-1]
+        self.assertIn("ip_not_whitelisted", row["reasons"])
+        self.assertEqual(row["public_ip"], IP_A)
+        self.assertEqual(row["public_ip_source"], "ipify")
+
+    def test_lookup_public_ip_uses_short_timeout_and_rejects_garbage(self):
+        with mock.patch("urllib.request.urlopen", return_value=_Body(b"203.0.113.10\n")) as opened:
+            self.assertEqual(gate.lookup_public_ip(), IP_A)
+            self.assertEqual(opened.call_args.kwargs["timeout"], gate.PUBLIC_IP_TIMEOUT_S)
+            request = opened.call_args.args[0]
+            self.assertEqual(request.full_url, gate.PUBLIC_IP_URL)
+        with mock.patch("urllib.request.urlopen", return_value=_Body(b"<html>no</html>")):
+            self.assertIsNone(gate.lookup_public_ip())
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("slow")):
+            self.assertIsNone(gate.lookup_public_ip())

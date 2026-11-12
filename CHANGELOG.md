@@ -1,5 +1,15 @@
 # 變更紀錄
 
+## 2026-11-12（401 -2015 寫明 ip_not_whitelisted，並每輪記對外 IP）
+
+11/12 03:30–11:36（台北）帳戶請求一直是 401／-2015。gate 只記 `manage_failed`、`status_untrusted`，錯誤文字裡的 request ip 沒有進 `gate_log`。
+
+- `src/gate.py`：只認 live_trader 的 `HTTP 401 code -2015`（`幣安錯誤: HTTP 401 code -2015: …`）。錢包 `401.00`、未實現 `-2015.00` 不加 `ip_not_whitelisted`，也不因此把 QUIET 改成 WAKE。認到才追加理由。原本的 `manage_failed`、`status_untrusted` 留著。IP 優先解析該句的 `request ip`（來源 `binance_error`）。沒有 request ip 才向 `https://api.ipify.org` 要一行 IP：HTTPS、不登入、不簽章、逾時 2 秒。失敗寫「未取得」。
+- 沒有 401 -2015 時，ipify 最多每小時一次，上次查詢時間在 `gate_state.json` 的 `public_ip_checked_at`。IP 變了只寫 `ip_changed`，不加 WAKE 理由。查不到就不改狀態檔裡的上一筆。
+- 查詢在新鮮度時鐘與 QUIET／WAKE 定案之後。不改閱讀年齡、門檻、重試、頻率、60 秒 watch、下單、`live_trader`。
+- 選 ipify 是因為公開、不用帳號、回應是單行 IP。幣安印出的 request ip 才是白名單該對的地址，所以有 request ip 就不再查。
+- 測試不連網。還沒部署。部署檔只有 `src/gate.py`，覆蓋 `~/quantboy-gate/gate.py`。預期 sha1 `fb4234e0b071ed4b8694aef7f06f430f719aafa2`。
+
 ## 2026-11-12（瘸師弟停損句不再被讀成 1–2% 上限）
 
 只改 `backups/mac/quantboy-gate/full_prompt.md` 第 2 行裡瘸師弟的「合理好球帶內盲掛、結構停損1–2%（BTC/ETH至少3%）」那一段。改成：低掛是前低下方的掛單深度（布神例：前低 100 掛 97、96、95），不是停損上限；停損自設、嚴格執行、不可擴大；沒有 1–2% 上限；結構太近才往外推。1.5R 全平、單根長黑、訊號量、其他門檻、第 5 行 decision_log 沒有改。

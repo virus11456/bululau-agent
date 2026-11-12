@@ -25,15 +25,23 @@ prefilter 只有在 stdout／stderr 辨識得出幣安 429 或 418 時才退避�
 交給 AI 的是這輪現算的候選，不是斷線期間存下的舊掛單價。狀態仍不可信就不補審。
 訊號若已不在這輪 prefilter 的結果裡，就不補審，也不另放寬窗口。
 
+每輪可記對外 IP。只認 live_trader 的 `HTTP 401 code -2015`（幣安錯誤那一句），
+錢包 401.00、未實現 -2015.00 不算。認到才加 ip_not_whitelisted，本來就會 WAKE。
+IP 優先取該句裡的 request ip。沒有 request ip 才查 ipify。沒有 401 -2015 時，
+ipify 最多每小時一次，用來記 ip_changed，不改 QUIET／WAKE。查詢在新鮮度時鐘
+與判定之後。失敗記「未取得」。
+
 只用標準庫，Python 3.8+。不讀金鑰、不改 live_trader 的檔案、不自己下單。
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 TPE = timezone(timedelta(hours=8))
@@ -80,6 +88,20 @@ READING_MAX_FUTURE_SKEW = timedelta(seconds=120)
 READING_MAX_AGE = timedelta(seconds=(
     STATUS_TIMEOUT_S + PREFILTER_TIMEOUT_S + STATUS_MINUTE_TRUNCATION_S + READING_FRESHNESS_MARGIN_S
 ))
+# 對外 IP 只供 gate_log 與 401 -2015 的原因。不是策略、風控或新鮮度參數。
+# 查詢在 decide() 與 checked 時鐘之後，失敗記「未取得」，不改 QUIET／WAKE。
+PUBLIC_IP_URL = "https://api.ipify.org"
+PUBLIC_IP_TIMEOUT_S = 2.0
+PUBLIC_IP_LOOKUP_INTERVAL = timedelta(hours=1)
+PUBLIC_IP_UNKNOWN = "未取得"
+PUBLIC_IP_SOURCE_BINANCE = "binance_error"
+PUBLIC_IP_SOURCE_LOOKUP = "ipify"
+IP_NOT_WHITELISTED = "ip_not_whitelisted"
+# live_trader.BinanceError 的字串是 "HTTP {status} code {code}: {msg}"，
+# main() 再印 "幣安錯誤: {e}"。只認這一句裡的 "HTTP 401 code -2015"。
+# 後面若緊接數字或小數點（401.00、-2015.00）不算。
+_IP_WHITELIST_RE = re.compile(r"HTTP 401 code -2015(?![\d.])")
+_REQUEST_IP_RE = re.compile(r"request\s*ip\s*[:=]\s*([0-9A-Fa-f:.]+)", re.IGNORECASE)
 
 # manage 輸出出現這些字，代表這輪有動作或風控，要叫 AI 回報。
 # 「孤兒條件單」是空倉時清掉殘留條件單印的那一行，原文不含「撤」或「取消」。
@@ -676,7 +698,121 @@ def hardfilter_retry_log(run):
     return {"retries": retries, "wait_s": wait_s, "waits_s": waits, "stopped": stopped}
 
 
-def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
+def normalize_ip(text):
+    """IPv4 或 IPv6。不像 IP 的字串回 None。不連網。"""
+    if not isinstance(text, str):
+        return None
+    token = text.strip().strip(".,;\"'）)")
+    if not token or len(token) > 64 or any(ch.isspace() for ch in token):
+        return None
+    try:
+        return str(ipaddress.ip_address(token))
+    except ValueError:
+        return None
+
+
+def is_ip_whitelist_rejection(text):
+    """同一份輸出裡有 live_trader 的 `HTTP 401 code -2015`。
+
+    不認分開的 401 與 -2015，也不認錢包 401.00、未實現 -2015.00。
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    return _IP_WHITELIST_RE.search(text) is not None
+
+
+def extract_request_ip(text):
+    """錯誤文字裡最後一個合法的 request ip。沒有回 None。"""
+    if not isinstance(text, str) or not text:
+        return None
+    found = None
+    for match in _REQUEST_IP_RE.finditer(text):
+        ip = normalize_ip(match.group(1))
+        if ip:
+            found = ip
+    return found
+
+
+def lookup_public_ip(timeout=PUBLIC_IP_TIMEOUT_S, url=PUBLIC_IP_URL, urlopen=None):
+    """向 ipify 要一行公開 IP。不登入、不帶幣安簽章。失敗或看不懂回 None，不丟例外。
+
+    選 ipify：HTTPS、不用帳號、回應是單行 IP，沒有 HTML。timeout 預設 2 秒。
+    幣安錯誤裡已有 request ip 時，呼叫端不該再來這裡。
+    """
+    if urlopen is None:
+        urlopen = urllib.request.urlopen
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "bululau-gate"})
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(128)
+        if isinstance(raw, bytes):
+            raw = raw.decode("ascii", errors="replace")
+        line = ""
+        for part in raw.splitlines():
+            if part.strip():
+                line = part.strip()
+                break
+        return normalize_ip(line)
+    except Exception:
+        return None
+
+
+def whitelist_from_account(manage, status_run):
+    """回傳 (是否 401 -2015, request ip 或 None)。
+
+    request ip 只從含 `HTTP 401 code -2015` 的那一份 manage／status 輸出拿。
+    這裡不查網路。
+    """
+    rejected = False
+    parsed = None
+    for result in (manage, status_run):
+        if not isinstance(result, dict):
+            continue
+        blob = _combined_output(result)
+        if not is_ip_whitelist_rejection(blob):
+            continue
+        rejected = True
+        ip = extract_request_ip(blob)
+        if ip:
+            parsed = ip
+    return rejected, parsed
+
+
+def _public_ip_checked_at(state):
+    if not isinstance(state, dict):
+        return None
+    text = state.get("public_ip_checked_at")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.strip())
+    except ValueError:
+        return None
+    return _as_tpe(parsed)
+
+
+def public_ip_lookup_due(state, now, rejected, request_ip):
+    """有 request ip 不查。401 -2015 但沒有 request ip 這輪就查。
+
+    沒有 401 -2015 時最多每小時查一次，用來更新 ip_changed。
+    """
+    if request_ip:
+        return False
+    if rejected:
+        return True
+    checked = _public_ip_checked_at(state)
+    if checked is None or now is None:
+        return checked is None
+    return _as_tpe(now) - checked >= PUBLIC_IP_LOOKUP_INTERVAL
+
+
+def _stored_public_ip(state):
+    if not isinstance(state, dict):
+        return None
+    return normalize_ip(state.get("public_ip"))
+
+
+def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None, ip_lookup=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="省 token 閘門：空輪不叫 AI")
     ap.add_argument("--root", default=os.path.expanduser("~/quantboy-live"), help="live_trader.py 所在目錄")
@@ -692,6 +828,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         sleep = time.sleep
     if monotonic is None:
         monotonic = time.monotonic
+    if ip_lookup is None:
+        ip_lookup = lookup_public_ip
 
     os.makedirs(args.state_dir, exist_ok=True)
     state_path = os.path.join(args.state_dir, "gate_state.json")
@@ -750,6 +888,43 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         checked = clock()
         quiet, reasons = False, ["gate_error:{0}".format(type(exc).__name__)]
 
+    # 新鮮度用的 checked 已經定案。這裡才看 IP，所以查詢的 2 秒不會把讀數算老，
+    # 也不會改 manage／status／prefilter 的逾時。401 -2015 本來就 WAKE，只多一個理由。
+    ip_rejected, request_ip = whitelist_from_account(manage, status_run)
+    previous_ip = _stored_public_ip(previous)
+    queried = False
+    looked = None
+    if request_ip:
+        ip_value, ip_source = request_ip, PUBLIC_IP_SOURCE_BINANCE
+    elif public_ip_lookup_due(previous, started, ip_rejected, request_ip):
+        queried = True
+        try:
+            looked = normalize_ip(ip_lookup()) if ip_lookup is not None else None
+        except Exception:
+            looked = None
+        ip_value = looked
+        ip_source = PUBLIC_IP_SOURCE_LOOKUP if looked else None
+    else:
+        ip_value, ip_source = None, None
+    if ip_rejected and IP_NOT_WHITELISTED not in reasons:
+        reasons.append(IP_NOT_WHITELISTED)
+        quiet = False
+    observed_ip = request_ip or looked
+    ip_changed = None
+    if observed_ip and previous_ip and observed_ip != previous_ip:
+        ip_changed = {"from": previous_ip, "to": observed_ip}
+    if queried:
+        checked_at = started.isoformat(timespec="seconds")
+    else:
+        previous_checked = previous.get("public_ip_checked_at") if isinstance(previous, dict) else None
+        checked_at = previous_checked if isinstance(previous_checked, str) else None
+    if observed_ip:
+        logged_ip = observed_ip
+    elif queried:
+        logged_ip = None
+    else:
+        logged_ip = previous_ip
+
     observed = book_observation(status, checked)
     new_state = {
         "last": observed,
@@ -757,6 +932,8 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         "last_decision": "QUIET" if quiet else "WAKE",
         "halt_reported_day": previous.get("halt_reported_day"),
         "pending_catchup": pending,
+        "public_ip": observed_ip or previous_ip,
+        "public_ip_checked_at": checked_at,
     }
     # 過期的 status 不能拿來銷掉「今天已經回報過停開新倉」，否則下一輪新鮮讀數會被靜音。
     if "halted_new_today" in reasons and observed != "unknown":
@@ -795,6 +972,9 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
                 "stopped": hf_retry["stopped"],
             },
             "catchup": catchup_log(catchup, pending_before),
+            "public_ip": logged_ip if logged_ip else PUBLIC_IP_UNKNOWN,
+            "public_ip_source": ip_source,
+            "ip_changed": ip_changed,
         })
     except OSError as exc:
         if quiet:
@@ -807,6 +987,15 @@ def main(argv=None, runner=run_cmd, clock=now_tpe, sleep=None, monotonic=None):
         return QUIET
 
     print("WAKE " + ",".join(reasons))
+    if ip_rejected:
+        shown = ip_value if ip_value else PUBLIC_IP_UNKNOWN
+        if ip_source == PUBLIC_IP_SOURCE_BINANCE:
+            origin = "幣安錯誤文字的 request ip"
+        elif ip_source == PUBLIC_IP_SOURCE_LOOKUP:
+            origin = "公開查詢 ipify"
+        else:
+            origin = "沒有拿到"
+        print("ip_not_whitelisted 對外 IP {0}（{1}）。".format(shown, origin))
     print("以下是閘門剛跑過的結果（台北 {0}）。manage --live 已經跑過，不必重跑。".format(started.strftime("%Y-%m-%d %H:%M")))
     if catchup.get("review"):
         print("補審：斷線期間 prefilter 曾抓到，且本輪以最新行情重跑 prefilter 與 hardfilter 後仍留下。只列幣種與型態。階梯、停損、目標用下面本輪 prefilter 的結果，不沿用斷線期間的舊掛單價。")

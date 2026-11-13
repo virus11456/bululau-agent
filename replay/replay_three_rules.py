@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+M15 = 15 * 60 * 1000
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = os.path.join(ROOT, "replay", "fixtures")
 CACHE = os.path.join(ROOT, "replay", "cache")
@@ -255,59 +257,127 @@ def position_r(filled, exit_px, stop):
     return (exit_px - avg) / risk, avg
 
 
-def simulate_kuai(future, plan):
-    """限價只在訊號後 8 根 15m（2 小時）內掛。成交後繼續走到停損或目標。"""
+def next_bar_open(dec_ms, step=M15):
+    """決策時間之後的下一根 K 開盤。剛好卡在開盤就用那一根。"""
+    dec_ms = int(dec_ms)
+    return ((dec_ms + step - 1) // step) * step
+
+
+def bars_from_decision(bars, dec_ms, step=M15):
+    """不含決策當下這根已經在走的 K。避免把決策前的高低點算進成交。"""
+    start = next_bar_open(dec_ms, step)
+    return [b for b in bars if b["t"] >= start]
+
+
+def _finish(fill, result, r, exit_t=None, fill_t=None, note=""):
+    return {"fill": fill, "result": result, "R": r, "exit_t": exit_t, "fill_t": fill_t, "note": note}
+
+
+def simulate_kuai(future, plan, ignore_target_on_fill_bar=False):
+    """A：決策後下一根 15m 起，8 根內掛單。成交當根可以算目標。同根停損優先。
+
+    B 把 ignore_target_on_fill_bar 設成 True：成交那根碰到目標不算目標。
+    """
     if not future:
-        return {"fill": "未取得", "result": "未取得", "R": "未取得", "note": "訊號之後的 K 線未取得"}
-    weights = (2, 3, 5)
-    pending = list(zip(plan["ladder"], weights))
+        return _finish("未取得", "未取得", "未取得", note="決策之後的 15m 未取得")
+    pending = list(zip(plan["ladder"], (2, 3, 5)))
     filled = []
+    fill_t = None
     for i, bar in enumerate(future):
         if i < 8:
             keep = []
             for price, weight in pending:
                 if bar["l"] <= price:
                     filled.append((price, weight))
+                    if fill_t is None:
+                        fill_t = bar["t"]
                 else:
                     keep.append((price, weight))
             pending = keep
         if not filled:
+            if i >= 8:
+                exit_t = future[7]["t"] + M15 if len(future) > 7 else None
+                return _finish("沒成交", "沒成交", "", exit_t=exit_t, note="決策後 2 小時沒有打到掛單")
             continue
         hit_stop = bar["l"] <= plan["stop"]
         hit_target = bar["h"] >= plan["target"]
-        if hit_stop and hit_target:
+        if ignore_target_on_fill_bar and bar["t"] == fill_t:
+            hit_target = False
+        if hit_stop and bar["h"] >= plan["target"]:
             r, _avg = position_r(filled, plan["stop"], plan["stop"])
-            return {"fill": "成交", "result": "停損", "R": r, "note": "同一根同時觸及停損和目標，以停損計"}
+            return _finish("成交", "停損", r, exit_t=bar["t"], fill_t=fill_t,
+                           note="同一根同時觸及停損和目標，以停損計")
         if hit_stop:
             r, _avg = position_r(filled, plan["stop"], plan["stop"])
-            return {"fill": "成交", "result": "停損", "R": r, "note": ""}
+            return _finish("成交", "停損", r, exit_t=bar["t"], fill_t=fill_t)
         if hit_target:
             r, _avg = position_r(filled, plan["target"], plan["stop"])
-            return {"fill": "成交", "result": "目標", "R": r, "note": ""}
+            return _finish("成交", "目標", r, exit_t=bar["t"], fill_t=fill_t)
     if not filled:
-        return {"fill": "沒成交", "result": "沒成交", "R": "", "note": "訊號後 2 小時沒有打到掛單"}
-    return {"fill": "成交", "result": "未出場", "R": "未取得", "note": "區間內沒有打到停損或目標"}
+        return _finish("沒成交", "沒成交", "", note="決策後 2 小時沒有打到掛單")
+    return _finish("成交", "未出場", "未取得", fill_t=fill_t, note="區間內沒有打到停損或目標")
 
 
-def simulate_bulu(future, plan):
-    """布鹿流的 entry 是訊號 1H 收盤，視作成交。之後的 K 線才算出場。"""
+def simulate_bulu_a(future, plan):
+    """A：進場價用訊號收盤（決策當下已知），出場從決策後下一根 15m 起。成交不另等限價。"""
     if not future:
-        return {"fill": "成交", "result": "未取得", "R": "未取得", "note": "進場之後的 K 線未取得"}
+        return _finish("未取得", "未取得", "未取得", note="決策之後的 15m 未取得")
     entry, stop, target = plan["entry"], plan["stop"], plan["target"]
     risk = entry - stop
     if risk <= 0:
-        return {"fill": "成交", "result": "未取得", "R": "未取得", "note": "停損不高於進場，無法算 R"}
+        return _finish("未取得", "未取得", "未取得", note="停損不高於進場，無法算 R")
     for bar in future:
         hit_stop = bar["l"] <= stop
         hit_target = bar["h"] >= target
         if hit_stop and hit_target:
-            return {"fill": "成交", "result": "停損", "R": -1.0,
-                    "note": "同一根同時觸及停損和目標，以停損計"}
+            return _finish("成交", "停損", -1.0, exit_t=bar["t"],
+                           note="同一根同時觸及停損和目標，以停損計")
         if hit_stop:
-            return {"fill": "成交", "result": "停損", "R": -1.0, "note": ""}
+            return _finish("成交", "停損", -1.0, exit_t=bar["t"])
         if hit_target:
-            return {"fill": "成交", "result": "目標", "R": (target - entry) / risk, "note": ""}
-    return {"fill": "成交", "result": "未出場", "R": "未取得", "note": "區間內沒有打到停損或目標"}
+            return _finish("成交", "目標", (target - entry) / risk, exit_t=bar["t"])
+    return _finish("成交", "未出場", "未取得", note="區間內沒有打到停損或目標")
+
+
+def bulu_b_prices(symbol, entry, stop, prior):
+    """新 hardfilter R3：停損取較寬者，目標 = max(前高, 進場 + 1.5R)。"""
+    floor = 0.03 if symbol in ("BTCUSDT", "ETHUSDT") else 0.05
+    wide = min(stop, entry * (1 - floor))
+    risk = entry - wide
+    if risk <= 0 or prior is None:
+        return None
+    target = max(prior, entry + RR_MIN * risk)
+    return wide, target
+
+
+def simulate_bulu_b(future, entry, stop, target):
+    """B：決策後 8 根 15m 內要碰到進場價才算成交。成交那根的目標不算。"""
+    if not future:
+        return _finish("未取得", "未取得", "未取得", note="決策之後的 15m 未取得")
+    if entry <= stop:
+        return _finish("未取得", "未取得", "未取得", note="停損不高於進場，無法算 R")
+    filled = False
+    fill_t = None
+    for i, bar in enumerate(future):
+        if not filled:
+            if i >= 8:
+                return _finish("沒成交", "沒成交", "", exit_t=bar["t"], note="2 小時內沒碰到進場價")
+            if bar["l"] <= entry:
+                filled = True
+                fill_t = bar["t"]
+            else:
+                continue
+        hit_stop = bar["l"] <= stop
+        hit_target = bar["h"] >= target and bar["t"] != fill_t
+        if hit_stop:
+            note = "同一根同時觸及停損和目標，以停損計" if hit_target else ""
+            return _finish("成交", "停損", -1.0, exit_t=bar["t"], fill_t=fill_t, note=note)
+        if hit_target:
+            return _finish("成交", "目標", (target - entry) / (entry - stop),
+                           exit_t=bar["t"], fill_t=fill_t)
+    if not filled:
+        return _finish("沒成交", "沒成交", "", note="2 小時內沒碰到進場價")
+    return _finish("成交", "未出場", "未取得", fill_t=fill_t, note="區間內沒有打到停損或目標")
 
 
 def widened_rr(symbol, entry, stop, prior):
@@ -415,9 +485,20 @@ def collect_events():
     return events, prefilter_rows, scan_rows, gate_rows, decision_rows
 
 
+def load_cache_file(path):
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if isinstance(data, dict):
+        return data.get("rows") or []
+    if isinstance(data, list):
+        return data
+    return []
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-network", action="store_true")
+    ap.add_argument("--cache-dir", help="幣名_週期.json。可以是幣安原始陣列，或 {rows: ...}")
     args = ap.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
     new_mod = load_prefilter_new()
@@ -428,23 +509,35 @@ def main():
     start_1d = int(datetime(2026, 8, 1, tzinfo=TPE).timestamp() * 1000)
     store = {}
     errors = {}
+    cache_dir = args.cache_dir
+    if args.no_network and not cache_dir:
+        cache_dir = CACHE
     if args.no_network:
-        fetch = lambda *a, **k: (None, "no-network")
+        if not cache_dir or not os.path.isdir(cache_dir):
+            raise SystemExit("沒有快取目錄，--no-network 不能打幣安")
+        for name in os.listdir(cache_dir):
+            if not name.endswith(".json") or name.startswith("._"):
+                continue
+            symbol, interval = name[:-5].rsplit("_", 1)
+            store[(symbol, interval)] = load_cache_file(os.path.join(cache_dir, name))
+        for symbol in symbols:
+            for interval in ("15m", "1h", "1d"):
+                if not store.get((symbol, interval)):
+                    errors[(symbol, interval)] = "快取未取得"
+                    store[(symbol, interval)] = []
     else:
-        fetch = fetch_klines
-    for symbol in symbols:
-        for interval, start in (("15m", start_15), ("1h", start_1h), ("1d", start_1d)):
-            rows, err = fetch(symbol, interval, start)
-            if err and not os.path.isfile(kline_cache_path(symbol, interval)):
-                errors[(symbol, interval)] = err
-                store[(symbol, interval)] = []
-            elif rows is None and os.path.isfile(kline_cache_path(symbol, interval)):
-                with open(kline_cache_path(symbol, interval), encoding="utf-8") as handle:
-                    store[(symbol, interval)] = json.load(handle).get("rows") or []
-            else:
-                store[(symbol, interval)] = rows or []
-                if err:
+        for symbol in symbols:
+            for interval, start in (("15m", start_15), ("1h", start_1h), ("1d", start_1d)):
+                rows, err = fetch_klines(symbol, interval, start)
+                if err and not os.path.isfile(kline_cache_path(symbol, interval)):
                     errors[(symbol, interval)] = err
+                    store[(symbol, interval)] = []
+                elif rows is None and os.path.isfile(kline_cache_path(symbol, interval)):
+                    store[(symbol, interval)] = load_cache_file(kline_cache_path(symbol, interval))
+                else:
+                    store[(symbol, interval)] = rows or []
+                    if err:
+                        errors[(symbol, interval)] = err
 
     rows_out = []
     for event in events:
@@ -486,8 +579,8 @@ def main():
                 new = new_kuai_view(hit)
                 new["bar_ms"] = bar_ms
             if new and new.get("bar_ms"):
-                future = [b for b in normalize(store.get((symbol, "15m"))) if b["t"] > new["bar_ms"]]
-                sim = simulate_kuai(future, new)
+                future = bars_from_decision(normalize(store.get((symbol, "15m"))), end_ms)
+                sim = simulate_kuai(future, new, ignore_target_on_fill_bar=False)
             elif new:
                 sim = {"fill": "未取得", "result": "未取得", "R": "未取得", "note": "訊號時間未取得"}
             else:
@@ -524,8 +617,8 @@ def main():
             if new:
                 if new["prior_high"] <= new["entry"]:
                     new_gate = False
-                future = [b for b in normalize(store.get((symbol, "1h"))) if b["t"] > new["bar_ms"]]
-                sim = simulate_bulu(future, new)
+                future = bars_from_decision(normalize(store.get((symbol, "15m"))), end_ms)
+                sim = simulate_bulu_a(future, new)
             else:
                 sim = {"fill": "", "result": "", "R": "", "note": new_why or ""}
                 note_bits.append(new_why or "")
@@ -561,6 +654,19 @@ def main():
             note_bits.append(sim["note"])
         plan = new or old or {}
         quoted = logged_quote(reason)
+        bsim = None
+        b_entry = b_stop = b_target = None
+        if k15 and isinstance(plan.get("entry"), (int, float)):
+            future_b = bars_from_decision(normalize(store.get((symbol, "15m"))), end_ms)
+            if setup == "瘸師弟" and plan.get("ladder"):
+                bsim = simulate_kuai(future_b, plan, ignore_target_on_fill_bar=True)
+                b_entry, b_stop, b_target = plan["entry"], plan["stop"], plan["target"]
+            elif setup == "布鹿流" and plan.get("prior_high") is not None and plan.get("stop") is not None:
+                priced = bulu_b_prices(symbol, plan["entry"], plan["stop"], plan["prior_high"])
+                if priced:
+                    b_stop, b_target = priced
+                    b_entry = plan["entry"]
+                    bsim = simulate_bulu_b(future_b, b_entry, b_stop, b_target)
         rows_out.append({
             "change_item": "瘸師弟" if setup == "瘸師弟" else "布鹿流",
             "diff": change or "無差異",
@@ -576,6 +682,13 @@ def main():
             "fill": sim.get("fill") or "",
             "result": sim.get("result") or "",
             "R": fmt_r(sim.get("R")),
+            "b_entry": fmt_num(b_entry),
+            "b_stop": fmt_num(b_stop),
+            "b_target": fmt_num(b_target),
+            "b_fill": (bsim or {}).get("fill") or "",
+            "b_result": (bsim or {}).get("result") or "",
+            "b_R": fmt_r((bsim or {}).get("R")),
+            "b_exit_ms": "" if not bsim or bsim.get("exit_t") is None else str(int(bsim["exit_t"])),
             "note": "；".join(x for x in note_bits if x),
         })
 
@@ -601,6 +714,13 @@ def main():
             "fill": "未取得",
             "result": "未取得",
             "R": "未取得",
+            "b_entry": "",
+            "b_stop": "",
+            "b_target": "",
+            "b_fill": "",
+            "b_result": "",
+            "b_R": "",
+            "b_exit_ms": "",
             "note": "紀錄寫了約 3 波，但沒有可核對的波數，不從 K 線自算。AI: " + reason[:180],
         })
 
@@ -619,7 +739,8 @@ def main():
 
     csv_path = os.path.join(OUT_DIR, "rule_replay_20261107_12.csv")
     fields = ["change_item", "diff", "time", "symbol", "setup", "source", "role",
-              "entry", "stop", "target", "prior_high", "fill", "result", "R", "note"]
+              "entry", "stop", "target", "prior_high", "fill", "result", "R",
+              "b_entry", "b_stop", "b_target", "b_fill", "b_result", "b_R", "b_exit_ms", "note"]
     with open(csv_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -640,8 +761,10 @@ def main():
     lines = []
     lines.append("# 三項規則回放（2026-11-07 至 2026-11-12，台北）")
     lines.append("")
-    lines.append("候選身份只來自日誌。K 線只打幣安公開 `https://fapi.binance.com/fapi/v1/klines`，沒有簽章。同一根同時打到停損和目標，算停損。")
+    lines.append("候選身份只來自日誌。K 線是幣安公開 fapi klines，沒有簽章。同一根同時碰到停損和目標，算停損。")
     lines.append("沒有從缺日補幣，也沒有用 K 線自己數波。")
+    if args.no_network and args.cache_dir:
+        lines.append("這次用本機快取重跑（2026-11-13 10:35 從台灣抓的 20 個幣、15m／1h／1d）。快取約 7MB，沒有放進 repo。")
     if errors and all("451" in str(v) for v in errors.values()):
         lines.append("")
         lines.append("這個環境對 `fapi.binance.com` 的每一筆 klines 都是 HTTP 451（restricted location）。沒有改打別的主機，也沒有用 data.binance.vision。因此要靠 K 線重算的進場價、停損、目標和事後 R 全部是未取得。")
@@ -679,7 +802,7 @@ def main():
     lines.append("- 瘸師弟多放行：新舊掛單價不同不算多放行，另列「掛單價改變」。decision_log 裡拒單理由只有「妖幣急拉不追」或「離好球帶太遠／不盲掛」、而且新規則仍算得出掛單的，算多放行。還寫了別的理由（日 K 均線、停損、RR、底底高）的不算。")
     lines.append("- 布鹿流多放行：舊的錘子／均線／前高 RR 不過，新的結構條件與「目標可超過前高」過了。")
     lines.append("- 波數：日誌沒有波數，不模擬，勝率與總 R 都是未取得。")
-    lines.append("- 瘸師弟限價只在訊號後 2 小時內算成交。布鹿流用訊號 1H 收盤當進場。")
+    lines.append("- 模擬從決策時間的下一根 15m 起。A／B 的差別見下方。")
     lines.append("- 統計用同一幣、同一進場價、同一停損、同一目標的第一筆，避免 15 分鐘重覆灌筆數。明細 CSV 保留每一輪。")
     lines.append("")
 
@@ -735,6 +858,68 @@ def main():
         lines.append("有 {0} 列提到約 3 波。波數本身未取得，所以沒有改判放行，也沒有模擬。勝率、總 R、每天筆數：未取得。".format(len(wave)))
         for row in wave:
             lines.append("- {0} {1}：{2}".format(row["time"], row["symbol"], row["note"][:200]))
+    lines.append("")
+    passes = [r for r in unique if r["diff"] == "多放行"]
+    ordered = sorted(passes, key=lambda r: (r["time"], r["symbol"], r["change_item"]))
+    busy = {}
+    for row in ordered:
+        key = (row["change_item"], row["symbol"])
+        dec = int(datetime.fromisoformat(row["time"]).timestamp() * 1000)
+        end = busy.get(key)
+        if end is not None and (end == "open" or dec < end):
+            row["overlap"] = "1"
+            continue
+        row["overlap"] = "0"
+        exit_ms = row.get("b_exit_ms") or ""
+        if exit_ms:
+            busy[key] = int(exit_ms)
+        elif row.get("b_fill") == "成交":
+            busy[key] = "open"
+        else:
+            busy[key] = None
+
+    def pack(rows, result_key, r_key):
+        done = [r for r in rows if r.get(result_key) in ("停損", "目標") and str(r.get(r_key) or "") not in ("", "未取得")]
+        wins = [r for r in done if r[result_key] == "目標"]
+        total = sum(float(r[r_key]) for r in done)
+        rate = None if not done else len(wins) / len(done)
+        return done, wins, total, rate
+
+    lines.append("## A / B / 同幣不重疊")
+    lines.append("")
+    lines.append("多放行先以同一幣、同一進場、同一停損、同一目標去重。A、B 都從決策時間的下一根 15m 才開始，不再用決策前已經走完的 K。")
+    lines.append("A：瘸師弟 2 小時內限價；成交那根可以算目標。布鹿流把訊號收盤視同已成交。同根同時碰到停損和目標，算停損。")
+    lines.append("B：成交那根碰到目標不算目標。布鹿流停損取結構停損與小幣 5%（BTC／ETH 3%）較寬者，目標 = max(前高, 進場+1.5R)；2 小時內沒碰到進場價算沒成交。")
+    lines.append("不重疊：同一幣前一筆 B 還沒出場（沒成交也佔用那 2 小時掛單窗），新訊號不另算。")
+    lines.append("")
+    a_done, a_wins, a_total, a_rate = pack(passes, "result", "R")
+    b_done, b_wins, b_total, b_rate = pack(passes, "b_result", "b_R")
+    free = [r for r in ordered if r.get("overlap") == "0"]
+    n_done, n_wins, n_total, n_rate = pack(free, "b_result", "b_R")
+
+    def cell(done, wins, total, rate):
+        if not done:
+            return "0", "未取得", "未取得"
+        return str(len(done)), "{0:.1%}".format(rate), "{0:.2f}".format(total)
+
+    lines.append("| 口徑 | 平倉筆數 | 勝率 | 總 R |")
+    lines.append("|---|---|---|---|")
+    for name, packed in (("A（前視已修）", (a_done, a_wins, a_total, a_rate)),
+                         ("B", (b_done, b_wins, b_total, b_rate)),
+                         ("B 同幣不重疊", (n_done, n_wins, n_total, n_rate))):
+        n, rate, total = cell(*packed)
+        lines.append("| {0} | {1} | {2} | {3} |".format(name, n, rate, total))
+    lines.append("")
+    lines.append("總經理boy 的 B 對照是 11 筆平倉、勝率 18.2%、−6.00R；不重疊 8 筆、12.5%、−5.5R。")
+    lines.append("")
+    lines.append("| 時間 | 幣 | 型態 | A | A的R | B進場 | B停損 | B目標 | B | B的R | 重疊 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for row in ordered:
+        lines.append("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} |".format(
+            row["time"][5:16], row["symbol"], row["change_item"], row["result"] or "未取得",
+            row["R"] or "未取得", row.get("b_entry") or "未取得", row.get("b_stop") or "未取得",
+            row.get("b_target") or "未取得", row.get("b_result") or "未取得", row.get("b_R") or "未取得",
+            "是" if row.get("overlap") == "1" else "否"))
     lines.append("")
     lines.append("## 合計")
     lines.append("")

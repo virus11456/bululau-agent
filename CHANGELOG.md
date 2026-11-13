@@ -1,5 +1,11 @@
 # 變更紀錄
 
+## 2026-11-13（瘸師弟三檔限價）
+
+- `src/live_trader.py` 的 `open` 多了 `--ladder`。不帶這個參數時仍是單張。總量沿用原本的風險式子，再按 2:3:5 拆開。RR 用加權均價。Mac 上那份檔要手貼，見 `deploy/patches/kuai_ladder_insert.md`。
+
+## 2026-11-13（SKILL 同步）
+
 - 2026-11-13：`docs/skill.md` sha1sum 換成 `c91d012f3e72a76137cee83835bf86fff59efc5f`（布鹿流日K已是 hardfilter 硬規則，PR #34；前一版 `3bfea51235dd0df314c2acfc2c957ed89ffe6c54`）。
 
 ## 2026-11-13（布鹿流日 K ma7_25 做成硬規則）

@@ -52,6 +52,10 @@ BLACKLIST_BASES = {"INIT", "EWZ", "CAP", "TAG", "APR", "BREV", "XAN", "AIN", "DO
 # 003：後波高點會突破前波，所以前高不是天花板；前高不到 1.5R 時目標放在 1.5R，可以高於前高。
 # 進場價已經不低於前高則是追價，擋。plan_target 仍用 prefilter 的 target 欄，不自動墊高。
 BULU_RR_TARGET = "prior_high"
+# 3b 開關。None＝不封頂，與 d06b651 相同。2.0 才恢復舊的 min(rr, 2.0)。
+# 封頂後目標仍至少 1.5R，所以這支不會因為打開上限而多擋或少擋。
+BULU_RR_CAP = None
+_RR_CAP_DEFAULT = object()
 
 REQUEST_TIMEOUT_S = 10
 # 公開 K 線 429／418 才重試。gate 給這支的逾時是 60 秒（gate.HARDFILTER_TIMEOUT_S），每次請求逾時 10 秒。
@@ -303,7 +307,32 @@ def rule_bulu_volume(cand, k1h):
     return "block", "前高之前最大量只有前 10／20 根均量的 {0:.2f} 倍（<3 倍）".format(best)
 
 
-def rule_bulu_rr_after_widening(cand, rr_target=None):
+def cap_bulu_target(entry, risk, target, rr_cap=_RR_CAP_DEFAULT):
+    """rr_cap 省略時用 BULU_RR_CAP。None 不封頂。數字是 R 倍數，例如 2.0。"""
+    cap = BULU_RR_CAP if rr_cap is _RR_CAP_DEFAULT else rr_cap
+    if cap is None:
+        return target, None
+    ceiling = entry + float(cap) * risk
+    if target > ceiling + 1e-12:
+        return ceiling, cap
+    return target, None
+
+
+def bulu_r3_prices(symbol, entry, stop, prior, rr_cap=_RR_CAP_DEFAULT):
+    """停損取結構與 3%/5% 較寬者。目標 = max(前高, 進場+1.5R)，再依 rr_cap 封頂。
+
+    前高不高於進場、或風險不算得出來，回 None。
+    """
+    floor = BULU_MIN_STOP_MAJOR if symbol in MAJORS else BULU_MIN_STOP_SMALL
+    wide = min(stop, entry * (1 - floor))
+    risk = entry - wide
+    if risk <= 0 or prior is None or prior <= entry:
+        return None
+    target, _cap = cap_bulu_target(entry, risk, max(prior, entry + RR_MIN * risk), rr_cap)
+    return wide, target
+
+
+def rule_bulu_rr_after_widening(cand, rr_target=None, rr_cap=_RR_CAP_DEFAULT):
     """布鹿流：停損先套 BTC/ETH 3%、小幣 5% 下限（取較寬），再算 RR，不到 1.5 不進。
 
     原文：full_prompt.md「停損取前低下1–2%容錯與BTC/ETH3%（小幣5%）較寬者，RR不足1.5不進」。
@@ -335,6 +364,9 @@ def rule_bulu_rr_after_widening(cand, rr_target=None):
             return "block", "進場價不低於前高（追價；目標可以超過前高，但不在前高之上追）"
         target = max(prior, entry + RR_MIN * risk)
         label = "1.5R（超過前高）" if target > prior + 1e-12 else "前高"
+    target, used_cap = cap_bulu_target(entry, risk, target, rr_cap)
+    if used_cap is not None:
+        label = "{0:g}R 上限".format(used_cap)
     rr = (target - entry) / risk
     if rr + 1e-9 >= RR_MIN:
         return "pass", None

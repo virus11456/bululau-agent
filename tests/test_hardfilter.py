@@ -128,6 +128,17 @@ class BuluTest(unittest.TestCase):
         c["prior_high"] = 1.14
         self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")  # 1.4R 的前高改放到 1.5R
 
+    def test_rr_cap_defaults_off_and_two_r_still_passes(self):
+        self.assertIsNone(hf.BULU_RR_CAP)
+        # 結構停損 10% 比 5% 寬。前高在 4R。不封頂就停在前高；2R 上限收到 1.20。
+        _wide, target = hf.bulu_r3_prices("XUSDT", 1.0, 0.90, 1.40)
+        self.assertAlmostEqual(target, 1.40)
+        _wide, capped = hf.bulu_r3_prices("XUSDT", 1.0, 0.90, 1.40, rr_cap=2.0)
+        self.assertAlmostEqual(capped, 1.20)
+        cand = {"symbol": "XUSDT", "entry": 1.0, "stop": 0.90, "prior_high": 1.40}
+        self.assertEqual(hf.rule_bulu_rr_after_widening(cand)[0], "pass")
+        self.assertEqual(hf.rule_bulu_rr_after_widening(cand, rr_cap=2.0)[0], "pass")
+
     def test_entry_not_below_prior_high_is_chase(self):
         c = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.0}
         verdict, why = hf.rule_bulu_rr_after_widening(c)

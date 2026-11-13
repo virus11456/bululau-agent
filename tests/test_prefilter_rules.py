@@ -134,6 +134,16 @@ class PromptTextTest(unittest.TestCase):
         self.assertNotIn("已走七、八波以上的不做", skill)
         self.assertIn("不得以「妖幣急拉不追」", prompt)
         self.assertIn("不得以「妖幣急拉不追」", skill)
+        phrase = "七八波以上才考慮放棄（003，不是約3波不做）"
+        self.assertIn(phrase, prompt)
+        self.assertIn(phrase, skill)
+        self.assertNotIn("不追深殺反彈", prompt)
+        on_path = os.path.join(root, "backups/mac/quantboy-gate/full_prompt_3a_on.md")
+        with open(on_path, encoding="utf-8") as handle:
+            on = handle.read()
+        self.assertIn("不追深殺反彈", on)
+        self.assertNotIn("不追離好球帶或深殺反彈", on)
+        self.assertNotIn("不追離好球帶或深殺反彈", prompt)
 
 
 if __name__ == "__main__":

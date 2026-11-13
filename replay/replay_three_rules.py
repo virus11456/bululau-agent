@@ -350,6 +350,17 @@ def bulu_b_prices(symbol, entry, stop, prior):
     return wide, target
 
 
+def apply_rr_cap(entry, stop, prior, rr_cap):
+    """與 hardfilter.bulu_r3_prices 同一條：max(前高, 1.5R) 再依 cap 封頂。"""
+    risk = entry - stop
+    if risk <= 0 or prior is None or prior <= entry:
+        return None
+    target = max(prior, entry + RR_MIN * risk)
+    if rr_cap is not None:
+        target = min(target, entry + float(rr_cap) * risk)
+    return target
+
+
 def simulate_bulu_b(future, entry, stop, target):
     """B：決策後 8 根 15m 內要碰到進場價才算成交。成交那根的目標不算。"""
     if not future:
@@ -493,6 +504,117 @@ def load_cache_file(path):
     if isinstance(data, list):
         return data
     return []
+
+
+def _resim_cap(row, store, rr_cap):
+    """瘸師弟不受 2R 上限影響。布鹿流用已取寬的停損重算目標再走 B。"""
+    rec = {
+        "change_item": row["change_item"],
+        "time": row["time"],
+        "symbol": row["symbol"],
+        "b_fill": row.get("b_fill") or "",
+        "b_result": row.get("b_result") or "",
+        "b_R": row.get("b_R") or "",
+        "b_exit_ms": row.get("b_exit_ms") or "",
+    }
+    if row["change_item"] != "布鹿流" or rr_cap is None:
+        return rec
+    try:
+        entry = float(row["b_entry"])
+        stop = float(row["b_stop"])
+        prior = float(row["prior_high"])
+    except (TypeError, ValueError):
+        rec["b_result"] = "未取得"
+        rec["b_R"] = "未取得"
+        rec["b_fill"] = "未取得"
+        rec["b_exit_ms"] = ""
+        return rec
+    target = apply_rr_cap(entry, stop, prior, rr_cap)
+    if target is None:
+        rec["b_result"] = "未取得"
+        rec["b_R"] = "未取得"
+        return rec
+    dec = int(datetime.fromisoformat(row["time"]).timestamp() * 1000)
+    future = bars_from_decision(normalize(store.get((row["symbol"], "15m"))), dec)
+    sim = simulate_bulu_b(future, entry, stop, target)
+    rec["b_fill"] = sim["fill"]
+    rec["b_result"] = sim["result"]
+    rec["b_R"] = "" if sim["R"] in ("", None) else sim["R"]
+    rec["b_exit_ms"] = "" if sim.get("exit_t") is None else str(int(sim["exit_t"]))
+    return rec
+
+
+def _mark_overlap(rows):
+    busy = {}
+    out = []
+    for row in sorted(rows, key=lambda r: (r["time"], r["symbol"], r["change_item"])):
+        rec = dict(row)
+        key = (rec["change_item"], rec["symbol"])
+        dec = int(datetime.fromisoformat(rec["time"]).timestamp() * 1000)
+        end = busy.get(key)
+        if end is not None and (end == "open" or dec < end):
+            rec["overlap"] = "1"
+        else:
+            rec["overlap"] = "0"
+            exit_ms = rec.get("b_exit_ms") or ""
+            if exit_ms:
+                busy[key] = int(exit_ms)
+            elif rec.get("b_fill") == "成交":
+                busy[key] = "open"
+            else:
+                busy[key] = None
+        out.append(rec)
+    return out
+
+
+def _pack(rows):
+    done = [r for r in rows if r.get("b_result") in ("停損", "目標") and str(r.get("b_R") or "") not in ("", "未取得")]
+    wins = [r for r in done if r["b_result"] == "目標"]
+    total = sum(float(r["b_R"]) for r in done)
+    rate = None if not done else len(wins) / len(done)
+    return done, rate, total
+
+
+def _fmt_pack(done, rate, total, days):
+    if not done:
+        return "0", "未取得", "未取得", "0"
+    return str(len(done)), "{0:.1%}".format(rate), "{0:.2f}".format(total), "{0:.2f}".format(len(done) / days)
+
+
+def combo_lines(passes, store):
+    """四組都走方法 B。3a 沒有數字，開與關的機械名單相同，型態再砍標未取得。"""
+    days = 3
+    specs = (
+        ("1 部署", "關", "關", None),
+        ("2 對照", "開", "開", 2.0),
+        ("只開 3a", "開", "關", None),
+        ("只開 2R", "關", "開", 2.0),
+    )
+    lines = ["", "## 四組開關（方法 B，11/10–11/12）", ""]
+    lines.append("3a「不追深殺反彈」在改 PR #31 之前只是提示詞，prefilter 與 hardfilter 沒有這條，也沒有數字。這次回放不能從 K 線判斷誰是深殺反彈，所以 3a 開與關的機械成交相同；若再靠人工砍單，那些單是未取得。2R 上限只改布鹿流目標，瘸師弟不變。樣本只有三天。")
+    lines.append("")
+    lines.append("| 組 | 3a | 2R 上限 | 平倉 | 勝率 | 總 R | 平倉/天 | 瘸師弟 平倉/勝率/R | 布鹿流 平倉/勝率/R | 不重疊 平倉/勝率/R |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    for name, a_on, cap_on, cap in specs:
+        rows = _mark_overlap([_resim_cap(r, store, cap) for r in passes])
+        done, rate, total = _pack(rows)
+        n, rate_s, total_s, per = _fmt_pack(done, rate, total, days)
+        parts = []
+        for item in ("瘸師弟", "布鹿流"):
+            d, rt, tot = _pack([r for r in rows if r["change_item"] == item])
+            nn, rs, ts, _p = _fmt_pack(d, rt, tot, days)
+            parts.append("{0} / {1} / {2}".format(nn, rs, ts))
+        free = [r for r in rows if r.get("overlap") == "0"]
+        d, rt, tot = _pack(free)
+        nn, rs, ts, _p = _fmt_pack(d, rt, tot, days)
+        lines.append("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} |".format(
+            name, a_on, cap_on, n, rate_s, total_s, per, parts[0], parts[1],
+            "{0} / {1} / {2}".format(nn, rs, ts)))
+    lines.append("")
+    lines.append("第 1 組是部署預設，應等於 PR #31 的 B：11 筆、18.2%、−6.00R；不重疊 8 筆、12.5%、−5.50R。第 2 組是 3a 與 2R 都打開的對照。")
+    lines.append("這三天 2R 上限綁到的只有 MERL（約 2.67R 收到 2R）和 SXT（未出場那筆收到 2R）。MERL 先碰到停損，SXT 到快取結束沒碰到 2R，所以出場沒變。四組機械結果因此一樣。")
+    lines.append("")
+    return lines
 
 
 def main():
@@ -910,7 +1032,8 @@ def main():
         n, rate, total = cell(*packed)
         lines.append("| {0} | {1} | {2} | {3} |".format(name, n, rate, total))
     lines.append("")
-    lines.append("總經理boy 的 B 對照是 11 筆平倉、勝率 18.2%、−6.00R；不重疊 8 筆、12.5%、−5.5R。")
+    lines.append("總經理boy 的 B 對照是 11 筆平倉、勝率 18.2%、−6.00R；不重疊 8 筆、12.5%、−5.5R。上表是部署預設（3a 關、2R 上限關），應與該對照相同。")
+    lines.extend(combo_lines(ordered, store))
     lines.append("")
     lines.append("| 時間 | 幣 | 型態 | A | A的R | B進場 | B停損 | B目標 | B | B的R | 重疊 |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|")

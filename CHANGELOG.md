@@ -1,5 +1,10 @@
 # 變更紀錄
 
+## 2026-11-13（布鹿流日 K ma7_25 做成硬規則）
+
+- 只改 `src/hardfilter.py`。布鹿流在 RR 與 1H 爆量之後多看已收日 K。`daily_trend_ok(daily_bars, now_ms=None)` 與回放的 ma7_25 相同：收盤高於 MA7 與 MA25、短均線在長均線上、兩條都高於三根前，分形低點底底高。少於 33 根已收日 K 就拒。
+- 瘸師弟、三份 prefilter、RR、停損、目標、watch、manage、full_prompt、SKILL 都沒有改。還沒部署。
+
 ## 2026-11-13（3a／3b 做成開關，部署預設都關）
 
 - `BULU_RR_CAP` 預設 `None`。設成 `2.0` 才恢復布鹿流目標的 `min(rr, 2.0)`。預設不封頂，與 `d06b651` 相同。

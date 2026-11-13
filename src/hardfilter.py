@@ -4,6 +4,7 @@
 原則（總經理boy 11/10 轉達使用者 23:44 原話「你依照原本的開單的條件跟頻率來撈單來做設定」）：
   - 只照現行規則（~/quantboy-gate/full_prompt.md 與 docs/strategy.md 11-06 定稿）判斷，不放寬也不加嚴。
   - 規則原文沒給數字、需要看型態、或資料不夠時，一律留下候選交給 AI（fail-open to AI）。
+    例外：布鹿流日 K。2026-11-13 13:58 使用者核定 ma7_25 為硬規則。已收日 K 少於 33 根就拒（理由含「日K資料不足」），不留給 AI。讀取失敗仍保留。
   - 429／418 限流：同一輪最多再試 2 次（有上限的退避）。等待前若 60 秒逾時的剩餘時間不夠再打一發，就不等。仍失敗：結束碼 2，gate 會 WAKE 並保留全部候選。
   - 其他整體讀取失敗：不重試，結束碼 2，同樣 WAKE。
   - 不下單、不讀金鑰、不做簽章請求，只讀幣安公開 K 線。
@@ -56,6 +57,14 @@ BULU_RR_TARGET = "prior_high"
 # 封頂後目標仍至少 1.5R，所以這支不會因為打開上限而多擋或少擋。
 BULU_RR_CAP = None
 _RR_CAP_DEFAULT = object()
+# 布鹿流日 K 硬規則（2026-11-13 13:58 核定的 ma7_25）。算法與回放腳本的 ma_at／swing_lows／daily_ok 相同。
+# 已收日 K 少於 25+3+5 根就拒。抓 K 線時 limit 至少 60，未收的那根由 normalize（close_time < 決策時間）丟掉。
+DAILY_FAST = 7
+DAILY_SLOW = 25
+DAILY_MA_BACK = 3
+DAILY_MIN_BARS = DAILY_SLOW + DAILY_MA_BACK + 5  # 33
+DAILY_SWING_N = 2
+DAILY_KLINE_LIMIT = 60
 
 REQUEST_TIMEOUT_S = 10
 # 公開 K 線 429／418 才重試。gate 給這支的逾時是 60 秒（gate.HARDFILTER_TIMEOUT_S），每次請求逾時 10 秒。
@@ -332,6 +341,59 @@ def bulu_r3_prices(symbol, entry, stop, prior, rr_cap=_RR_CAP_DEFAULT):
     return wide, target
 
 
+def ma_at(closes, n, back=0):
+    """簡單平均。back=0 是最後 n 根；back=3 是往前移 3 根、不含最後 3 根的那一段。"""
+    end = len(closes) - back
+    if end < n:
+        return None
+    return sum(closes[end - n:end]) / n
+
+
+def swing_lows(bars, n=DAILY_SWING_N):
+    """分形低點：第 i 根的低點嚴格低於左右各 n 根。右邊沒有 n 根已收 K 的不算。"""
+    out = []
+    for i in range(n, len(bars) - n):
+        low = bars[i]["l"]
+        if all(low < bars[j]["l"] for j in range(i - n, i)) and all(
+            low < bars[j]["l"] for j in range(i + 1, i + n + 1)
+        ):
+            out.append(low)
+    return out
+
+
+def daily_trend_ok(daily_bars, now_ms=None):
+    """布鹿流日 K ma7_25。回傳 (ok, reason)。
+
+    daily_bars 是日 K，每根要有 "c" 與 "l"。now_ms 有給時，丟掉 close_time（"ct"）>= now_ms 的未收 K；
+    沒有 "ct" 的留下。回放若已先濾成已收 K，呼叫 daily_trend_ok(bars) 即可，不要傳 now_ms。
+    ok 為 True 才放行，reason 是 None。不過時 reason 為「日K資料不足」、「日K均線未向上發散」或「日K未底底高」。
+    通過條件：收盤 > MA7、收盤 > MA25、MA7 > MA25、MA7 高於三根前的 MA7、MA25 高於三根前的 MA25，
+    而且分形低點至少兩個、最近一個高於再前一個。比較都是嚴格大於。
+    """
+    bars = list(daily_bars or [])
+    if now_ms is not None:
+        kept = []
+        for bar in bars:
+            ct = bar.get("ct")
+            if ct is None or ct < now_ms:
+                kept.append(bar)
+        bars = kept
+    if len(bars) < DAILY_MIN_BARS:
+        return False, "日K資料不足"
+    closes = [bar["c"] for bar in bars]
+    fast = ma_at(closes, DAILY_FAST)
+    slow = ma_at(closes, DAILY_SLOW)
+    fast_prev = ma_at(closes, DAILY_FAST, DAILY_MA_BACK)
+    slow_prev = ma_at(closes, DAILY_SLOW, DAILY_MA_BACK)
+    close = closes[-1]
+    if not (close > fast and close > slow and fast > slow and fast > fast_prev and slow > slow_prev):
+        return False, "日K均線未向上發散"
+    lows = swing_lows(bars)
+    if not (len(lows) >= 2 and lows[-1] > lows[-2]):
+        return False, "日K未底底高"
+    return True, None
+
+
 def rule_bulu_rr_after_widening(cand, rr_target=None, rr_cap=_RR_CAP_DEFAULT):
     """布鹿流：停損先套 BTC/ETH 3%、小幣 5% 下限（取較寬），再算 RR，不到 1.5 不進。
 
@@ -398,6 +460,12 @@ def evaluate(cand, get_klines, ref_ms, rr_target=None):
         details.append(("bulu_volume_3x", verdict, why))
         if verdict == "block":
             return "block", details
+        k1d = get_klines(cand["symbol"], "1d", DAILY_KLINE_LIMIT)
+        ok, why = daily_trend_ok(k1d, ref_ms)
+        if not ok:
+            details.append(("bulu_daily_trend", "block", why))
+            return "block", details
+        details.append(("bulu_daily_trend", "pass", None))
     else:
         # 小師弟、資金費率法等：這次沒有回放資料可驗證，不加篩，全部交給 AI。
         details.append(("no_hard_rule_for_setup", "uncertain", "setup {0} 不在本篩選範圍".format(setup)))

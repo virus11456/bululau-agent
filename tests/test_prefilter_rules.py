@@ -123,7 +123,7 @@ class PromptTextTest(unittest.TestCase):
         root = os.path.dirname(HERE)
         with open(os.path.join(root, "backups/mac/quantboy-gate/full_prompt.md"), encoding="utf-8") as handle:
             prompt = handle.read()
-        with open(os.path.join(root, "docs/skill_proposed.md"), encoding="utf-8") as handle:
+        with open(os.path.join(root, "docs/skill.md"), encoding="utf-8") as handle:
             skill = handle.read()
         for text in (prompt, skill):
             self.assertIn("七八波以上才考慮放棄", text)

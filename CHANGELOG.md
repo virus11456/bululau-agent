@@ -1,5 +1,7 @@
 # 變更紀錄
 
+- 2026-11-13：`docs/skill.md` sha1sum 換成 `c91d012f3e72a76137cee83835bf86fff59efc5f`（布鹿流日K已是 hardfilter 硬規則，PR #34；前一版 `3bfea51235dd0df314c2acfc2c957ed89ffe6c54`）。
+
 ## 2026-11-13（布鹿流日 K ma7_25 做成硬規則）
 
 - 只改 `src/hardfilter.py`。布鹿流在 RR 與 1H 爆量之後多看已收日 K。`daily_trend_ok(daily_bars, now_ms=None)` 與回放的 ma7_25 相同：收盤高於 MA7 與 MA25、短均線在長均線上、兩條都高於三根前，分形低點底底高。少於 33 根已收日 K 就拒。

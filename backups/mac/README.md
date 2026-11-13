@@ -1,5 +1,7 @@
 # Mac 實盤檔唯讀快照
 
+2026-11-13：`quantboy-paper/discretionary/prefilter.py` 與 `quantboy-gate/full_prompt.md` 這兩份快照已套上三項規則（瘸師弟參考點、布鹿流進場、七八波）。下面舊表的 sha1 是改之前的。`common.py` 沒有改。要部署的 auto-scan 檔在 `mac/quantboy-auto-scan/prefilter.py`，Mac 路徑是 `~/quantboy-auto-scan/prefilter.py`。
+
 這是 2026-11-11 19:21（台北）從 Mac 抄下來的唯讀快照，給事後對照用。實盤仍讀 Mac 上的原路徑，路徑沒有改。執行、排程、閘門都不要改去讀 `backups/`。
 
 這次放三個檔。`common.py` 於 19:22（台北）補進同一份快照。`prefilter.py` 與 `common.py` 之後沒有再改。

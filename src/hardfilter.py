@@ -48,9 +48,14 @@ KUAI_VOL_X = 3.0
 KUAI_VOL_LOOKBACKS = (10, 20)
 # strategy.md 11-03 補充：「黑名單維持不做：程式裡的 INITUSDT、EWZUSDT，以及 lessons 點名的 CAP、TAG、APR、BREV、XAN、AIN、DOOD、INIT」
 BLACKLIST_BASES = {"INIT", "EWZ", "CAP", "TAG", "APR", "BREV", "XAN", "AIN", "DOOD"}
-# 布鹿流 RR 的目標價。prior_high＝prefilter 自己算 rr 用的前高（原文「回檔離前高很近仍然可以進。過不了前高再出場」）。
-# plan_target＝prefilter 的 target 欄（被舊紙上參數 2R 截斷，strategy.md 說這不是核准參數）。預設 prior_high（較寬）。
+# 布鹿流 RR 的目標價。prior_high 模式：目標 = max(前高, 進場 + 1.5R)。
+# 003：後波高點會突破前波，所以前高不是天花板；前高不到 1.5R 時目標放在 1.5R，可以高於前高。
+# 進場價已經不低於前高則是追價，擋。plan_target 仍用 prefilter 的 target 欄，不自動墊高。
 BULU_RR_TARGET = "prior_high"
+# 3b 開關。None＝不封頂，與 d06b651 相同。2.0 才恢復舊的 min(rr, 2.0)。
+# 封頂後目標仍至少 1.5R，所以這支不會因為打開上限而多擋或少擋。
+BULU_RR_CAP = None
+_RR_CAP_DEFAULT = object()
 
 REQUEST_TIMEOUT_S = 10
 # 公開 K 線 429／418 才重試。gate 給這支的逾時是 60 秒（gate.HARDFILTER_TIMEOUT_S），每次請求逾時 10 秒。
@@ -302,27 +307,71 @@ def rule_bulu_volume(cand, k1h):
     return "block", "前高之前最大量只有前 10／20 根均量的 {0:.2f} 倍（<3 倍）".format(best)
 
 
-def rule_bulu_rr_after_widening(cand, rr_target=None):
+def cap_bulu_target(entry, risk, target, rr_cap=_RR_CAP_DEFAULT):
+    """rr_cap 省略時用 BULU_RR_CAP。None 不封頂。數字是 R 倍數，例如 2.0。"""
+    cap = BULU_RR_CAP if rr_cap is _RR_CAP_DEFAULT else rr_cap
+    if cap is None:
+        return target, None
+    ceiling = entry + float(cap) * risk
+    if target > ceiling + 1e-12:
+        return ceiling, cap
+    return target, None
+
+
+def bulu_r3_prices(symbol, entry, stop, prior, rr_cap=_RR_CAP_DEFAULT):
+    """停損取結構與 3%/5% 較寬者。目標 = max(前高, 進場+1.5R)，再依 rr_cap 封頂。
+
+    前高不高於進場、或風險不算得出來，回 None。
+    """
+    floor = BULU_MIN_STOP_MAJOR if symbol in MAJORS else BULU_MIN_STOP_SMALL
+    wide = min(stop, entry * (1 - floor))
+    risk = entry - wide
+    if risk <= 0 or prior is None or prior <= entry:
+        return None
+    target, _cap = cap_bulu_target(entry, risk, max(prior, entry + RR_MIN * risk), rr_cap)
+    return wide, target
+
+
+def rule_bulu_rr_after_widening(cand, rr_target=None, rr_cap=_RR_CAP_DEFAULT):
     """布鹿流：停損先套 BTC/ETH 3%、小幣 5% 下限（取較寬），再算 RR，不到 1.5 不進。
 
-    原文：full_prompt.md「停損取前低下1–2%容錯與BTC/ETH3%（小幣5%）較寬者，RR不足1.5不進」；
-    strategy.md「取寬之後風報比不到 1.5，就不做」「禁止把停損收窄來湊」。
-    不再額外往下加 1–2% 容錯（那會讓 RR 更低＝加嚴），所以這裡算出的 RR 只會偏高，不會誤擋。
+    原文：full_prompt.md「停損取前低下1–2%容錯與BTC/ETH3%（小幣5%）較寬者，RR不足1.5不進」。
+    不再額外往下加 1–2% 容錯（那會讓 RR 更低＝加嚴）。
+    003：後波高點會突破前波。prior_high 模式的目標 = max(前高, 進場 + 1.5 × 取寬後風險)，
+    前高不到 1.5R 時目標放在 1.5R，可以高於前高，不因此擋。進場價已經不低於前高是追價，擋。
+    plan_target 模式仍用 prefilter 的 target 欄，不自動墊高。
     """
     mode = rr_target or BULU_RR_TARGET
     entry = _num(cand.get("entry"))
     stop = _num(cand.get("stop"))
-    target = _num(cand.get("prior_high") if mode == "prior_high" else cand.get("target"))
-    if None in (entry, stop, target) or entry <= 0 or stop <= 0 or stop >= entry:
+    if None in (entry, stop) or entry <= 0 or stop <= 0 or stop >= entry:
         return "uncertain", "entry／stop／目標欄位缺或不合理"
     floor = BULU_MIN_STOP_MAJOR if cand.get("symbol") in MAJORS else BULU_MIN_STOP_SMALL
     wide_stop = min(stop, entry * (1 - floor))
     risk = entry - wide_stop
+    if risk <= 0:
+        return "uncertain", "entry／stop／目標欄位缺或不合理"
+    if mode == "plan_target":
+        target = _num(cand.get("target"))
+        label = "prefilter target"
+        if target is None or target <= 0:
+            return "uncertain", "entry／stop／目標欄位缺或不合理"
+    else:
+        prior = _num(cand.get("prior_high"))
+        if prior is None or prior <= 0:
+            return "uncertain", "entry／stop／目標欄位缺或不合理"
+        if prior <= entry:
+            return "block", "進場價不低於前高（追價；目標可以超過前高，但不在前高之上追）"
+        target = max(prior, entry + RR_MIN * risk)
+        label = "1.5R（超過前高）" if target > prior + 1e-12 else "前高"
+    target, used_cap = cap_bulu_target(entry, risk, target, rr_cap)
+    if used_cap is not None:
+        label = "{0:g}R 上限".format(used_cap)
     rr = (target - entry) / risk
     if rr + 1e-9 >= RR_MIN:
         return "pass", None
     return "block", "停損 {0:.1f}% 套 {1:.0f}% 下限後 RR {2:.2f} <1.5（目標＝{3}）".format(
-        (entry - stop) / entry * 100, floor * 100, rr, "前高" if mode == "prior_high" else "prefilter target")
+        (entry - stop) / entry * 100, floor * 100, rr, label)
 
 
 def evaluate(cand, get_klines, ref_ms, rr_target=None):

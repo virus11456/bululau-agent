@@ -116,7 +116,8 @@ class KuaiTest(unittest.TestCase):
 class BuluTest(unittest.TestCase):
     def test_rr_after_5pct_floor(self):
         c = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.97, "prior_high": 1.07, "target": 1.06}
-        self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "block")  # 0.07/0.05 = 1.4
+        # 前高只有 1.4R。目標改放到 1.5R，可以超過前高，不擋。
+        self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")
         c["prior_high"] = 1.075
         self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")   # 1.5 剛好
         self.assertEqual(hf.rule_bulu_rr_after_widening(c, "plan_target")[0], "block")  # 0.06/0.05
@@ -125,13 +126,33 @@ class BuluTest(unittest.TestCase):
         c = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.16}
         self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")  # 0.16/0.10 = 1.6，不會被 5% 改窄
         c["prior_high"] = 1.14
+        self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")  # 1.4R 的前高改放到 1.5R
+
+    def test_rr_cap_defaults_off_and_two_r_still_passes(self):
+        self.assertIsNone(hf.BULU_RR_CAP)
+        # 結構停損 10% 比 5% 寬。前高在 4R。不封頂就停在前高；2R 上限收到 1.20。
+        _wide, target = hf.bulu_r3_prices("XUSDT", 1.0, 0.90, 1.40)
+        self.assertAlmostEqual(target, 1.40)
+        _wide, capped = hf.bulu_r3_prices("XUSDT", 1.0, 0.90, 1.40, rr_cap=2.0)
+        self.assertAlmostEqual(capped, 1.20)
+        cand = {"symbol": "XUSDT", "entry": 1.0, "stop": 0.90, "prior_high": 1.40}
+        self.assertEqual(hf.rule_bulu_rr_after_widening(cand)[0], "pass")
+        self.assertEqual(hf.rule_bulu_rr_after_widening(cand, rr_cap=2.0)[0], "pass")
+
+    def test_entry_not_below_prior_high_is_chase(self):
+        c = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.0}
+        verdict, why = hf.rule_bulu_rr_after_widening(c)
+        self.assertEqual(verdict, "block")
+        self.assertIn("追價", why)
+        c["prior_high"] = 0.99
         self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "block")
 
     def test_btc_eth_use_3pct(self):
         c = {"symbol": "ETHUSDT", "setup": "布鹿流", "entry": 100.0, "stop": 99.0, "prior_high": 104.6}
         self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")  # 4.6/3 = 1.53
         c["symbol"] = "XUSDT"
-        self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "block")  # 4.6/5
+        # 套 5% 之後前高只剩 0.92R，目標放到 1.5R（107.5，超過前高 104.6），不擋。
+        self.assertEqual(hf.rule_bulu_rr_after_widening(c)[0], "pass")
 
     def test_missing_or_bad_fields_uncertain(self):
         for c in (
@@ -284,9 +305,11 @@ class ReplayEquivalenceTest(unittest.TestCase):
             ("20:30", "CYBERUSDT"),
             ("20:30", "MERLUSDT"),
             ("21:29", "MERLUSDT"),
+            # BEAMX：前高套 5% 後 RR 約 1.0。目標改放到 1.5R，可以超過前高，不再擋。
+            ("22:28", "BEAMXUSDT"),
         ])
         quiet_now = [r["time"] for r in rounds if r["before"].startswith("WAKE") and r["after"].startswith("QUIET")]
-        self.assertEqual(quiet_now, ["22:28", "23:06"])
+        self.assertEqual(quiet_now, ["23:06"])
 
     def test_plan_target_mode_matches_ai_except_single_black(self):
         rows, rounds = replay_hardfilter.replay("plan_target")

@@ -56,17 +56,27 @@ class MacKuaiTest(unittest.TestCase):
         self.assertIsNone(prefilter.kuai_shidi(self.bars(104, 100, 29), self.rs(False), "XUSDT"))
         self.assertIsNone(prefilter.kuai_shidi(self.bars(100, 101, 50), self.rs(False), "XUSDT"))
 
-    def test_ladder_and_stop_still_follow_big_flag(self):
+    def test_ladder_is_3_4_5_below_signal_low(self):
         small = prefilter.kuai_shidi(self.bars(104, 100, 40), self.rs(False), "XUSDT")
         big = prefilter.kuai_shidi(self.bars(104, 100, 40), self.rs(True), "XUSDT")
+        # 大幣小幣都從訊號低點往下 3%/4%/5%。停損仍在最深一檔之下，大幣再 1.5%、小幣再 3%。
         self.assertEqual(small["ladder"], [round(99 * s, 8) for s in (0.97, 0.96, 0.95)])
-        self.assertEqual(big["ladder"], [round(99 * s, 8) for s in (0.99, 0.985, 0.98)])
+        self.assertEqual(big["ladder"], [round(99 * s, 8) for s in (0.97, 0.96, 0.95)])
         self.assertEqual(small["stop"], round(small["ladder"][2] * 0.97, 8))
         self.assertEqual(big["stop"], round(big["ladder"][2] * 0.985, 8))
-        # 門檻看幣種，階梯仍看 big。BTC 就算 big=False，2% 長黑仍成立，階梯走小幣。
         btc = prefilter.kuai_shidi(self.bars(102, 100, 40), self.rs(False), "BTCUSDT")
         self.assertIsNotNone(btc)
         self.assertEqual(btc["ladder"], [round(99 * s, 8) for s in (0.97, 0.96, 0.95)])
+
+    def test_ref_is_signal_low_not_prior_20_low(self):
+        bars = self.bars(104, 100, 40)
+        for b in bars[:-1]:
+            b["l"] = 90.0  # 前 20 根最低 90，舊規則會從 90 往下掛
+        bars[-1]["l"] = 98.0  # 訊號長黑低點 98
+        hit = prefilter.kuai_shidi(bars, self.rs(False), "XUSDT")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["ladder"], [round(98 * s, 8) for s in (0.97, 0.96, 0.95)])
+        self.assertNotEqual(hit["ladder"][0], round(90 * 0.97, 8))
 
 
 if __name__ == "__main__":

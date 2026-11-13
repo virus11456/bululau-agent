@@ -19,7 +19,7 @@
 
 沒有改的紅線：BTC 破位 guard、重大事件前後 30 分鐘、單筆 1%／20 份／最多 5 倉／最多 5 倍、日虧 7%／30%、妖幣 1/4 份、60 秒 watch。
 
-已部署檔 sha1：`~/quantboy-auto-scan/prefilter.py` `9e8bddf7`、`~/quantboy-gate/hardfilter.py` `905b3b49`、未遮罩 `~/quantboy-gate/full_prompt.md` `dbd76690`、`~/quantboy-paper/discretionary/prefilter.py` `29d182f9`。
+已部署檔 sha1：`~/quantboy-auto-scan/prefilter.py` `9e8bddf7`、`~/quantboy-gate/hardfilter.py` `905b3b49`、未遮罩 `~/quantboy-gate/full_prompt.md` `028711bc5166062e93dfecc946f11923e0882c4e`（2026-11-13 13:11 台北）、`~/quantboy-paper/discretionary/prefilter.py` `29d182f9`。
 
 ## 現行掃描與尚未部署的目標分工
 
@@ -32,7 +32,7 @@
 - 監控程式複核條件、執行風控，並監視停損與停利。複核失敗就丟棄。
 - 通過的單先記在紙上。現有的 `position_manager.py` 不是這套監控。
 
-日 K 均線用哪一條、大師兄與小師弟的出場 R、V 轉收不回時怎麼處理、連敗後縮小多少，都在策略文件的待確認區。這些沒有預設數字。
+做多日K只看均線向上發散、底底高（均線參數未定，不得作為拒單理由）。大師兄與小師弟的出場 R、V 轉收不回時怎麼處理、連敗後縮小多少，都在策略文件的待確認區。這些沒有預設數字。
 
 ## 省 token 閘門
 

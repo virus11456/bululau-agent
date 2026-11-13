@@ -41,9 +41,10 @@ def kuai_shidi(k15, rs):
         av = sum(x["v"] for x in prior) / 20
         body = pct(b["o"], b["c"])  # positive = black
         if av and b["v"] >= 3 * av and body >= body_min:
-            prev_low = min(x["l"] for x in prior)
-            steps = (0.99, 0.985, 0.98) if big else (0.97, 0.96, 0.95)
-            ref = min(prev_low, b["l"])
+            # 004：參考點是這根訊號長黑打到的低點，往下 3%/4%/5%。不再用前 20 根最低點。
+            # 原文例是 100 → 97/96/95，大幣小幣同一組深度；可以掛得很低。
+            ref = b["l"]
+            steps = (0.97, 0.96, 0.95)
             ladder = [round(ref * s, 8) for s in steps]
             avg = (ladder[0] * 2 + ladder[1] * 3 + ladder[2] * 5) / 10
             stop = ladder[2] * (0.985 if big else 0.97)
@@ -89,36 +90,45 @@ def up_diverged(k):
 def daily_ok(kd):
     if len(kd) < 25: return False, "daily history short"
     a = min(x["l"] for x in kd[-10:]); b = min(x["l"] for x in kd[-20:-10])
-    wild = any((x["h"] - x["l"]) / x["o"] > 0.5 for x in kd[-7:])
+    wild = any((x["h"] - x["l"]) / x["o"] > 0.5 for x in kd[-7:] if x.get("o"))
     if wild: return False, "daily range >50% (妖幣)"
-    if not (a > b and kd[-1]["c"] > ma([x["c"] for x in kd], 20)): return False, "daily not higher-lows/above MA20"
+    # 日 K 均線週期原文未定。不使用 MA20／MA30/45/60。只留底底高。
+    if not (a > b): return False, "daily not higher-lows"
     return True, None
 
 def buluuliu(k1h, kd):
+    """布鹿流：均線向上發散、回測進場、不追價。
+
+    均線週期原文沒有定成可擋單的數字（full_prompt：不可自行預設 MA30/45/60）。
+    這裡用價格結構代理「向上發散」：最近 48 根 1H 對半，後段高點更高、低點也更高。
+    這就是原文的底底高（後波低不破前波低、後波高會突破前波高），不填均線參數，
+    也不要求拉回 1.2% 以內、不要求錘子或吞噬。
+    不追價：最高點不在最後 3 根，而且收盤仍低於該高點。
+    目標可以超過前高（003）。前高不到 1.5R 時，目標放到 1.5R，因此可以高於前高。
+    """
     ok, why = daily_ok(kd)
     if not ok: return None, why
-    up, m = up_diverged(k1h)
-    if not up: return None, "1H MA30/45/60 not up-diverged"
+    if len(k1h) < 48: return None, "1H history short"
     w = k1h[-48:]
+    first, second = w[:24], w[24:]
+    if not (max(x["h"] for x in second) > max(x["h"] for x in first)
+            and min(x["l"] for x in second) > min(x["l"] for x in first)):
+        return None, "not higher-high higher-low (no up-divergence)"
     hi_i = max(range(len(w)), key=lambda i: w[i]["h"]); H = w[hi_i]["h"]
     if hi_i > len(w) - 3: return None, "at highs (no pullback, no chase)"
+    last = w[-1]; c = last["c"]
+    if not c or c >= H: return None, "at highs (no pullback, no chase)"
     vb = max(x["v"] for x in w[:hi_i + 1]); vbase = sum(x["v"] for x in k1h[-90:-48]) / max(len(k1h[-90:-48]), 1)
     if vbase and vb < 2 * vbase: return None, "no 2-3x volume expansion"
-    last = w[-1]; c = last["c"]
-    near = min(abs(last["l"] / m[0] - 1), abs(last["l"] / m[1] - 1))
-    if near > 0.012 and last["l"] > m[0]: return None, "not pulled back to MA30/45"
-    if last["c"] < m[2]: return None, "closed below MA60"
-    body = abs(last["c"] - last["o"]); wick = min(last["o"], last["c"]) - last["l"]
-    prev = w[-2]
-    engulf = last["c"] > last["o"] and prev["c"] < prev["o"] and last["c"] >= prev["o"]
-    if not (last["c"] > last["o"] and (wick >= body or engulf)): return None, "no green hammer/engulf confirmation"
-    stop = min(min(x["l"] for x in w[-5:]), m[2]) * 0.995; risk = c - stop
+    pull_low = min(x["l"] for x in w[hi_i:])
+    stop = pull_low * 0.995  # 沿用原本放在回檔低點下方 0.5% 的緩衝，不再綁 MA60
+    risk = c - stop
     if risk <= 0: return None, "bad risk"
-    rr = (H - c) / risk
-    if rr < RR_MIN: return None, f"rr {rr:.2f} to prior high"
-    target = c + min(rr, 2.0) * risk
-    return dict(setup="布鹿流", tf="1H", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(min(rr, 2), 2),
-                prior_high=H, plan="1.5-2R; exit on lower-high / MA death cross; BE at +1R"), None
+    rr_high = (H - c) / risk
+    rr = max(RR_MIN, rr_high)
+    target = c + rr * risk
+    return dict(setup="布鹿流", tf="1H", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(rr, 2),
+                prior_high=H, plan="pullback; target may exceed prior high; RR>=1.5"), None
 
 def funding(k1h, fr):
     up, m = up_diverged(k1h)

@@ -1,5 +1,15 @@
 # 變更紀錄
 
+## 2026-11-13（三項規則改回布神原文）
+
+只改規則，不合併、不部署。
+
+- 瘸師弟：掛單參考點改成訊號長黑 K 的低點，往下 3%／4%／5%。不再用前 20 根最低點。大幣原本的 1%／1.5%／2% 階梯一併改成這組（004 的例子就是 100 → 97／96／95）。停損仍在最深一檔之下。單根長黑 2%／4%、1.5R 全平沒有改。
+- `full_prompt.md` 與 `docs/skill_proposed.md`：拿掉「妖幣急拉不追」「離好球帶太遠不盲掛」這兩條拒單理由。正式 SKILL 不在這份 PR 裡生效。
+- 布鹿流：prefilter 不再要求錘子／吞噬，也不再用 MA30/45/60、拉回 1.2%、日 K MA20。向上發散用最近 48 根 1H 對半的底底高（後段高點更高、低點也更高）來做，因為原文沒有把均線週期定成可以擋單的數字。不追價仍是：高點不在最後 3 根，收盤仍低於該高點。目標可以超過前高；前高不到 1.5R 時目標放到 1.5R。RR≥1.5 與小幣 5% 停損下限仍在 hardfilter。
+- 波數：full_prompt 的「約 3 波不做」改回「七八波以上才考慮放棄」。
+- Mac 端 prefilter 部署路徑是 `~/quantboy-auto-scan/prefilter.py`（repo：`mac/quantboy-auto-scan/prefilter.py`）。同目錄 `common.py` 與 Mac 現檔 sha1 `09463cbe52d279c02bbad04bd0650aee5a03bdf9` 相同，不用覆蓋。閘門的 `gate_prompt.md` 仍寫 `--prefilter /Users/frank/quantboy-paper/discretionary/prefilter.py`，所以紙上那份在 repo 的快照也套了同一判斷。
+
 ## 2026-11-12（gate_log 分開記 429 與 418）
 
 - `prefilter_retry.statuses` 與 `hardfilter.statuses` 依序記下這一輪看到的 429 與 418。退避秒數、次數、上限都沒有改。

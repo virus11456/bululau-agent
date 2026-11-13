@@ -206,6 +206,314 @@ def upcoming_event():
         if t - w <= n <= t + w: return ev
     return None
 
+# --- kuai ladder (paste start) ---
+# 這一段不讀金鑰、不呼叫 config.load_api_keys。下單時才沿用本檔既有的 account／req／sym_info。
+# Mac 的 live_trader.py 沒有 config.py，貼這一段即可，不要連 _keys 一起貼。
+LADDER_WEIGHTS = (2, 3, 5)  # 由淺到深。第一個價格權重 2，最深那檔權重 5。
+LADDER_RR_MIN = 1.5         # 與現行 RR 門檻相同，不另設一個數字。
+
+def parse_ladder(text):
+    """'97,96,95' → 三個價格。做多必須一個比一個低（3%、4%、5%）。"""
+    parts = [p.strip() for p in str(text).split(",")]
+    if len(parts) != 3 or any(not p for p in parts):
+        raise SystemExit("階梯要三個價格，用逗號隔開，例如 --ladder 97,96,95")
+    try:
+        prices = [Decimal(p) for p in parts]
+    except Exception:
+        raise SystemExit("階梯價格讀不懂：{0}".format(text))
+    if any(p <= 0 for p in prices):
+        raise SystemExit("階梯價格必須是正數")
+    if not (prices[0] > prices[1] > prices[2]):
+        raise SystemExit("做多階梯要由淺到深、一個比一個低（權重 2、3、5 對應該順序）")
+    return prices
+
+def weighted_entry(prices, weights=LADDER_WEIGHTS):
+    """加權均價。權重預設 2:3:5。"""
+    prices = [Decimal(p) for p in prices]
+    weights = [Decimal(w) for w in weights]
+    return sum(p * w for p, w in zip(prices, weights)) / sum(weights)
+
+def split_ladder_qty(total, step, weights=LADDER_WEIGHTS):
+    """把已經依 step 取整的總量拆成 2:3:5。四捨的餘數用最大餘數法補回，合計仍等於總量。
+    餘數相同時補給較深的那一檔。"""
+    total = Decimal(str(total)); step = Decimal(str(step))
+    if step <= 0:
+        raise SystemExit("stepSize 不是正數")
+    units = int((total / step).to_integral_value(rounding=ROUND_DOWN))
+    weight_sum = sum(weights)
+    raw = [Decimal(units) * Decimal(w) / Decimal(weight_sum) for w in weights]
+    base = [int(x.to_integral_value(rounding=ROUND_DOWN)) for x in raw]
+    left = units - sum(base)
+    order = sorted(range(len(weights)), key=lambda i: (raw[i] - Decimal(base[i]), i), reverse=True)
+    for i in order:
+        if left <= 0:
+            break
+        base[i] += 1
+        left -= 1
+    return [Decimal(b) * step for b in base]
+
+def order_size(entry, stop, equity, slice_margin, portion, leverage, step):
+    """與 cmd_open 同一條式子：風險 1%、每份保證金、槓桿上限都不改。entry 用呼叫端給的單一價格。"""
+    entry = float(entry); stop = float(stop)
+    dist = abs(entry - stop) / entry
+    risk_usdt = equity * CFG["risk_pct"]
+    margin = slice_margin * portion
+    notional = min(risk_usdt / dist, margin * leverage)
+    qty = rnd(notional / entry, step)
+    return qty, risk_usdt, margin
+
+def ladder_target(text, avg, stop):
+    """'1.5R' 用加權均價算。其他文字當絕對價格。"""
+    if str(text).strip().upper() == "1.5R":
+        return avg + Decimal("1.5") * (avg - stop)
+    return Decimal(str(text))
+
+def ladder_rr(avg, stop, target):
+    risk = avg - stop
+    if risk <= 0:
+        return None
+    return (target - avg) / risk
+
+def limit_order(symbol, side, qty, price):
+    return dict(symbol=symbol, side=side, type="LIMIT", quantity=fmt(qty), price=fmt(price),
+                timeInForce="GTC", newOrderRespType="RESULT")
+
+def check_ladder_levels(prices, qtys, minqty, minnot):
+    """任一檔低於最小量或最小名目，整筆不送。回傳理由清單，空的代表可以送。"""
+    reasons = []
+    for i, (price, qty) in enumerate(zip(prices, qtys), 1):
+        if qty < minqty:
+            reasons.append("第 {0} 檔數量 {1} 低於最小量 {2}".format(i, fmt(qty), fmt(minqty)))
+        notional = qty * price
+        if notional < minnot:
+            reasons.append("第 {0} 檔名目 {1} 低於最小名目 {2}".format(i, format(notional, "f"), fmt(minnot)))
+    return reasons
+
+def cancel_entry_order(symbol, order_id, live):
+    if not live:
+        print("  [dry-run] 取消進場單", symbol, order_id); return
+    req("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, signed=True)
+    log("cancel_entry", symbol=symbol, orderId=order_id)
+
+def resize_protects(symbol, close_side, qty, live):
+    """把停損與止盈的數量改成 qty。價格沿用掛著的觸發價，不重算。先掛新再撤舊。"""
+    changed = False
+    for po in protect_orders(symbol):
+        if po["cp"] or po["qty"] is None or Decimal(str(po["qty"])) == qty:
+            continue
+        kind = "STOP_MARKET" if str(po["t"]).startswith("STOP") else "TAKE_PROFIT_MARKET"
+        print("  調整 {0} 數量 {1} → {2}".format(kind, po["qty"], fmt(qty)))
+        place_protect(symbol, close_side, kind, po["trig"], live, qty=fmt(qty))
+        cancel_protect(symbol, po, live)
+        changed = True
+    return changed
+
+def _filled_qty(order):
+    try:
+        return Decimal(str(order.get("executedQty") or "0"))
+    except Exception:
+        return Decimal(0)
+
+def manage_ladder_pending(sym, pd, held_amt, live):
+    """三檔限價的待成交處理。
+
+    沿用單張限價：未終結前不把這筆移出 pending；全部終結且有持倉才轉 meta；
+    終結且沒有持倉就留給後面的孤兒保護單清理。
+    持倉已歸零但還有未成交的檔：撤掉那些進場單（停損或平倉之後不要留著）。
+    有成交且還有檔掛著：保護單數量改成實際持倉，止盈價不重算。
+    """
+    rows = []
+    for item in pd.get("orders") or []:
+        oid = item.get("orderId")
+        if not oid:
+            continue
+        try:
+            rows.append(req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": oid}, signed=True))
+        except BinanceError as e:
+            log("warn", msg="查詢階梯單失敗", symbol=sym, orderId=oid, err=str(e))
+            print("{0} 階梯單查詢失敗，這輪不動".format(sym))
+            return False
+    if len(rows) != len(pd.get("orders") or []):
+        return False
+    filled = sum((_filled_qty(o) for o in rows), Decimal(0))
+    resting = [o for o in rows if o.get("status") in ("NEW", "PARTIALLY_FILLED")]
+    amt = held_amt.get(sym, 0.0)
+    if resting and amt == 0 and filled == 0:
+        print("{0} 階梯仍掛著 {1} 檔，尚未成交".format(sym, len(resting)))
+        return False
+    if not resting and (filled > 0 or amt != 0):
+        # 跟單張限價一樣：狀態已 FILLED 就轉成持倉，即使這輪快照還沒看到數量。
+        print("{0} 階梯已全部終結，持倉 {1}，轉為一般持倉管理".format(sym, amt))
+        return "meta"
+    if resting and amt != 0:
+        close_side = "SELL" if amt > 0 else "BUY"
+        print("{0} 階梯部分成交，持倉 {1}，還有 {2} 檔未完成".format(sym, amt, len(resting)))
+        try:
+            resize_protects(sym, close_side, Decimal(str(abs(amt))), live)
+        except Exception as e:
+            log("error", msg="調整階梯保護單數量失敗", symbol=sym, err=str(e))
+        return False
+    if resting and filled > 0 and amt == 0:
+        # 快照是 0。保護單兩張都還在：可能只是成交還沒反映，這輪不撤。
+        # 停損或止盈已經不在：視為已經平倉，撤掉剩下的進場單。
+        protects = protect_orders(sym)
+        has_sl = any(str(po["t"]).startswith("STOP") for po in protects)
+        has_tp = any(str(po["t"]).startswith("TAKE") for po in protects)
+        if has_sl and has_tp:
+            print("{0} 持倉快照為 0 但保護單都還在，這輪不撤未成交檔".format(sym))
+            return False
+        for o in resting:
+            print("{0} 持倉已平，撤未成交階梯 {1}".format(sym, o.get("orderId")))
+            try:
+                cancel_entry_order(sym, o.get("orderId"), live)
+            except Exception as e:
+                log("error", msg="撤階梯進場單失敗", symbol=sym, err=str(e))
+        for po in protects:
+            cancel_protect(sym, po, live)
+        return "drop"
+    print("{0} 階梯結束且無持倉，撤掉孤兒保護單".format(sym))
+    for po in protect_orders(sym):
+        cancel_protect(sym, po, live)
+    return "drop"
+
+def open_ladder(a):
+    """三檔限價。總量用加權均價走 cmd_open 的同一條風險式子，再拆 2:3:5。預設不走這條。"""
+    live = a.live; sym = a.symbol.upper(); side = a.side.upper()
+    if side != "BUY":
+        raise SystemExit("階梯目前只做多。空單請用原本的單張下單")
+    if a.entry_type == "market":
+        raise SystemExit("階梯是限價，不能跟 --entry-type market 一起用")
+    acc = account(); s = day_state(acc); eq = equity_of(acc)
+    if os.path.exists(HALT_FLAG) or s["killed"]:
+        raise SystemExit("已觸發 30% 全平，需回報使用者，禁止開倉")
+    dl = daily_loss_pct(acc, s)
+    if dl >= CFG["daily_stop"] or s["halted_new"]:
+        raise SystemExit("當日虧損 {0:.2f}% ≥ 7%，今日停開新倉".format(dl * 100))
+    ev = upcoming_event()
+    if ev:
+        raise SystemExit("重大事件 ±30 分鐘內禁止開倉：{0}".format(ev))
+    pos = positions(acc)
+    if len(pos) >= CFG["max_positions"]:
+        raise SystemExit("已達同時 5 倉上限")
+    if any(p["symbol"] == sym for p in pos):
+        raise SystemExit("{0} 已有倉位（單幣最多 1 份）".format(sym))
+    if req("GET", "/fapi/v1/positionSide/dual", signed=True).get("dualSidePosition"):
+        if live:
+            raise SystemExit("帳戶是雙向持倉模式，本模組只支援單向，請先改成單向")
+        print("  ⚠ 帳戶目前是雙向持倉模式，--live 會被拒絕（dry-run 繼續）")
+    info = sym_info(sym)
+    if info["status"] != "TRADING":
+        raise SystemExit("{0} 狀態 {1}".format(sym, info["status"]))
+    prices = [rnd(p, info["tick"]) for p in parse_ladder(a.ladder)]
+    stop = rnd(Decimal(str(a.stop)), info["tick"], ROUND_DOWN)
+    avg = weighted_entry(prices)
+    asked_r = str(a.target).strip().upper() == "1.5R"
+    try:
+        target = ladder_target(a.target, avg, stop)
+    except Exception:
+        raise SystemExit("止盈讀不懂：{0}".format(a.target))
+    target = rnd(target, info["tick"], ROUND_DOWN)
+    # 1.5R 取整後若矮於 1.5，補一個 tick。明示的較低止盈不補。
+    if asked_r and avg > stop and ladder_rr(avg, stop, target) < Decimal(str(LADDER_RR_MIN)):
+        target += info["tick"]
+    if not (stop < prices[2] and avg < target):
+        raise SystemExit("停損/止盈方向錯誤：加權均價 {0} 停損 {1} 止盈 {2}".format(fmt(avg), fmt(stop), fmt(target)))
+    if prices[0] >= target:
+        raise SystemExit("第 1 檔 {0} 不低于止盈 {1}，整筆不送出".format(fmt(prices[0]), fmt(target)))
+    rr = ladder_rr(avg, stop, target)
+    # 止盈 ROUND_DOWN 最多矮一個 tick。用這個寬度避免剛好 1.5R 被取整拒掉。0.83 這種仍會拒。
+    tick_rr = info["tick"] / (avg - stop) if avg > stop else Decimal(0)
+    if rr is None or rr + tick_rr + Decimal("1e-9") < Decimal(str(LADDER_RR_MIN)):
+        raise SystemExit("加權進場 RR {0} < {1}，整筆不送出".format(rr, LADDER_RR_MIN))
+    lev = min(CFG["max_lev"], int(a.leverage or CFG["max_lev"]))
+    qty, risk_usdt, margin = order_size(avg, stop, eq, s["slice_margin"], a.portion, lev, info["step"])
+    if qty < info["minqty"] or qty * Decimal(str(avg)) < info["minnot"]:
+        raise SystemExit("數量 {0} 低於最小量/最小名目 {1}（停損太遠或份額太小）".format(qty, info["minnot"]))
+    qtys = split_ladder_qty(qty, info["step"])
+    reasons = check_ladder_levels(prices, qtys, info["minqty"], info["minnot"])
+    if reasons:
+        raise SystemExit("階梯有一檔低於交易所下限，整筆不送出：" + "；".join(reasons))
+    if sum(qtys) != qty:
+        raise SystemExit("階梯拆分合計 {0} 不等於總量 {1}，整筆不送出".format(sum(qtys), qty))
+    close_side = "SELL"
+    stop_p, tp_p = fmt(stop), fmt(target)
+    orders = [limit_order(sym, side, q, p) for p, q in zip(prices, qtys)]
+    shallow = prices[0]
+    shallow_rr = ladder_rr(shallow, stop, target)
+    plan = dict(symbol=sym, side=side, setup=a.setup, ladder=True, weights="2:3:5",
+                prices=[fmt(p) for p in prices], qtys=[fmt(q) for q in qtys],
+                entry=fmt(avg), stop=stop_p, target=tp_p, qty=fmt(qty),
+                rr=round(float(rr), 4), level1_rr=None if shallow_rr is None else round(float(shallow_rr), 4),
+                notional=round(float(qty) * float(avg), 2), lev=lev,
+                est_loss=round(float(qty) * abs(float(avg) - float(stop)), 2),
+                risk_cap=round(risk_usdt, 2), slice_margin=s["slice_margin"], portion=a.portion,
+                margin=round(margin, 4), live=live)
+    print("計畫:", json.dumps(plan, ensure_ascii=False))
+    log("open_plan", **plan)
+    for order in orders:
+        req("POST", "/fapi/v1/order/test", order, signed=True)
+    print("  /order/test 通過（三檔）")
+    if not live:
+        print("  [dry-run] 設定 {0} ISOLATED、槓桿 {1}x".format(sym, lev))
+        for order in orders:
+            print("  [dry-run] POST /fapi/v1/order", order)
+        place_protect(sym, close_side, "STOP_MARKET", stop_p, False, qty=fmt(qty))
+        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False, qty=fmt(qty))
+        return plan
+    try:
+        req("POST", "/fapi/v1/marginType", dict(symbol=sym, marginType="ISOLATED"), signed=True)
+    except BinanceError as e:
+        if e.code != -4046:
+            raise
+    req("POST", "/fapi/v1/leverage", dict(symbol=sym, leverage=lev), signed=True)
+    placed = []
+    try:
+        for order in orders:
+            r = req("POST", "/fapi/v1/order", order, signed=True)
+            log("entry_order", order=order, resp=r)
+            placed.append(dict(orderId=r.get("orderId"), price=order["price"], qty=order["quantity"]))
+    except Exception as e:
+        log("error", msg="階梯有一檔失敗，撤掉已送出的進場單", symbol=sym, err=str(e))
+        for item in placed:
+            try:
+                cancel_entry_order(sym, item["orderId"], True)
+            except Exception as e2:
+                log("error", msg="撤銷階梯進場單失敗", err=str(e2))
+        for p in positions(account()):
+            if p["symbol"] == sym:
+                market_close(sym, float(p["positionAmt"]), True, "ladder_entry_failed")
+        raise SystemExit("階梯沒有全部掛上，已撤銷已送出的進場單: {0}".format(e))
+    try:
+        place_protect(sym, close_side, "STOP_MARKET", stop_p, True, qty=fmt(qty))
+    except Exception as e:
+        log("error", msg="階梯預掛停損失敗，撤銷進場單", symbol=sym, err=str(e))
+        for item in placed:
+            try:
+                cancel_entry_order(sym, item["orderId"], True)
+            except Exception as e2:
+                log("error", msg="撤銷階梯進場單失敗", err=str(e2))
+        for p in positions(account()):
+            if p["symbol"] == sym:
+                market_close(sym, float(p["positionAmt"]), True, "ladder_stop_place_failed")
+        raise SystemExit("預掛停損失敗，階梯進場單已撤銷: {0}".format(e))
+    try:
+        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True, qty=fmt(qty))
+    except BinanceError as e:
+        if e.code == -2021:
+            log("info", msg="止盈價在現價錯邊，暫不預掛；成交後由 watch/manage 立即補掛", symbol=sym, target=tp_p)
+            print("  止盈暫不預掛（會立即觸發），成交後 watch 會在 1 分鐘內補掛")
+        else:
+            log("error", msg="階梯預掛止盈失敗（停損已在）", err=str(e))
+    except Exception as e:
+        log("error", msg="階梯預掛止盈失敗（停損已在）", err=str(e))
+    st = load_state()
+    st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, qty=fmt(qty), side=side,
+                                              ladder=True, orders=placed)
+    save_state(st)
+    print("三檔限價已掛，停損/止盈已同步預掛（reduceOnly 合計數量）", [x["orderId"] for x in placed])
+    return plan
+# --- kuai ladder (paste end) ---
+
 # ---------- 指令 ----------
 def cmd_status(a):
     acc = account(); s = day_state(acc); eq = equity_of(acc)
@@ -343,6 +651,16 @@ def cmd_manage(a):
     # ---- 限價待成交單：成交/部分成交/取消/過期處理 ----
     held_amt = {p["symbol"]: float(p["positionAmt"]) for p in positions(acc)}
     for sym, pd in list(st.get("pending", {}).items()):
+        if pd.get("ladder"):
+            done = manage_ladder_pending(sym, pd, held_amt, live)
+            if done:
+                if done == "meta":
+                    st.setdefault("meta", {})[sym] = {k: pd[k] for k in ("stop", "target", "setup")}
+                st["pending"].pop(sym, None)
+                log("ladder_done", symbol=sym, pos=held_amt.get(sym, 0.0))
+                if live:
+                    save_state(st)
+            continue
         if not pd.get("orderId"): continue
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True)
         except BinanceError as e: log("warn", msg="查詢限價單失敗", symbol=sym, err=str(e)); continue
@@ -406,6 +724,24 @@ def cmd_watch(a):
     if not pend: return
     need = False
     for sym, pd in pend.items():
+        if pd.get("ladder"):
+            types = {po["t"] for po in protect_orders(sym)}
+            has_sl = any(str(t).startswith("STOP") for t in types)
+            has_tp = any(str(t).startswith("TAKE") for t in types)
+            for item in pd.get("orders") or []:
+                if not item.get("orderId"):
+                    continue
+                try:
+                    o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": item["orderId"]}, signed=True, retries=2)
+                except BinanceError as e:
+                    log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
+                executed = float(o.get("executedQty") or 0)
+                resting = o["status"] in ("NEW", "PARTIALLY_FILLED")
+                if (not resting) or executed > 0 or not has_sl or not has_tp:
+                    log("watch_trigger", symbol=sym, status=o["status"], executed=o.get("executedQty"), ladder=True)
+                    need = True
+                    break
+            continue
         if not pd.get("orderId"): continue
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True, retries=2)
         except BinanceError as e: log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
@@ -424,6 +760,7 @@ def main():
     sub.add_parser("status")
     o = sub.add_parser("open"); o.add_argument("--symbol", required=True); o.add_argument("--side", required=True, choices=["BUY", "SELL", "buy", "sell", "long", "short"])
     o.add_argument("--entry-type", default="market", choices=["market", "limit"]); o.add_argument("--price")
+    o.add_argument("--ladder", help="三檔限價，由淺到深，例如 97,96,95。權重 2:3:5。不給就維持單張")
     o.add_argument("--stop", required=True); o.add_argument("--target", required=True); o.add_argument("--setup", required=True)
     o.add_argument("--leverage", type=int); o.add_argument("--portion", type=float, default=1.0, choices=[0.25, 0.5, 1.0]); o.add_argument("--live", action="store_true")
     for n in ("manage", "flatten", "watch"):
@@ -431,7 +768,12 @@ def main():
     a = ap.parse_args()
     if a.cmd == "open": a.side = {"long": "BUY", "short": "SELL"}.get(a.side.lower(), a.side.upper())
     with Lock():
-        try: {"status": cmd_status, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch, "flatten": cmd_flatten}[a.cmd](a)
+        try:
+            # 有 --ladder 才走三檔。沒有就仍是 cmd_open，單張行為不變。
+            if a.cmd == "open" and getattr(a, "ladder", None):
+                open_ladder(a)
+            else:
+                {"status": cmd_status, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch, "flatten": cmd_flatten}[a.cmd](a)
         except BinanceError as e: log("error", cmd=a.cmd, err=str(e)); raise SystemExit(f"幣安錯誤: {e}")
 
 if __name__ == "__main__": main()

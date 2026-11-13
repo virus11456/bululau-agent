@@ -85,6 +85,21 @@
 
 同一時間只能有一個 `live_trader.py`。若出現「另一個 live_trader 正在執行」，等它結束，不要改跑 `flatten`。
 
+### 瘸師弟三檔限價（2026-11-13）
+
+不給 `--ladder` 時仍是單張，布鹿流與其他單張的算法不變。三檔只在明確帶這個參數時才走。總量仍用原本的 1% 風險、每份保證金與槓桿上限；進場價改用三檔的 2:3:5 加權均價，再把那個總量拆開。任一檔低於最小量或最小名目，整筆不送。
+
+```bash
+python3 src/live_trader.py open \
+  --symbol PIEVERSEUSDT --side BUY --entry-type limit \
+  --ladder 97,96,95 --stop 92.15 --target 1.5R \
+  --setup 瘸師弟 --portion 1
+```
+
+`--target 1.5R` 用加權均價算止盈。改成絕對價格也可以。先不要加 `--live`。Mac 上的檔是 `~/quantboy-live/live_trader.py`，不能整份覆蓋；手貼步驟在 [deploy/patches/kuai_ladder_insert.md](../deploy/patches/kuai_ladder_insert.md)。那段新函式不讀金鑰。真正下單仍走該檔自己的金鑰讀取。
+
+`manage` 與 60 秒 `watch` 的排程沒改。有成交時，停損與止盈的數量改成實際持倉，觸發價不重算。持倉歸零且停損或止盈已經不在，才撤掉還沒成交的檔。未成交可以掛多久，程式沒有新的時限。
+
 ## 紙上記錄
 
 紙上記錄用資料目錄裡的檔。本倉庫的程式目前不讀這些檔，也不會因此下單。

@@ -604,5 +604,247 @@ class _StepClock:
         self.t += float(seconds)
 
 
+D1 = 24 * 60 * 60 * 1000
+
+
+def _daily(n=40, dips=None, closes=None, start=T0):
+    """已收日 K。預設收盤 100, 101, …，低點在 dips 下凹，其餘貼著收盤。"""
+    dips = set() if dips is None else set(dips)
+    out = []
+    for i in range(n):
+        c = (100 + i) if closes is None else closes[i]
+        low = c - 10 if i in dips else c - 1
+        t = start + i * D1
+        out.append({"t": t, "o": c, "h": c + 1, "l": low, "c": c, "v": 1.0, "ct": t + D1 - 1})
+    return out
+
+
+def _passing_daily(n=40):
+    return _daily(n, dips={10, n - 10})
+
+
+class DailyTrendTest(unittest.TestCase):
+    def test_pass_matches_ma7_25(self):
+        bars = _passing_daily()
+        ok, why = hf.daily_trend_ok(bars)
+        self.assertEqual((ok, why), (True, None))
+        closes = [b["c"] for b in bars]
+        fast = hf.ma_at(closes, 7)
+        slow = hf.ma_at(closes, 25)
+        self.assertGreater(closes[-1], fast)
+        self.assertGreater(closes[-1], slow)
+        self.assertGreater(fast, slow)
+        self.assertGreater(fast, hf.ma_at(closes, 7, 3))
+        self.assertGreater(slow, hf.ma_at(closes, 25, 3))
+        lows = hf.swing_lows(bars)
+        self.assertGreaterEqual(len(lows), 2)
+        self.assertGreater(lows[-1], lows[-2])
+
+    def test_each_ma_clause_blocks(self):
+        # 收盤等於 MA7：只有「收盤 > MA7」不成立。
+        closes = [100 + i for i in range(40)]
+        closes[-1] = sum(closes[-7:-1]) / 6
+        ok, why = hf.daily_trend_ok(_daily(closes=closes, dips={10, 30}))
+        self.assertFalse(ok)
+        self.assertEqual(why, "日K均線未向上發散")
+        self.assertFalse(closes[-1] > hf.ma_at(closes, 7))
+        self.assertTrue(closes[-1] > hf.ma_at(closes, 25))
+
+        # 收盤低於 MA25。c > MA7 且 MA7 > MA25 時，收盤必然高於 MA25，所以這一條會連帶別的比較一起失敗。
+        closes = [100 + i for i in range(40)]
+        closes[-1] = 99
+        ok, why = hf.daily_trend_ok(_daily(closes=closes, dips={10, 30}))
+        self.assertEqual(why, "日K均線未向上發散")
+        self.assertFalse(closes[-1] > hf.ma_at(closes, 25))
+
+        # 只有 MA7 <= MA25。
+        closes = [100 + i for i in range(40)]
+        for i in range(-6, -1):
+            closes[i] = 110
+        closes[-1] = 180
+        ok, why = hf.daily_trend_ok(_daily(closes=closes, dips={10, 30}))
+        self.assertEqual(why, "日K均線未向上發散")
+        fast, slow = hf.ma_at(closes, 7), hf.ma_at(closes, 25)
+        self.assertFalse(fast > slow)
+        self.assertTrue(closes[-1] > fast and closes[-1] > slow)
+        self.assertTrue(fast > hf.ma_at(closes, 7, 3))
+        self.assertTrue(slow > hf.ma_at(closes, 25, 3))
+
+        # 只有 MA7 沒有高於三根前。
+        closes = [100 + i for i in range(40)]
+        for i in range(-4, -1):
+            closes[i] -= 11
+        ok, why = hf.daily_trend_ok(_daily(closes=closes, dips={10, 30}))
+        self.assertEqual(why, "日K均線未向上發散")
+        self.assertFalse(hf.ma_at(closes, 7) > hf.ma_at(closes, 7, 3))
+        self.assertTrue(closes[-1] > hf.ma_at(closes, 7))
+        self.assertTrue(hf.ma_at(closes, 25) > hf.ma_at(closes, 25, 3))
+
+        # 只有 MA25 沒有高於三根前（等於也不算過）。
+        closes = [100 + i for i in range(40)]
+        for i in (12, 13, 14):
+            closes[i] += 25
+        ok, why = hf.daily_trend_ok(_daily(closes=closes, dips={10, 30}))
+        self.assertEqual(why, "日K均線未向上發散")
+        self.assertFalse(hf.ma_at(closes, 25) > hf.ma_at(closes, 25, 3))
+        self.assertTrue(hf.ma_at(closes, 7) > hf.ma_at(closes, 7, 3))
+        self.assertTrue(closes[-1] > hf.ma_at(closes, 7))
+
+    def test_insufficient_bars(self):
+        for bars in (None, [], _passing_daily(32), _passing_daily(hf.DAILY_MIN_BARS - 1)):
+            ok, why = hf.daily_trend_ok(bars)
+            self.assertFalse(ok)
+            self.assertIn("日K資料不足", why)
+        ok, why = hf.daily_trend_ok(_passing_daily(hf.DAILY_MIN_BARS))
+        self.assertEqual((ok, why), (True, None))
+        self.assertEqual(hf.DAILY_MIN_BARS, 25 + 3 + 5)
+
+    def test_forming_bar_is_excluded_when_now_is_given(self):
+        closed = _passing_daily()
+        forming = dict(closed[-1])
+        forming["t"] = closed[-1]["t"] + D1
+        forming["ct"] = forming["t"] + D1 - 1
+        forming["c"] = 1.0
+        forming["l"] = 0.5
+        both = closed + [forming]
+        decision = closed[-1]["ct"] + 1
+        self.assertEqual(hf.daily_trend_ok(both, decision), (True, None))
+        # 不告訴它決策時間，未收的那根會把均線打壞。
+        self.assertEqual(hf.daily_trend_ok(both)[1], "日K均線未向上發散")
+        # 沒有 ct 的根不會被當成未收而丟掉。
+        bare = [dict(b, ct=None) for b in closed]
+        self.assertEqual(hf.daily_trend_ok(bare, decision), (True, None))
+
+    def test_normalize_drops_forming_daily_bar(self):
+        closed = _passing_daily()
+        raw = []
+        for b in closed:
+            raw.append([b["t"], b["o"], b["h"], b["l"], b["c"], b["v"], b["ct"]])
+        forming = raw[-1][:]
+        forming[0] = closed[-1]["t"] + D1
+        forming[4] = 1.0
+        forming[6] = forming[0] + D1 - 1
+        raw.append(forming)
+        kept = hf.normalize(raw, closed[-1]["ct"] + 1)
+        self.assertEqual(len(kept), len(closed))
+        self.assertEqual(hf.daily_trend_ok(kept), (True, None))
+
+    def test_swing_low_edges(self):
+        # 左右不夠 2 根的凹點不算。只凹在第 1 根和倒數第 2 根，沒有分形低點。
+        ok, why = hf.daily_trend_ok(_daily(40, dips={1, 38}))
+        self.assertEqual(why, "日K未底底高")
+        self.assertEqual(hf.swing_lows(_daily(40, dips={1, 38})), [])
+        # 最邊上仍算得進的兩根：index 2 與 len-3。
+        self.assertEqual(hf.daily_trend_ok(_daily(40, dips={2, 37}))[0], True)
+        # 和旁邊一樣低，不是嚴格小於，這顆不算。
+        tied = _passing_daily()
+        tied[10]["l"] = tied[9]["l"]
+        self.assertEqual(hf.daily_trend_ok(tied)[1], "日K未底底高")
+        self.assertEqual(len(hf.swing_lows(tied)), 1)
+        # 兩個低點一樣高，或後一個更低，都不算底底高。
+        same = _passing_daily()
+        same[10]["l"] = 50
+        same[30]["l"] = 50
+        self.assertEqual(hf.daily_trend_ok(same)[1], "日K未底底高")
+        lower = _passing_daily()
+        lower[10]["l"] = 80
+        lower[30]["l"] = 40
+        self.assertEqual(hf.daily_trend_ok(lower)[1], "日K未底底高")
+        # 只比最後兩個。更早那顆低點比較高，不影響。
+        three = _daily(40, dips={8, 18, 30})
+        three[8]["l"] = 90
+        three[18]["l"] = 70
+        three[30]["l"] = 80
+        self.assertEqual([b["l"] for b in (three[8], three[18], three[30])], [90, 70, 80])
+        self.assertEqual(hf.swing_lows(three)[-2:], [70, 80])
+        self.assertEqual(hf.daily_trend_ok(three), (True, None))
+
+    def _hour_with_volume(self):
+        spec = [(100, 100.2, 10)] * 100
+        spec[60] = (100, 103, 40)
+        k = bars(spec, H1)
+        k[65]["h"] = 120
+        return k
+
+    def test_evaluate_blocks_only_bulu_and_requests_sixty_daily_bars(self):
+        daily = _passing_daily()
+        ref = daily[-1]["ct"] + 1
+        calls = []
+
+        def getter(symbol, interval, limit):
+            calls.append((symbol, interval, limit))
+            if interval == "1h":
+                return self._hour_with_volume()
+            if interval == "1d":
+                return daily
+            raise AssertionError(interval)
+
+        cand = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.20}
+        verdict, details = hf.evaluate(cand, getter, ref)
+        self.assertEqual(verdict, "keep")
+        self.assertIn(("bulu_daily_trend", "pass", None), details)
+        self.assertIn(("XUSDT", "1d", 60), calls)
+        self.assertGreaterEqual(hf.DAILY_KLINE_LIMIT, 60)
+
+        short_calls = []
+
+        def short_getter(symbol, interval, limit):
+            short_calls.append((interval, limit))
+            if interval == "1h":
+                return self._hour_with_volume()
+            return _passing_daily(32)
+
+        verdict, details = hf.evaluate(cand, short_getter, ref)
+        self.assertEqual(verdict, "block")
+        self.assertEqual(details[-1][0], "bulu_daily_trend")
+        self.assertIn("日K資料不足", details[-1][2])
+        self.assertEqual(short_calls[-1], ("1d", 60))
+
+        # 未收日 K 混在回傳裡，evaluate 用決策時間丟掉之後仍放行。
+        forming = dict(daily[-1])
+        forming["ct"] = ref + D1
+        forming["c"] = 1.0
+        forming["l"] = 0.5
+
+        def mixed_getter(symbol, interval, limit):
+            if interval == "1h":
+                return self._hour_with_volume()
+            return daily + [forming]
+
+        verdict, details = hf.evaluate(cand, mixed_getter, ref)
+        self.assertEqual(verdict, "keep", details)
+
+        # 瘸師弟不看日 K。RR 已擋的布鹿流也不抓日 K。
+        def no_daily(symbol, interval, limit):
+            self.assertNotEqual(interval, "1d")
+            k = bars([(100, 100, 10)] * 30 + [(104, 100, 40)], M15)
+            return k
+
+        kuai_k = bars([(100, 100, 10)] * 30 + [(104, 100, 40)], M15)
+        kuai = {"symbol": "XUSDT", "setup": "瘸師弟", "bar": label(kuai_k[-1]["t"])}
+        verdict, _details = hf.evaluate(kuai, no_daily, kuai_k[-1]["ct"] + 1)
+        self.assertEqual(verdict, "keep")
+
+        def boom(*_a):
+            raise AssertionError("RR 已擋，不該再抓 K 線")
+
+        chase = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.0}
+        verdict, details = hf.evaluate(chase, boom, ref)
+        self.assertEqual(verdict, "block")
+        self.assertEqual(details[-1][0], "bulu_rr_after_widening")
+
+    def test_daily_fetch_error_keeps_candidate(self):
+        def getter(symbol, interval, limit):
+            if interval == "1d":
+                raise hf.DataError("HTTP 500")
+            return self._hour_with_volume()
+
+        cand = {"symbol": "XUSDT", "setup": "布鹿流", "entry": 1.0, "stop": 0.90, "prior_high": 1.20}
+        out = hf.run({"candidates": [cand]}, getter, T0)
+        self.assertEqual(len(out["kept"]), 1)
+        self.assertEqual(out["blocked"], [])
+        self.assertTrue(any("HTTP 500" in n for n in out["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

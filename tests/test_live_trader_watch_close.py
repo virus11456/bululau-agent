@@ -612,6 +612,48 @@ class MarkReducedTest(unittest.TestCase):
         self.assertEqual(meta["target"], "120")
 
 
+class LossPercentFormatTest(unittest.TestCase):
+    def test_profit_and_flat_day_do_not_print_negative_zero(self):
+        def status_line(wallet):
+            acc = dict(ACC)
+            acc["totalWalletBalance"] = wallet
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                lt.print_status_body(acc, dict(DAY), [], [], [],
+                                     {"dualSidePosition": False}, {"multiAssetsMargin": False})
+            return buf.getvalue()
+
+        profit = status_line("1015.35")
+        self.assertIn("當日損益 +15.35 (0.00% 虧損側)", profit)
+        self.assertNotIn("-0.00%", profit)
+        flat = status_line("1000")
+        self.assertIn("當日損益 +0.00 (0.00% 虧損側)", flat)
+        self.assertNotIn("-0.00%", flat)
+        down = status_line("990")
+        self.assertIn("當日損益 -10.00 (-1.00% 虧損側)", down)
+
+        acc = dict(ACC)
+        acc["totalWalletBalance"] = "1015.35"
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        buf = io.StringIO()
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log"), \
+                patch.object(lt, "account", return_value=acc), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value={"pending": {}, "meta": {}}), \
+                patch.object(lt, "save_state"):
+            with redirect_stdout(buf):
+                lt.cmd_manage(type("A", (), {"live": False, "with_status": False})())
+        text = buf.getvalue()
+        self.assertIn("當日虧損 0.00%  持倉 0", text)
+        self.assertNotIn("-0.00%", text)
+
+
 class SingleOrderUnchangedTest(unittest.TestCase):
     def test_single_order_manage_matches_previous_file(self):
         import importlib.util

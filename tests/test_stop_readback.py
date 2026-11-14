@@ -31,7 +31,7 @@ ACC = {
     "positions": [],
 }
 DAY = {"day": "2026-11-14", "day_start_equity": 10000.0, "slice_margin": 500.0,
-       "halted_new": False, "killed": False}
+       "halted_new": False, "killed": False, "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 class Args:
@@ -82,6 +82,8 @@ class StopReadbackTest(unittest.TestCase):
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "BTCUSDT", "positionAmt": "0", "markPrice": "100"}]
             if path == "/fapi/v1/openOrders":
+                return []
+            if path == "/fapi/v1/income" and params.get("incomeType") == "TRANSFER":
                 return []
             if path == "/fapi/v1/openAlgoOrders":
                 if self.read_error:
@@ -159,6 +161,8 @@ class StopReadbackTest(unittest.TestCase):
                 return [{"symbol": "BTCUSDT", "positionAmt": "0", "markPrice": "100"}]
             if path == "/fapi/v1/openOrders":
                 return []
+            if path == "/fapi/v1/income" and params.get("incomeType") == "TRANSFER":
+                return []
             if path == "/fapi/v1/openAlgoOrders":
                 if not any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("type") == "STOP_MARKET"
                            for c in self.calls[:-1]):
@@ -218,6 +222,8 @@ class StopReadbackTest(unittest.TestCase):
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "BTCUSDT", "positionAmt": "0", "markPrice": "100"}]
             if path == "/fapi/v1/openOrders":
+                return []
+            if path == "/fapi/v1/income" and params.get("incomeType") == "TRANSFER":
                 return []
             if path == "/fapi/v1/openAlgoOrders":
                 if self.read_error:

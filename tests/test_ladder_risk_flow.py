@@ -27,7 +27,7 @@ ACC = {
     "availableBalance": "1000", "positions": [],
 }
 DAY = {"day": "2026-11-14", "day_start_equity": 1000.0, "slice_margin": 50.0,
-       "halted_new": False, "killed": False}
+       "halted_new": False, "killed": False, "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 def _algo(kind, algo_id, qty, trig):
@@ -177,6 +177,8 @@ class LadderExpireTest(unittest.TestCase):
             if method == "GET" and path == "/fapi/v1/order":
                 return {"orderId": 5, "status": "NEW", "executedQty": "0", "origQty": "1", "time": old_ms}
             if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
                 return []
             if method == "DELETE":
                 raise AssertionError("單張不該被逾時撤掉")

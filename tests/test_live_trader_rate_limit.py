@@ -29,7 +29,7 @@ ACC = {
     "positions": [],
 }
 DAY = {"day": "2026-11-14", "day_start_equity": 1000.0, "slice_margin": 50.0,
-       "halted_new": False, "killed": False}
+       "halted_new": False, "killed": False, "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 class Headers(object):
@@ -247,6 +247,8 @@ class StatusCacheTest(unittest.TestCase):
 
         def open_req(method, path, params=None, signed=False, retries=5):
             calls.append(path)
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
                 return []
             if path == "/fapi/v1/positionSide/dual":
@@ -319,6 +321,8 @@ class ManageStatusAndOrphanTest(unittest.TestCase):
             if path == "/fapi/v1/multiAssetsMargin":
                 return {"multiAssetsMargin": False}
             if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
                 return []
             raise AssertionError(path)
 
@@ -431,6 +435,8 @@ class ManageStatusAndOrphanTest(unittest.TestCase):
                 raise AssertionError("這一輪不該全量掃描")
             if method == "POST":
                 raise AssertionError("已知幣的保護單都在，不該補掛")
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path, sym))
 
         with patch.object(lt, "req", fake_req), \
@@ -440,7 +446,7 @@ class ManageStatusAndOrphanTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 lt.cmd_manage(type("A", (), {"live": True, "with_status": False})())
         self.assertTrue(any(p == "/fapi/v1/openOrders" and s == "BTCUSDT" for _m, p, s in calls))
-        self.assertFalse(any(s is None for _m, _p, s in calls))
+        self.assertFalse(any(p != "/fapi/v1/income" and s is None for _m, p, s in calls))
 
     def test_day_reset_keeps_orphan_counter(self):
         saved = []
@@ -496,6 +502,8 @@ class ReadFailureAndOrphanTest(unittest.TestCase):
                 return []
             if method == "POST":
                 raise AssertionError("讀取失敗不能市價平倉")
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path))
 
         buf = io.StringIO()
@@ -554,6 +562,8 @@ class ReadFailureAndOrphanTest(unittest.TestCase):
                 return {}
             if path == "/fapi/v1/positionSide/dual":
                 return {"dualSidePosition": True}
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path, sym))
 
         args = type("A", (), {

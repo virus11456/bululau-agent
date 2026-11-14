@@ -197,8 +197,11 @@ def day_state(acc):
     s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
     if s.get("day") != today:
         eq = equity_of(acc)
+        now = now_tpe()
+        # 日初淨值已含重置前的劃轉。游標改到現在，並清掉昨天看過的 tranId，避免再加一次。
         fresh = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
-                     halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+                     halted_new=False, killed=False, created=now.isoformat(timespec="seconds"),
+                     capital_flow_last_ms=int(now.timestamp() * 1000), capital_flow_seen=[])
         kept = {k: v for k, v in s.items() if k not in _DAY_FIELDS}
         s = dict(kept); s.update(fresh)
         save_state(s); log("day_reset", **s)
@@ -206,6 +209,146 @@ def day_state(acc):
 
 def daily_loss_pct(acc, s):
     return max(0.0, (s["day_start_equity"] - equity_of(acc)) / s["day_start_equity"]) if s["day_start_equity"] > 0 else 0.0
+
+def _transfer_start_ms(s):
+    """有游標就回傳毫秒。沒有游標回 None，呼叫端只做初始化、不打 API。讀不懂回 False，呼叫端這輪不動。"""
+    if not isinstance(s, dict) or s.get("capital_flow_last_ms") in (None, ""):
+        return None
+    try:
+        return int(s.get("capital_flow_last_ms"))
+    except (TypeError, ValueError):
+        return False
+
+def _transfer_amount(row):
+    raw = row.get("income")
+    if raw in (None, ""):
+        raw = row.get("amount")
+    if raw in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(raw))
+    except Exception:
+        return None
+    if not amount.is_finite():
+        return None
+    return amount
+
+def _parse_transfers(rows):
+    """整包不合法就整輪作廢，不套用前面已經看過的列。"""
+    if not isinstance(rows, list):
+        return None
+    parsed = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("tranId") in (None, ""):
+            return None
+        try:
+            when = int(row.get("time"))
+        except (TypeError, ValueError):
+            return None
+        asset = row.get("asset")
+        amount = _transfer_amount(row)
+        if asset in (None, "") or amount is None:
+            return None
+        parsed.append(dict(tranId=row.get("tranId"), time=when, asset=str(asset), amount=amount))
+    parsed.sort(key=lambda rec: (rec["time"], str(rec["tranId"])))
+    return parsed
+
+def apply_capital_flows(s, live):
+    """讀 USDT-M 劃轉，把當日風險基準加減進去。
+
+    失敗、退避中、或回應不完整：這輪不改 state，也不推進 capital_flow_last_ms。
+    沒有游標的第一次只把游標設成現在，不讀劃轉，避免把今天已經算進基準的入金再加一次。
+    dry-run 仍記 log，但不寫 state。回傳的字典帶這一輪要用的基準。
+    """
+    if not isinstance(s, dict) or s.get("day_start_equity") in (None, ""):
+        return s
+    start_ms = _transfer_start_ms(s)
+    if start_ms is None:
+        now_ms = int(now_tpe().timestamp() * 1000)
+        log("capital_flow_init", capital_flow_last_ms=now_ms)
+        if not live:
+            out = dict(s)
+            out["capital_flow_last_ms"] = now_ms
+            out["capital_flow_seen"] = []
+            return out
+        s["capital_flow_last_ms"] = now_ms
+        s["capital_flow_seen"] = []
+        save_state(s)
+        return s
+    if start_ms is False:
+        log("warn", msg="資金異動略過：capital_flow_last_ms 讀不懂")
+        return s
+    if _backoff_blocking():
+        log("warn", msg="資金異動略過：退避中")
+        return s
+    try:
+        rows = req("GET", "/fapi/v1/income",
+                   {"incomeType": "TRANSFER", "startTime": start_ms, "limit": 1000},
+                   signed=True, retries=1)
+    except BinanceError as exc:
+        log("warn", msg="資金異動讀取失敗，這輪不改基準", err=str(exc), status=exc.status)
+        return s
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log("warn", msg="資金異動讀取失敗，這輪不改基準", err=str(exc))
+        return s
+    parsed = _parse_transfers(rows)
+    if parsed is None:
+        log("warn", msg="資金異動回應格式錯誤，這輪不改基準")
+        return s
+    seen_raw = s.get("capital_flow_seen")
+    if seen_raw in (None, ""):
+        seen = []
+    elif isinstance(seen_raw, list):
+        seen = [str(item) for item in seen_raw]
+    else:
+        log("warn", msg="資金異動略過：capital_flow_seen 讀不懂")
+        return s
+    try:
+        equity = float(s["day_start_equity"])
+        margin = float(s["slice_margin"]) if s.get("slice_margin") not in (None, "") else round(equity / CFG["slices"], 4)
+    except (TypeError, ValueError):
+        log("warn", msg="資金異動略過：日初淨值讀不懂")
+        return s
+    last_ms = start_ms
+    touched = False
+    for rec in parsed:
+        if rec["time"] < start_ms:
+            continue
+        if rec["time"] > last_ms:
+            last_ms = rec["time"]
+            touched = True
+        tid = str(rec["tranId"])
+        if tid in seen:
+            continue
+        seen.append(tid)
+        touched = True
+        if rec["asset"] != "USDT":
+            log("capital_flow_ignored", tranId=rec["tranId"], asset=rec["asset"],
+                amount=float(rec["amount"]), time=rec["time"])
+            continue
+        old_eq, old_margin = equity, margin
+        equity = float(Decimal(str(equity)) + rec["amount"])
+        margin = round(equity / CFG["slices"], 4)
+        log("capital_flow", tranId=rec["tranId"], amount=float(rec["amount"]), time=rec["time"],
+            old_day_start_equity=old_eq, day_start_equity=equity,
+            old_slice_margin=old_margin, slice_margin=margin)
+        text = "tranId={0} amount={1} time={2} 日初 {3} → {4}".format(
+            rec["tranId"], format(rec["amount"], "f"), rec["time"], old_eq, equity)
+        if live:
+            print("資金異動 " + text)
+        else:
+            print("資金異動（dry-run，不改 state） " + text)
+    if not touched:
+        return s
+    updated = dict(day_start_equity=equity, slice_margin=margin,
+                   capital_flow_seen=seen, capital_flow_last_ms=last_ms)
+    if not live:
+        out = dict(s)
+        out.update(updated)
+        return out
+    s.update(updated)
+    save_state(s)
+    return s
 
 def fmt_pct(value):
     """兩位小數。0 與負零都印成 0.00，不帶負號。"""
@@ -831,6 +974,7 @@ def open_ladder(a):
     if a.entry_type == "market":
         raise SystemExit("階梯是限價，不能跟 --entry-type market 一起用")
     acc = account(); s = day_state(acc); eq = equity_of(acc)
+    s = apply_capital_flows(s, live)
     if os.path.exists(HALT_FLAG) or s["killed"]:
         raise SystemExit("已觸發 30% 全平，需回報使用者，禁止開倉")
     dl = daily_loss_pct(acc, s)
@@ -1151,6 +1295,7 @@ def cmd_open(a):
             return
     a.entry_type = resolve_entry_type(getattr(a, "setup", None), a.entry_type)
     acc = account(); s = day_state(acc); eq = equity_of(acc)
+    s = apply_capital_flows(s, live)
     # 風控閘門
     if os.path.exists(HALT_FLAG) or s["killed"]: raise SystemExit("已觸發 30% 全平，需回報使用者，禁止開倉")
     dl = daily_loss_pct(acc, s)
@@ -1831,7 +1976,9 @@ def ensure_da_targets(sym, amt, m, algo, oo, st, live):
             log("error", msg="補掛 3R 止盈失敗", symbol=sym, err=str(e))
 
 def cmd_manage(a):
-    live = a.live; acc = account(); s = day_state(acc); dl = daily_loss_pct(acc, s)
+    live = a.live; acc = account(); s = day_state(acc)
+    s = apply_capital_flows(s, live)
+    dl = daily_loss_pct(acc, s)
     if dl >= CFG["daily_kill"] and not s["killed"]:
         log("kill", loss_pct=dl); flatten_all(live, "daily_kill_30pct")
         if live:
@@ -2078,6 +2225,7 @@ def cmd_watch(a):
             st["watch_heartbeat"] = now.isoformat(timespec="seconds")
             save_state(st)
         return
+    apply_capital_flows(st, a.live)
     need = False
     for sym, pd in list(pend.items()):
         if pd.get("ladder"):

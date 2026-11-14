@@ -28,7 +28,8 @@ ACC = {
     "availableBalance": "700",
     "positions": [],
 }
-DAY = {"day_start_equity": 700.0, "slice_margin": 35.0, "halted_new": False, "killed": False}
+DAY = {"day_start_equity": 700.0, "slice_margin": 35.0, "halted_new": False, "killed": False,
+       "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 class LiveTraderFailClosedTest(unittest.TestCase):
@@ -132,6 +133,8 @@ class LiveTraderFailClosedTest(unittest.TestCase):
         deleted = []
 
         def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             if method == "GET" and path == "/fapi/v1/openAlgoOrders":
                 return [{"symbol": "BTCUSDT", "algoId": 99, "orderType": "STOP_MARKET", "side": "SELL"}]
             if method == "GET" and path == "/fapi/v1/openOrders":

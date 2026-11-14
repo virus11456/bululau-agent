@@ -9,7 +9,9 @@ from common import *
 POS = os.path.join(DATA_DIR, "positions.json"); DEC = os.path.join(DATA_DIR, "decisions.jsonl")
 RULES = {  # be_at_r: move stop to entry at this R; time_bars: 15m bars to reach be_at_r else exit; max_bars: hard exit
     "瘸師弟": dict(be_at_r=0.5, time_bars=4, max_bars=8),
-    "小師弟": dict(be_at_r=0.5, time_bars=12, max_bars=48),
+    # 2026-11-14 使用者定案。不移保本、不平一半、不套 15m 時間停損。
+    "小師弟": dict(be_at_r=None, time_bars=None, max_bars=None, full_exit_r=2),
+    "大師兄": dict(be_at_r=None, time_bars=None, max_bars=None, scale_r=(2, 3), flat_before_r=4),
     "布鹿流": dict(be_at_r=1.0, time_bars=None, max_bars=None, review_bars_1h=24),
     "funding_rate": dict(be_at_r=1.0, time_bars=None, max_bars=None, review_bars_1h=24),
 }
@@ -37,10 +39,30 @@ def manage(p, events):
             p["pm_last_bar"] = ks[-1]["t"]; return None
         ks = [k for k in ks if k["t"] >= since]
     t_open = iso_ms(p.get("filled") or p["opened"])
+    pattern = p.get("pattern")
     for k in ks:
         bars = int((k["t"] - t_open) / 900000) + 1
         if k["l"] <= p["stop"]:
             return close(p, events, p["stop"], "breakeven_stop" if p["stop"] >= entry else "stop", k)
+        if pattern == "小師弟":
+            if R > 0 and k["h"] >= entry + 2 * R:
+                return close(p, events, entry + 2 * R, "exit_2r", k)
+            continue
+        if pattern == "大師兄":
+            if R > 0 and k["h"] >= entry + 4 * R:
+                if not p.get("scaled_2r"):
+                    p["scaled_2r"] = True
+                    events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
+                return close(p, events, entry + 4 * R, "flat_before_4r", k)
+            if R > 0 and k["h"] >= entry + 3 * R:
+                if not p.get("scaled_2r"):
+                    p["scaled_2r"] = True
+                    events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
+                return close(p, events, entry + 3 * R, "exit_3r_rest", k)
+            if R > 0 and k["h"] >= entry + 2 * R and not p.get("scaled_2r"):
+                p["scaled_2r"] = True
+                events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
+            continue
         if p.get("target") and k["h"] >= p["target"]:
             return close(p, events, p["target"], "target", k)
         best = max(p.get("high_seen", entry), k["h"]); p["high_seen"] = best

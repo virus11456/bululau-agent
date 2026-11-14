@@ -70,11 +70,16 @@ def xiao_shidi(k15):
     bounce = (c - L) / drop
     if bounce < 0.4: return None, f"bounce {bounce:.0%} <40%"
     if bounce > 0.65: return None, f"bounce {bounce:.0%} -> chasing"
-    stop = L * 0.999; risk = c - stop
-    target = min(H, c + 2 * risk); rr = (target - c) / risk
+    stop = min(L, c * 0.97)  # ETH 至少 3%，並且在前低或更低。再往下留多少，原文未確認。
+    risk = c - stop
+    if risk <= 0: return None, "bad risk"
+    target = c + 2 * risk
+    rr = (target - c) / risk
     if rr < RR_MIN: return None, f"rr {rr:.2f}"
-    return dict(setup="小師弟", tf="15m", entry=c, stop=round(stop, 2), target=round(target, 2), rr=round(rr, 2),
-                drop_pt=round(drop, 1), bounce_pct=round(bounce * 100), plan="exit 1-1.5R / fading bounce / reversal K"), None
+    return dict(setup="小師弟", tf="15m", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(rr, 2),
+                drop_pt=round(drop, 1), bounce_pct=round(bounce * 100),
+                plan="2R 一次全出；停損固定在前低下方；不平一半、不移保本",
+                unconfirmed=["前低下方再留多少未確認。ETH 取至少 3% 與前低的較低者。"]), None
 
 def maset(k):
     cl = [x["c"] for x in k]
@@ -146,6 +151,73 @@ def funding(k1h, fr):
     return dict(setup="funding_rate", tf="1H", entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
                 rr=round(rr, 2), funding_pct=round(fr * 100, 3), sizing="2:3:5 (MA30 then MA45)"), None
 
+# 大師兄原文沒寫死的項目。不拿來擋單，候選裡照實標出。
+DA_SHIXIONG_UNCONFIRMED = [
+    "均線週期未確認。不用 MA30/45/60 擋單。向下發散用後段高點更低、低點更低代理。",
+    "長黑實體要多大未確認。不套瘸師弟的 2% 或 4%。",
+    "跌破用長黑收盤低於前 10 根最低價代理。這 10 來自反彈最少根數，不是另寫的均線。",
+    "前低下方再留多少未確認。停損取前低與 BTC/ETH 3%、小幣 10% 的較低者。",
+    "二次測前低要離前低多近未確認。這次把反彈段最低點落在最近一根、且收盤不破長黑低點，當成正在測。",
+    "反彈至少 10 根。原文寫至少 10–30 根以上，30 是不是上限未確認。",
+    "V 轉原文是 3–5 根、強勢約 3 根。3 根內收回長黑開盤才排除。第 4、5 根才收回不因此擋掉。",
+    "8H 要不要跟 4H 各掃一輪未確認。這次只掃 4H。",
+    "帶大量是特徵之一，倍數未確認，不把 3 倍寫成門檻。",
+]
+
+def da_shixiong(k4, symbol):
+    """大師兄。只使用原文寫過的條件。沒寫死的數字放進 unconfirmed，不當成門檻。"""
+    if not k4 or len(k4) < 25:
+        return None, "4H 資料不足"
+    last_i = len(k4) - 1
+    found = None
+    for i in range(last_i - 10, 9, -1):
+        bar = k4[i]
+        if bar["c"] >= bar["o"]:
+            continue
+        prior = k4[max(0, i - 10):i]
+        if not prior or bar["c"] >= min(x["l"] for x in prior):
+            continue
+        found = i
+        break
+    if found is None:
+        return None, "沒有長黑跌破，或長黑後不到 10 根"
+    black = k4[found]
+    after = k4[found + 1:]
+    if any(x["c"] > black["o"] for x in after[:3]):
+        return None, "長黑後 3 根內收回，視為 V 轉走完"
+    if len(after) < 4:
+        return None, "反彈太短，看不出向下結構"
+    mid = len(after) // 2
+    first, second = after[:mid], after[mid:]
+    if not (max(x["h"] for x in second) < max(x["h"] for x in first)
+            and min(x["l"] for x in second) < min(x["l"] for x in first)):
+        return None, "後段沒有更低的高點和低點"
+    if k4[-1]["c"] <= black["l"]:
+        return None, "收盤跌破長黑低點"
+    retest = len(after) > 1 and k4[-1]["l"] <= min(x["l"] for x in after[:-1]) and k4[-1]["l"] > black["l"]
+    if retest:
+        entry = k4[-1]["c"]
+        mode = "二次測前低"
+    else:
+        entry = black["l"] + (black["h"] - black["l"]) / 3.0
+        mode = "長黑三分之一掛單"
+    min_pct = 0.03 if symbol in ("BTCUSDT", "ETHUSDT") else 0.10
+    stop = min(black["l"], entry * (1 - min_pct))
+    risk = entry - stop
+    if risk <= 0:
+        return None, "停損距離不對"
+    notes = list(DA_SHIXIONG_UNCONFIRMED)
+    if len(after) > 30:
+        notes.append("反彈已超過 30 根。原文寫至少 10–30 根以上，30 是不是上限未確認。")
+    if any(x["c"] > black["o"] for x in after[3:5]):
+        notes.append("第 4 或第 5 根收回長黑開盤。V 轉 3–5 根的邊界未確認，這筆不因此擋掉。")
+    return dict(setup="大師兄", tf="4H", entry=round(entry, 8), stop=round(stop, 8),
+                target=round(entry + 2 * risk, 8), target_3r=round(entry + 3 * risk, 8),
+                flat_before_4r=round(entry + 4 * risk, 8), rr=2.0, entry_mode=mode,
+                black_low=black["l"], rebound_bars=len(after), min_stop_pct=min_pct * 100,
+                exit="2R 平 50%，剩下 50% 在 3R 平，4R 前全出。2R 後停損不動。不套 1.5R 平一半，不套 15m 時間停損。",
+                unconfirmed=notes, plan=mode), None
+
 def kuai_today():
     d = datetime.datetime.now(TZ).strftime("%Y-%m-%d"); n = 0
     try:
@@ -207,6 +279,11 @@ def run(args):
             c, why = funding(k1, fr); out.append(dict(symbol=s, **(c or {"setup": "funding_rate", "fail": why}), **rs))
         if kd:
             c, why = buluuliu(k1, kd); out.append(dict(symbol=s, **(c or {"setup": "布鹿流", "fail": why}), **rs))
+        k4 = _safe(klines, s, "4h", 80, end)
+        if k4:
+            c, why = da_shixiong(k4, s)
+            if c or why not in ("沒有長黑跌破，或長黑後不到 10 根", "4H 資料不足"):
+                out.append(dict(symbol=s, **(c or {"setup": "大師兄", "fail": why}), **rs))
         return out
     for res in pmap(s2, stage2):
         for r in res:

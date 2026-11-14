@@ -176,7 +176,7 @@ class XiaoScreenTest(unittest.TestCase):
         self.assertEqual(prefilter.XIAO_STOP_CUSHION, 0.005)
         self.assertEqual(prefilter.XIAO_ALT_DROP_PCT, 0.05)
         self.assertEqual(prefilter.XIAO_FLUSH_SHARE, 0.60)
-        self.assertIn("2026-11-14 維持", " ".join(hit["unconfirmed"]))
+        self.assertIn("預設、可調", " ".join(hit["unconfirmed"]))
         self.assertNotIn("至少 3%", " ".join(hit["unconfirmed"]))
         chasing = self.eth_series()
         chasing[-1] = bar(3460, 3465, 3440, 3462, 10, t=40)
@@ -260,27 +260,36 @@ class XiaoScreenTest(unittest.TestCase):
         self.assertGreaterEqual(hit["rebound_bars"], 10)
         self.assertLessEqual(hit["rebound_bars"], 40)
         self.assertEqual(hit["limit_expire_4h"], 2)
-        self.assertIn("2026-11-14 維持", " ".join(hit["unconfirmed"]))
+        self.assertEqual(hit["ma_periods"], (30, 45, 60))
+        self.assertIn("使用者 2026-11-14 確認", hit["ma_rule"])
+        self.assertNotIn("MA7", " ".join(hit["unconfirmed"]))
+        self.assertIn("預設、可調", " ".join(hit["unconfirmed"]))
         v = [dict(b) for b in bars]
-        black = next(b for b in v if b["t"] == 40)
-        v[41]["c"] = black["o"] + 1
+        black = next(b for b in v if b["t"] == 70)
+        v[71]["c"] = black["o"] + 1
         miss, why = prefilter.da_shixiong(v, "BTCUSDT")
         self.assertIsNone(miss, why)
         import inspect
         self.assertIn('setup="funding_rate"', inspect.getsource(prefilter.funding))
 
     def _da_bars(self):
+        """緩跌讓 MA30 < MA45 < MA60，長黑收在三條均線下，然後二次測前低。"""
         bars = []
-        px = 180.0
-        for i in range(40):
-            px -= 1.2
-            bars.append(bar(px + 2, px + 2.1, px, px + 0.2, 10, t=i))
-        black_o = bars[-1]["c"] + 2
-        bars.append(bar(black_o, black_o + 1, 100, black_o - 6, 25, t=40))
-        for i in range(12):
-            c = 112 + (i % 3)
-            bars.append(bar(c + 0.4, 122 if i > 2 else 110, 108, c, 10, t=41 + i))
-        bars.append(bar(102.2, 102.6, 101, 101.5, 10, t=53))
+        px = 120.0
+        for i in range(70):
+            o = px
+            c = px - 0.8
+            bars.append(bar(o, o + 0.1, c - 0.05, c, 10, t=i))
+            px = c
+        black_o = bars[-1]["c"] + 0.2
+        black_c = black_o - 2.0
+        black_l = black_c - 1.0
+        bars.append(bar(black_o, black_o + 0.2, black_l, black_c, 25, t=70))
+        band = black_l * 1.03
+        for i in range(11):
+            c = band + 0.6
+            bars.append(bar(c + 0.2, c + 1.2, band + 0.3, c, 10, t=71 + i))
+        bars.append(bar(black_l + 1.6, black_l + 2.0, black_l + 0.4, black_l + 1.1, 10, t=82))
         return bars
 
 

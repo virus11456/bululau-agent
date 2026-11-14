@@ -16,7 +16,7 @@ RULES = {  # be_at_r: move stop to entry at this R; time_bars: 15m bars to reach
     "funding_rate": dict(be_at_r=1.0, time_bars=None, max_bars=None, review_bars_1h=24),
 }
 PENDING_EXPIRY_BARS = 16  # 4h for unfilled limit plans unless pos has 'expires'
-# 大師兄限價超過幾根 4H 就撤。待使用者確認。一根 4H = 16 根 15m。
+# 大師兄限價超過幾根 4H 就撤。預設 2 根，可調。一根 4H = 16 根 15m。
 DA_LIMIT_EXPIRE_4H = 2
 
 def iso_ms(s): return int(datetime.datetime.fromisoformat(s).timestamp() * 1000)

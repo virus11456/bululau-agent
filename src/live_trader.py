@@ -1003,7 +1003,7 @@ def xiao_target_from_fill(side, avg, stop, tick):
         raw = avg - 2 * (stop - avg)
     return fmt(rnd(raw, tick, ROUND_DOWN if side == "BUY" else ROUND_UP))
 
-# 大師兄限價超過幾根 4H 就撤剩餘進場單。待使用者確認。
+# 大師兄限價超過幾根 4H 就撤剩餘進場單。預設 2 根，可調。
 DA_LIMIT_EXPIRE_4H = 2
 DA_LIMIT_EXPIRE_MS = DA_LIMIT_EXPIRE_4H * 4 * 60 * 60 * 1000
 
@@ -1531,6 +1531,14 @@ def meta_from_pending(old, pd):
             fresh["no_tp"] = True
     if old.get("scaled_2r") or pd.get("scaled_2r"):
         fresh["scaled_2r"] = True
+    basis = Decimal(0)
+    for src in (old, pd):
+        try:
+            basis = max(basis, Decimal(str(src.get("scale_basis_qty") or "0")))
+        except Exception:
+            pass
+    if basis > 0:
+        fresh["scale_basis_qty"] = fmt(basis)
     return fresh
 
 
@@ -1583,17 +1591,36 @@ def _tp_matches(po, trigger, close_pos):
         return False
     return abs(got - want) / abs(want) <= Decimal("0.002")
 
+# 持倉剩下計畫數量的這個比例以內，就當作 2R 半倉已經在交易所成交。
+DA_SCALE_REMAINING = Decimal("0.75")
+
+def _copy_meta_flag(sym, m, st, key, live):
+    held = (st.get("meta") or {}).get(sym)
+    if isinstance(held, dict) and held is not m:
+        held[key] = m.get(key)
+    pending = (st.get("pending") or {}).get(sym)
+    if isinstance(pending, dict) and pending is not m:
+        pending[key] = m.get(key)
+    if live:
+        save_state(st)
+
 def _mark_scaled_2r(sym, m, st, live):
     """平過一次 2R 半倉就記在 meta。之後不再掛 2R，也不再市價平半。"""
     m["scaled_2r"] = True
-    held = (st.get("meta") or {}).get(sym)
-    if isinstance(held, dict) and held is not m:
-        held["scaled_2r"] = True
-    pending = (st.get("pending") or {}).get(sym)
-    if isinstance(pending, dict):
-        pending["scaled_2r"] = True
-    if live:
-        save_state(st)
+    _copy_meta_flag(sym, m, st, "scaled_2r", live)
+
+def _raise_scale_basis(sym, amt, m, st, live):
+    """進場成交時記下計畫數量。2R 還沒平、持倉又變大，就把基準調高。"""
+    try:
+        qty = abs(Decimal(str(amt)))
+        old = Decimal(str(m.get("scale_basis_qty") or "0"))
+    except Exception:
+        return Decimal(0)
+    if qty > old:
+        m["scale_basis_qty"] = fmt(qty)
+        _copy_meta_flag(sym, m, st, "scale_basis_qty", live)
+        old = qty
+    return old
 
 def _protect_qty(po):
     try:
@@ -1605,6 +1632,7 @@ def ensure_da_targets(sym, amt, m, algo, oo, st, live):
     """成交後掛兩張。2R 用實際持倉的 50% reduceOnly，3R 用 closePosition。
 
     scaled_2r 為真表示 2R 半倉已經平過：不再掛 2R，也不再市價平半，只補 3R。
+    成交時記下計畫數量。持倉落到這個數量的 75% 以內，就當成交易所已經平過半倉。
     2R 還沒觸發時，半倉數量隨實際持倉變大而調高。2R 已越過就只平一半並記下標記。
     3R 已越過才走 target_passed_at_fill。
     """
@@ -1614,6 +1642,17 @@ def ensure_da_targets(sym, amt, m, algo, oo, st, live):
     if _mark_past_target(sym, entry_side, m.get("target_3r")):
         close_because_target_passed(sym, amt, st, live)
         return
+    if not m.get("scaled_2r"):
+        basis = _raise_scale_basis(sym, amt, m, st, live)
+        if basis > 0 and abs(Decimal(str(amt))) <= basis * DA_SCALE_REMAINING:
+            _mark_scaled_2r(sym, m, st, live)
+            log("da_scaled_2r", symbol=sym, basis=fmt(basis), pos=str(amt),
+                reason="position_at_or_below_75pct")
+            for po in [po for po in orders if _tp_matches(po, m.get("target"), False)]:
+                try:
+                    cancel_protect(sym, po, live)
+                except Exception as e:
+                    log("error", msg="2R 已平過，撤剩餘半倉單失敗", symbol=sym, err=str(e))
     if not m.get("scaled_2r"):
         try:
             step = sym_info(sym)["step"]

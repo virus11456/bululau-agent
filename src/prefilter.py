@@ -64,11 +64,11 @@ XIAO_SLOW_VOL_MAX = 1.5
 XIAO_FLUSH_VOL = 3.0
 XIAO_FLUSH_SHARE = 0.60
 XIAO_BOUNCE_MIN = 0.40
-# 最低點下方的緩衝。預設 0.5%。使用者 2026-11-14 維持。
+# 最低點下方的緩衝。預設 0.5%，可調。
 XIAO_STOP_CUSHION = 0.005
 XIAO_UNCONFIRMED = [
     "ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點，沒有更嚴的第二個數字。這次用大於 100 點，更嚴的門檻未確認。",
-    "停損在最低點下方再留緩衝。預設 0.5%（XIAO_STOP_CUSHION）。使用者 2026-11-14 維持。BTC、ETH 另外至少離進場 3%。這條 3% 是停損距離，不跟著其他幣 5% 的起跌門檻改。",
+    "停損在最低點下方再留緩衝。0.5%（XIAO_STOP_CUSHION）是預設、可調。BTC、ETH 另外至少離進場 3%。這條 3% 是停損距離，不跟著其他幣 5% 的起跌門檻改。",
     "第二次下殺「回落到彈幅一半左右」的誤差帶未確認。這次用最後一根的低點碰到彈幅中線、且不破最低點。",
 ]
 
@@ -223,9 +223,9 @@ def funding(k1h, fr):
     return dict(setup="funding_rate", tf="1H", entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
                 rr=round(rr, 2), funding_pct=round(fr * 100, 3), sizing="2:3:5 (MA30 then MA45)"), None
 
-# 均線週期。使用者 2026-11-14 維持收盤 < MA7 < MA25。
-DA_MA_FAST = 7
-DA_MA_SLOW = 25
+# 使用者 2026-11-14 確認。出處 user_notes2「講師常用參數 30/45/60」。只給大師兄，布鹿流日 K 不用這組。
+DA_MA_PERIODS = (30, 45, 60)
+DA_MA_SLOW = DA_MA_PERIODS[-1]
 DA_BLACK_BODY_MIN = 2.0
 DA_BLACK_BODY_MAX = 5.0
 DA_BLACK_VOL = 2.0
@@ -233,21 +233,23 @@ DA_REBOUND_MIN = 10
 DA_REBOUND_MAX = 40
 DA_RECOVER = 0.50
 DA_RETEST_BAND = 0.03
-# 限價單掛著超過幾根 4H 就撤。使用者 2026-11-14 維持 2 根。
+# 限價單掛著超過幾根 4H 就撤。預設 2 根，可調。
 DA_LIMIT_EXPIRE_4H = 2
 DA_SHIXIONG_UNCONFIRMED = [
-    "向下發散的均線週期。使用者 2026-11-14 維持收盤 < MA7 < MA25。",
-    "限價單超過幾根 4H 就撤。使用者 2026-11-14 維持 2 根。",
+    "限價單超過幾根 4H 就撤。2 根是預設、可調。",
     "前低下方再留多少未確認。停損取前低與 BTC/ETH 3%、小幣 10% 的較低者。",
     "8H 要不要跟 4H 各掃一輪未確認。這次只在新的 4H 收盤評估。",
 ]
 
-def _down_ma(k4):
-    closes = [x["c"] for x in k4]
-    fast, slow = ma(closes, DA_MA_FAST), ma(closes, DA_MA_SLOW)
-    if fast is None or slow is None:
+def _down_ma_at(closes, close):
+    """收盤在 MA30、MA45、MA60 下方，而且 MA30 < MA45 < MA60。"""
+    vals = [ma(closes, n) for n in DA_MA_PERIODS]
+    if any(v is None for v in vals):
         return False
-    return k4[-1]["c"] < fast < slow
+    return close < vals[0] and close < vals[1] and close < vals[2] and vals[0] < vals[1] < vals[2]
+
+def _down_ma(k4):
+    return _down_ma_at([x["c"] for x in k4], k4[-1]["c"])
 
 def da_shixiong(k4, symbol):
     """大師兄。只在最近一根已收 4H 是二次測前低時出候選。同一根長黑由呼叫端去重。"""
@@ -277,8 +279,7 @@ def da_shixiong(k4, symbol):
         if bar["c"] >= min(x["l"] for x in prior):
             continue
         closes = [x["c"] for x in k4[:i + 1]]
-        fast, slow = ma(closes, DA_MA_FAST), ma(closes, DA_MA_SLOW)
-        if fast is None or slow is None or not (bar["c"] < fast < slow):
+        if not _down_ma_at(closes, bar["c"]):
             continue
         after = k4[i + 1:]
         if not (DA_REBOUND_MIN <= len(after) <= DA_REBOUND_MAX):
@@ -314,7 +315,8 @@ def da_shixiong(k4, symbol):
                 entry_type="limit", black_low=black["l"], black_t=black.get("t"),
                 rebound_bars=len(after), min_stop_pct=min_pct * 100,
                 limit_expire_4h=DA_LIMIT_EXPIRE_4H,
-                ma_fast=DA_MA_FAST, ma_slow=DA_MA_SLOW,
+                ma_periods=DA_MA_PERIODS,
+                ma_rule="收盤 < MA30 < MA45 < MA60。使用者 2026-11-14 確認。",
                 exit="2R 平 50%，剩下 50% 在 3R 平，4R 前全出。2R 後停損不動。",
                 unconfirmed=list(DA_SHIXIONG_UNCONFIRMED), plan="二次測前低"), None
 

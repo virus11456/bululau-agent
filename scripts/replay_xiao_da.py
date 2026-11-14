@@ -157,15 +157,23 @@ def walk_da(bars, i, hit):
     return "open", held
 
 
-def bar_over_ioc(bar, cap):
-    """訊號那根的收盤或高點高於做多上限，這筆 IOC 算不成交。"""
-    return bar["c"] > cap or bar["h"] > cap
+# 訊號那根 15m 已經收完才下單。IOC 用收盤後這幾分鐘的 1m 判斷，不用那根自己的高點。
+IOC_FOLLOW_MS = 5 * 60 * 1000
+IOC_SLIP = 0.003
+
+
+def ioc_missed(minutes, close_ms, entry, slip=IOC_SLIP):
+    """下單價是 15m 收盤。收盤後 5 分鐘的 1m 最低價仍高於收盤 × 1.003，這筆買不進。"""
+    cap = float(entry) * (1 + slip)
+    window = [b for b in minutes if close_ms <= b["t"] < close_ms + IOC_FOLLOW_MS]
+    if not window:
+        return False
+    return min(b["l"] for b in window) > cap
 
 
 def scan_xiao(sym, bars):
     seen = set()
     out = []
-    slip = 0.003
     for i in range(40, len(bars)):
         if bars[i]["t"] < START or bars[i]["t"] >= END:
             continue
@@ -173,14 +181,20 @@ def scan_xiao(sym, bars):
         if not hit or hit.get("low_t") in seen:
             continue
         seen.add(hit.get("low_t"))
-        cap = hit["entry"] * (1 + slip)
-        abandoned = bar_over_ioc(bars[i], cap)
-        if abandoned:
-            out.append(dict(kind="abandoned", r=0.0, ioc_abandoned=True, t=bars[i]["t"]))
-            continue
         kind, r = walk(bars, i, hit["entry"], hit["stop"], hit["target"])
-        out.append(dict(kind=kind, r=r, ioc_abandoned=False, t=bars[i]["t"]))
+        close_ms = int(bars[i].get("ct") or (bars[i]["t"] + 15 * 60 * 1000))
+        out.append(dict(kind=kind, r=r, ioc_abandoned=False, t=bars[i]["t"],
+                        symbol=sym, ct=close_ms, entry=hit["entry"]))
     return out
+
+
+def apply_ioc(rows, minutes):
+    """用收盤後的 1m 覆寫。超過上限的筆數之後不進勝、敗、未結和 R。"""
+    for row in rows:
+        if ioc_missed(minutes, row["ct"], row["entry"]):
+            row["kind"] = "abandoned"
+            row["r"] = 0.0
+            row["ioc_abandoned"] = True
 
 
 def scan_da(sym, bars):
@@ -241,6 +255,14 @@ def main():
             da.extend(ds)
             if n % 25 == 0:
                 print("scanned", n, flush=True)
+    touched = {}
+    for row in eth + other:
+        touched.setdefault(row["symbol"], []).append(row)
+    print("xiao symbols", len(touched), flush=True)
+    with ThreadPoolExecutor(8) as pool:
+        loaded = pool.map(lambda sym: (sym, load_interval(sym, "1m")), list(touched))
+        for sym, minutes in loaded:
+            apply_ioc(touched[sym], minutes)
     summary = dict(
         window="2026-10-14 .. 2026-11-12 UTC",
         source="data.binance.vision",
@@ -250,7 +272,8 @@ def main():
         xiao_other=summarize(other),
         da=summarize(da),
         da_unique_blacks=len({(r.get("symbol"), r.get("black_t")) for r in da}),
-        note="小師弟做多上限是訊號收盤 × 1.003。高點或收盤超過它的筆數從勝、敗、未結和 R 合計扣掉。成交的 R 用訊號收盤。勝率是勝/(勝+敗)，未結和放棄不進分母。前半是 2026-10-14 到 10-28，後半是 10-29 到 11-12（UTC）。其他幣含 BTC，起跌 ≥5% 且急殺佔跌幅 ≥60%。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
+        ioc_price="下單價用 15m 收盤。放棄與否看收盤後 5 分鐘的 1m 最低價是否仍高於收盤 × 1.003。不用訊號那根的高點。成交的 R 仍用 15m 收盤。",
+        note="IOC 0.3% 不變。收盤後 5 分鐘內 1m 最低價仍高於收盤 × 1.003 才算放棄，並從勝、敗、未結和 R 扣掉。沒有 1m 的不放棄。勝率是勝/(勝+敗)。前半是 2026-10-14 到 10-28，後半是 10-29 到 11-12（UTC）。其他幣含 BTC。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
     )
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return summary

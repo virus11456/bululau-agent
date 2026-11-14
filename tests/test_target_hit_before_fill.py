@@ -452,6 +452,44 @@ class TargetPassedAtFillTest(unittest.TestCase):
                              for c in self.calls))
         self.assertEqual(self._market_orders(), [])
 
+    def _arm_da_position_4(self, mark):
+        self.mark = mark
+        self.amt = "4"
+        self.reject_triggers = set()
+        self.extra_algos = []
+        self.state["meta"]["XUSDT"] = {
+            "setup": "大師兄", "stop": "90", "target": "120", "target_3r": "130",
+        }
+        self.manage(True)
+        self.assertEqual(self.state["meta"]["XUSDT"].get("scale_basis_qty"), "4")
+        self.assertFalse(self.state["meta"]["XUSDT"].get("scaled_2r"))
+        self.calls.clear()
+        self.logs.clear()
+        self.amt = "2"
+
+    def test_exchange_filled_2r_at_121_does_not_cut_again(self):
+        """原持倉 4，2R 已成交 2、剩 2。標記價 121 不得再掛量 1，也不得市價平 1。"""
+        self._arm_da_position_4("110")
+        self.mark = "121"
+        self.reject_triggers = {"120"}
+        self.manage(True)
+        self.assertTrue(self.state["meta"]["XUSDT"].get("scaled_2r"))
+        self.assertEqual(self._market_orders(), [])
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                             and c[2].get("triggerPrice") == "120" for c in self.calls))
+        self.assertTrue(any(kind == "da_scaled_2r" for kind, _kw in self.logs))
+
+    def test_exchange_filled_2r_at_115_does_not_place_another_half(self):
+        """同樣剩 2。標記價 115 低於 2R，也不得再掛量 1 的 2R。"""
+        self._arm_da_position_4("100")
+        self.mark = "115"
+        self.manage(True)
+        self.assertTrue(self.state["meta"]["XUSDT"].get("scaled_2r"))
+        self.assertEqual(self._market_orders(), [])
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                             and c[2].get("quantity") == "1" for c in self.calls))
+        self.assertEqual(self.state["meta"]["XUSDT"].get("scale_basis_qty"), "4")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -240,7 +240,12 @@ class XiaoMarketEntryTest(unittest.TestCase):
         text = self.run_open(Args(live=True, setup="大師兄", entry_type="limit",
                                   symbol="BTCUSDT", target_3r="130"))
         self.assertIn("不下單", text)
-        self.assertTrue(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+        paused = [kw for kind, kw in self.logs if kind == "da_paused_btc_daily_bear"]
+        self.assertEqual(paused[0]["side"], "BUY")
+        self.assertEqual(paused[0]["entry"], "100")
+        self.assertEqual(paused[0]["stop"], "90")
+        self.assertEqual(paused[0]["target"], "120")
+        self.assertEqual(paused[0]["target_3r"], "130")
         self.assertFalse(any(c[0] == "POST" for c in self.calls))
         self.assertEqual(self.saved, [])
 
@@ -275,3 +280,37 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.run_open(Args(live=False, setup="瘸師弟", entry_type="limit", symbol="BTCUSDT"))
         self.assertFalse(any(c[1] == "/fapi/v1/klines" for c in self.calls))
         self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+
+    def test_bad_daily_rows_still_order(self):
+        self.btc_rows = [["壞掉"]]
+        text = self.run_open(Args(live=False, setup="大師兄", entry_type="limit",
+                                  symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("2R 半倉", text)
+        self.assertTrue(any("仍下單" in str(kw.get("msg")) for _k, kw in self.logs))
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+
+    def test_rate_limit_does_not_order(self):
+        self.btc_error = lt.BinanceError(429, -1003, "limit")
+        with self.assertRaises(SystemExit) as caught:
+            self.run_open(Args(setup="大師兄", entry_type="limit", symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("限流", str(caught.exception))
+        self.assertFalse(any(c[0] == "POST" for c in self.calls))
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+
+    def test_daily_constants_match_hardfilter(self):
+        import hardfilter as hf
+        self.assertEqual((lt.DAILY_FAST, lt.DAILY_SLOW, lt.DAILY_MIN_BARS, lt.DAILY_KLINE_LIMIT),
+                         (hf.DAILY_FAST, hf.DAILY_SLOW, hf.DAILY_MIN_BARS, hf.DAILY_KLINE_LIMIT))
+        closes = [100 + i * 0.4 for i in range(40)]
+        self.assertEqual(lt.ma_at(closes, 7), hf.ma_at(closes, 7))
+        self.assertEqual(lt.ma_at(closes, 25, 3), hf.ma_at(closes, 25, 3))
+        for rows in (rising_daily(), rising_daily(step=-1.0)):
+            parsed = lt._closed_daily(rows, 10 ** 15)
+            cs = [bar["c"] for bar in parsed]
+            embedded = None if cs[-1] > lt.ma_at(cs, lt.DAILY_FAST) > lt.ma_at(cs, lt.DAILY_SLOW) else "pause"
+            theirs = None if cs[-1] > hf.ma_at(cs, hf.DAILY_FAST) > hf.ma_at(cs, hf.DAILY_SLOW) else "pause"
+            self.assertEqual(embedded, theirs)
+            self.assertEqual(lt.da_btc_pause_reason(rows, now_ms=10 ** 15) is None, embedded is None)
+        src = open(lt.__file__).read()
+        self.assertNotIn("import hardfilter", src)
+        self.assertNotIn("from hardfilter", src)

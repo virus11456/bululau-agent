@@ -42,6 +42,12 @@ Mac 實盤 routine 帶的是 `--prefilter /Users/frank/quantboy-paper/discretion
 
 4H 要抓 `DA_4H_FETCH = 120` 根。篩網至少要 80 根已收 K，`klines` 會丟掉還沒收盤的那根；抓 80 會剩 79，實盤永遠是「4H 資料不足」。
 
+## Mac 手貼：BTC 日 K 暫停
+
+`~/quantboy-live/live_trader.py` 沒有 `hardfilter.py`，也不要把 `src/` 放進 `sys.path`。大師兄的日 K 判斷要手貼進那份 `live_trader.py`，不要寫 `from hardfilter import`。
+
+貼上的常數要和布鹿流現值一樣：`DAILY_FAST = 7`、`DAILY_SLOW = 25`、`DAILY_MIN_BARS = 33`、`DAILY_KLINE_LIMIT = 60`，再加上同檔的 `ma_at`。K 線解析放在讀取的 try 裡。格式壞掉比照讀不到：記警告，仍下單。418／429 這輪不下單。暫停紀錄要帶方向、進場價、停損、止盈、3R 價。不要整份覆蓋，也不要動 `_keys()`。
+
 ## 未確認
 
 見 `src/prefilter.py` 的 `XIAO_UNCONFIRMED` 和 `DA_SHIXIONG_UNCONFIRMED`。不要把那些句子改成新的擋單數字。

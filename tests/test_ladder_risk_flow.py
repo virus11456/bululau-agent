@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -95,6 +96,11 @@ class LadderExpireTest(unittest.TestCase):
                 return list(protects)
             if path == "/fapi/v1/openOrders":
                 return []
+            if method == "DELETE" and path == "/fapi/v1/order":
+                oid = params["orderId"]
+                if oid in orders:
+                    orders[oid]["status"] = "CANCELED"
+                return {"orderId": oid, "status": "CANCELED", "executedQty": orders.get(oid, {}).get("executedQty", "0")}
             if method == "DELETE":
                 return {}
             if method == "POST":
@@ -167,6 +173,70 @@ class LadderExpireTest(unittest.TestCase):
             lt.cmd_manage(type("A", (), {"live": True})())
         self.assertTrue(any(c[1] == "/fapi/v1/order" and c[0] == "GET" for c in calls))
         self.assertFalse(any(c[0] == "DELETE" for c in calls))
+
+    def test_cancel_failure_leaves_stop(self):
+        orders = self._orders({
+            1: {"status": "NEW", "executedQty": "0", "origQty": "10"},
+            2: {"status": "NEW", "executedQty": "0", "origQty": "10"},
+        })
+        calls, logs = [], []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path, dict(params or {})))
+            if method == "GET" and path == "/fapi/v1/order":
+                return dict(orders[params["orderId"]])
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return [_algo("STOP_MARKET", 9, "10", "90")] if "Algo" in path else []
+            if method == "DELETE" and path == "/fapi/v1/order":
+                raise lt.BinanceError(400, -1000, "cancel rejected")
+            if method == "DELETE":
+                raise AssertionError("撤進場單失敗時不能撤停損")
+            raise AssertionError((method, path))
+
+        placed = (datetime.now(lt.TPE) - timedelta(hours=3)).isoformat(timespec="seconds")
+        pd = {"ladder": True, "qty": "10", "stop": "90", "target": "120",
+              "placed_at": placed, "orders": [{"orderId": 1}, {"orderId": 2}]}
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
+            done = lt.manage_ladder_pending("XUSDT", pd, {}, True)
+        self.assertNotEqual(done, "drop")
+        self.assertFalse(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" for c in calls))
+        self.assertFalse(any(kw.get("cancel") == "stop" for _k, kw in logs))
+
+    def test_fill_seen_on_requery_leaves_stop(self):
+        orders = self._orders({
+            1: {"status": "NEW", "executedQty": "0", "origQty": "10"},
+        })
+        calls, logs = [], []
+        cancelled = set()
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path, dict(params or {})))
+            if method == "GET" and path == "/fapi/v1/order":
+                row = dict(orders[params["orderId"]])
+                if params["orderId"] in cancelled:
+                    row["status"] = "FILLED"
+                    row["executedQty"] = "3"
+                return row
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return [_algo("STOP_MARKET", 9, "10", "90")] if "Algo" in path else []
+            if method == "DELETE" and path == "/fapi/v1/order":
+                cancelled.add(params["orderId"])
+                return {"orderId": params["orderId"], "status": "CANCELED", "executedQty": "0"}
+            if method == "DELETE":
+                raise AssertionError("再查有成交時不能撤停損")
+            raise AssertionError((method, path))
+
+        placed = (datetime.now(lt.TPE) - timedelta(hours=3)).isoformat(timespec="seconds")
+        pd = {"ladder": True, "qty": "10", "stop": "90", "target": "120",
+              "placed_at": placed, "orders": [{"orderId": 1}]}
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
+            done = lt.manage_ladder_pending("XUSDT", pd, {}, True)
+        self.assertNotEqual(done, "drop")
+        self.assertFalse(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" for c in calls))
+        self.assertFalse(any(kw.get("cancel") == "stop" for _k, kw in logs))
+        self.assertTrue(cancelled)
 
 
 class UserStreamTest(unittest.TestCase):
@@ -244,6 +314,216 @@ class UserStreamTest(unittest.TestCase):
                 lt.cmd_watch(type("A", (), {"live": True})())
         self.assertIn("[watch] 無待成交限價單 01:02", buf.getvalue())
         self.assertEqual(calls, [])
+
+    def test_idle_ticks_do_not_reconnect(self):
+        connects = {"n": 0}
+        ticks = {"n": 0}
+
+        class Sock(object):
+            def messages(self):
+                while ticks["n"] < 3:
+                    ticks["n"] += 1
+                    yield None
+
+        def connect():
+            connects["n"] += 1
+            return Sock()
+
+        def stop():
+            return ticks["n"] >= 3
+
+        sleeps = []
+        user_stream.run_loop(connect, stop, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(connects["n"], 1)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(ticks["n"], 3)
+
+    def test_recv_timeout_sends_masked_ping_and_stays_up(self):
+        class Sock(object):
+            def __init__(self):
+                self.timeouts = 2
+                self.sent = []
+                self.buf = bytes([0x89, 4]) + b"ping"
+
+            def settimeout(self, _t):
+                return None
+
+            def recv(self, n):
+                if self.timeouts:
+                    self.timeouts -= 1
+                    raise socket.timeout()
+                if not self.buf:
+                    raise ConnectionError("closed")
+                out, self.buf = self.buf[:n], self.buf[n:]
+                return out
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        sock = Sock()
+        seen = []
+        try:
+            for msg in user_stream.iter_ws_messages(sock):
+                seen.append(msg)
+        except ConnectionError:
+            pass
+        self.assertEqual(seen[:2], [None, None])
+        self.assertGreaterEqual(len(sock.sent), 3)
+        for frame in sock.sent[:2]:
+            self.assertEqual(frame[0], 0x89)
+            self.assertTrue(frame[1] & 0x80)
+        pong = sock.sent[2]
+        self.assertEqual(pong[0], 0x8A)
+        self.assertEqual(pong[1] & 0x80, 0x80)
+        key = pong[2:6]
+        plain = bytes(pong[6 + i] ^ key[i % 4] for i in range(4))
+        self.assertEqual(plain, b"ping")
+
+    def test_reconnect_backoff_and_stop_on_418(self):
+        sleeps = []
+        logs = []
+        n = {"n": 0}
+
+        def flappy():
+            n["n"] += 1
+            if n["n"] < 4:
+                raise ConnectionError("listenKey SECRET")
+
+            class Sock(object):
+                def messages(self):
+                    yield {"e": "noop"}
+            return Sock()
+
+        with patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
+            user_stream.run_loop(flappy, lambda: n["n"] >= 4, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(sleeps, [1, 2, 4])
+        self.assertTrue(all(kw.get("err") == "ConnectionError" for kind, kw in logs if kind == "user_stream_reconnect"))
+        self.assertNotIn("SECRET", json.dumps(logs))
+
+        sleeps.clear()
+        logs.clear()
+
+        def limited():
+            raise user_stream.StreamRateLimit(418, 30)
+
+        with patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
+            user_stream.run_loop(limited, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(logs, [("user_stream_stop", {"status": 418})])
+
+        sleeps.clear()
+        hit = {"n": 0}
+
+        def once_429():
+            hit["n"] += 1
+            if hit["n"] == 1:
+                raise user_stream.StreamRateLimit(429, 9)
+
+            class Sock(object):
+                def messages(self):
+                    yield {"e": "noop"}
+            return Sock()
+
+        with patch.object(lt, "log"):
+            user_stream.run_loop(once_429, lambda: hit["n"] >= 2, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(sleeps, [9])
+
+    def test_fill_burst_is_one_manage(self):
+        clock = {"t": 1000.0}
+        managed = []
+
+        class Sock(object):
+            def messages(self):
+                yield {"e": "ORDER_TRADE_UPDATE", "o": {"x": "TRADE", "X": "FILLED"}}
+                clock["t"] = 1001.0
+                yield {"e": "ORDER_TRADE_UPDATE", "o": {"x": "TRADE", "X": "PARTIALLY_FILLED"}}
+                clock["t"] = 1003.0
+                yield None
+
+        user_stream.run_loop(
+            lambda: Sock(), lambda: len(managed) >= 1, managed.append,
+            lambda _s: None, lambda: None, lambda: None, now=lambda: clock["t"])
+        self.assertEqual(len(managed), 1)
+
+    def test_lock_busy_does_not_exit_and_retries_without_reconnect(self):
+        held = lt.Lock()
+        held.__enter__()
+        try:
+            with patch.object(lt, "cmd_manage", side_effect=AssertionError("鎖還在不該跑 manage")):
+                with self.assertRaises(user_stream.LockBusy):
+                    user_stream.manage_under_lock(True)
+        finally:
+            held.__exit__(None, None, None)
+        calls = []
+        with patch.object(lt, "cmd_manage", side_effect=lambda a: calls.append(a.live)):
+            user_stream.manage_under_lock(False)
+        self.assertEqual(calls, [False])
+
+        lt.save_state({"pending": {}, "meta": {}})
+        held = lt.Lock()
+        held.__enter__()
+        try:
+            st = lt.load_state()
+            st["pending"] = {"XUSDT": {"ladder": True, "stop": "1", "orders": [{"orderId": 1}]}}
+            lt.save_state(st)
+            with self.assertRaises(user_stream.LockBusy):
+                user_stream.manage_under_lock(True)
+            self.assertIn("XUSDT", lt.load_state()["pending"])
+        finally:
+            held.__exit__(None, None, None)
+
+        connects = {"n": 0}
+        clock = {"t": 500.0}
+        released = {"ok": False}
+        managed = []
+
+        class Sock(object):
+            def messages(self):
+                yield {"e": "ACCOUNT_UPDATE"}
+                clock["t"] = 503.0
+                yield None
+                released["ok"] = True
+                clock["t"] = 505.0
+                yield None
+
+        def connect():
+            connects["n"] += 1
+            return Sock()
+
+        def on_manage(_msg):
+            if not released["ok"]:
+                raise user_stream.LockBusy()
+            managed.append(1)
+
+        user_stream.run_loop(connect, lambda: len(managed) >= 1, on_manage, lambda _s: None, lambda: None, lambda: None, now=lambda: clock["t"])
+        self.assertEqual(connects["n"], 1)
+        self.assertEqual(managed, [1])
+
+    def test_watch_runs_when_user_stream_module_is_missing(self):
+        import builtins
+        real_import = builtins.__import__
+
+        def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "user_stream":
+                raise ImportError("absent")
+            return real_import(name, globals, locals, fromlist, level)
+
+        calls = []
+        state = {"pending": {"XUSDT": {"orderId": 5, "stop": "1", "target": "2", "setup": "瘸師弟"}}}
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path))
+            if method == "GET" and path == "/fapi/v1/order":
+                return {"orderId": 5, "status": "NEW", "executedQty": "0", "origQty": "1"}
+            raise AssertionError((method, path))
+
+        with patch("builtins.__import__", guarded), \
+                patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log"), \
+                patch.object(lt, "load_state", return_value=state), \
+                patch.object(lt, "save_state"):
+            lt.cmd_watch(type("A", (), {"live": True})())
+        self.assertEqual(calls, [("GET", "/fapi/v1/order")])
 
 
 if __name__ == "__main__":

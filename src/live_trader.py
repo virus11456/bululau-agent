@@ -165,8 +165,11 @@ def fmt(d): return format(d.normalize(), "f")
 class Lock:
     def __enter__(self):
         self.f = open(LOCK, "w")
-        try: fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise SystemExit("另一個 live_trader 正在執行（檔案鎖），稍後再試")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.f.close()
+            raise SystemExit("另一個 live_trader 正在執行（檔案鎖），稍後再試")
         return self
     def __exit__(self, *a): fcntl.flock(self.f, fcntl.LOCK_UN); self.f.close()
 
@@ -454,7 +457,9 @@ def ladder_anchor_ms(pd, orders):
 def expire_unfilled_ladder(sym, pd, rows, held_amt, live, now_ms=None):
     """超過 2 小時仍未成交的進場單撤掉。已成交的倉與它的停損止盈不動。
 
-    完全沒成交時，連預掛的停損一起撤，並另外記 log。回傳 drop / partial / None。
+    任何一張進場單撤不掉，或撤完再查仍有成交，都不撤預掛停損，pending 也留著。
+    停損只在每一張的 executedQty 重新查過、確認是 0、而且沒有持倉時才撤。
+    回傳 drop / partial / None。
     """
     anchor = ladder_anchor_ms(pd, rows)
     if anchor is None:
@@ -465,25 +470,61 @@ def expire_unfilled_ladder(sym, pd, rows, held_amt, live, now_ms=None):
     resting = [o for o in rows if o.get("status") in ("NEW", "PARTIALLY_FILLED")]
     if not resting:
         return None
-    filled = sum((_filled_qty(o) for o in rows), Decimal(0))
     amt = held_amt.get(sym, 0.0) if held_amt else 0.0
+    cancel_failed = False
     for order in resting:
         log("ladder_expire", symbol=sym, orderId=order.get("orderId"), status=order.get("status"))
         try:
             cancel_entry_order(sym, order.get("orderId"), live)
+        except BinanceError as e:
+            # -2011 代表單已經不在，不能當成「成交量是 0」。下面再查一次。
+            if e.code == -2011:
+                log("ladder_expire", symbol=sym, orderId=order.get("orderId"), gone=True)
+            else:
+                cancel_failed = True
+                log("error", msg="逾時撤階梯進場單失敗", symbol=sym, err=str(e))
         except Exception as e:
+            cancel_failed = True
             log("error", msg="逾時撤階梯進場單失敗", symbol=sym, err=str(e))
-    if filled == 0 and not amt:
-        for po in protect_orders(sym):
-            if not str(po["t"]).startswith("STOP"):
-                continue
-            log("ladder_expire", symbol=sym, cancel="stop", id=po.get("id"))
-            try:
-                cancel_protect(sym, po, live)
-            except Exception as e:
-                log("error", msg="逾時撤預掛停損失敗", symbol=sym, err=str(e))
-        return "drop"
-    return "partial"
+    if cancel_failed:
+        return None
+    filled = Decimal(0)
+    unconfirmed = False
+    for order in rows:
+        oid = order.get("orderId")
+        if not oid:
+            unconfirmed = True
+            continue
+        try:
+            fresh = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": oid}, signed=True)
+        except BinanceError as e:
+            # 查不到就不能證明成交量是 0，停損留著。
+            log("warn", msg="逾時撤單後再查失敗", symbol=sym, orderId=oid, code=e.code)
+            unconfirmed = True
+            continue
+        except Exception as e:
+            log("warn", msg="逾時撤單後再查失敗", symbol=sym, orderId=oid, err=str(e))
+            unconfirmed = True
+            continue
+        if not isinstance(fresh, dict):
+            unconfirmed = True
+            continue
+        filled += _filled_qty(fresh)
+        if fresh.get("status") in ("NEW", "PARTIALLY_FILLED"):
+            unconfirmed = True
+    if filled > 0 or amt:
+        return "partial"
+    if unconfirmed or not live:
+        return None
+    for po in protect_orders(sym):
+        if not str(po["t"]).startswith("STOP"):
+            continue
+        log("ladder_expire", symbol=sym, cancel="stop", id=po.get("id"))
+        try:
+            cancel_protect(sym, po, live)
+        except Exception as e:
+            log("error", msg="逾時撤預掛停損失敗", symbol=sym, err=str(e))
+    return "drop"
 
 
 def resize_protects(symbol, close_side, qty, live):
@@ -1249,12 +1290,23 @@ def cmd_manage(a):
         dual, multi = status_account_mode()
         print_status_body(acc, s, positions(acc), status_oo, status_ao, dual, multi)
 
+def _user_stream_fresh():
+    """Mac 還沒放 user_stream.py 時，60 秒 watch 照舊輪詢，不要因 ImportError 停擺。"""
+    try:
+        from user_stream import heartbeat_fresh
+    except ImportError:
+        return False
+    try:
+        return bool(heartbeat_fresh())
+    except Exception:
+        return False
+
+
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
     有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。
-    使用者資料流的心跳還新的時候，這支不打 API，當備援。"""
-    from user_stream import heartbeat_fresh
-    if heartbeat_fresh():
+    使用者資料流的心跳還新的時候，這支不打 API，當備援。沒有那個檔就照舊輪詢。"""
+    if _user_stream_fresh():
         return
     st = load_state(); pend = st.get("pending", {})
     if not pend:

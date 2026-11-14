@@ -25,30 +25,50 @@
 
 `cmd_watch` 的階梯分支在決定要不要叫 manage 時，若掛出已超過 2 小時且還有 NEW 或 PARTIALLY_FILLED，也要叫 manage。單張限價的那個 `if not pd.get("orderId")` 之後不要改，單張仍不自動撤。
 
-完全沒成交：撤進場單，並撤預掛停損，log 是 `ladder_expire`。有成交：只撤還沒成交的進場單，不停損、不止盈、也不平倉。
+完全沒成交：先撤進場單。任何一張撤單失敗（不是 -2011）就停，不撤停損，pending 留著。撤完要再查每一張 `executedQty`。確認全是 0、沒有持倉、也沒有還掛著的檔，才撤預掛停損。再查看到成交，或還有 NEW／PARTIALLY_FILLED，停損不動。有成交：只撤還沒成交的進場單，不停損、不止盈、也不平倉。
 
 ## O8：使用者資料流
 
 新檔 `src/user_stream.py` 整份拷到 `~/quantboy-live/user_stream.py`。它用標準庫的 `socket` 和 `ssl` 做 websocket，不必 `pip install`。Python 3.9 就夠。
 
-`cmd_watch` 一開頭加：
+`cmd_watch` 一開頭加這段，不要直接 `import user_stream`。Mac 上若還沒拷 `user_stream.py`，60 秒 watch 必須照舊跑：
 
 ```python
-    from user_stream import heartbeat_fresh
-    if heartbeat_fresh():
-        return
+def _user_stream_fresh():
+    try:
+        from user_stream import heartbeat_fresh
+    except ImportError:
+        return False
+    try:
+        return bool(heartbeat_fresh())
+    except Exception:
+        return False
 ```
 
-心跳檔是資料目錄的 `.ws_watch_heartbeat`。90 秒內有更新，60 秒的 `watch --live` 就不打 API。過期就照原來的輪詢。
+然後 `if _user_stream_fresh(): return`。心跳檔是資料目錄的 `.ws_watch_heartbeat`。90 秒內有更新，60 秒的 `watch --live` 就不打 API。過期、或沒有那個模組，就照原來的輪詢。
 
-launchd 用新的 `deploy/com.quantboy.userstream.plist`（Label 是 `com.quantboy.userstream`）。不要改既有的 `com.quantboy.livewatch`。
+資料流呼叫 `manage` 時要拿 `live_trader.Lock()` 這把非阻塞鎖（`manage_under_lock`）。拿不到就晚一秒再試，不能讓 `SystemExit` 把程序殺掉，也不能在沒鎖的時候讀寫 `state.json`。成交事件先合併約 2.5 秒，只跑一次 manage。
+
+連上 websocket 之後要把 recv 逾時改成 180 秒。閒置逾時只送遮罩過的 ping，不重連、不重拿 listenKey。重連要指數退避。HTTP 429 照 Retry-After 等待。HTTP 418 停止，不要再打 listenKey。客戶端的 ping／pong 必須加遮罩。
+
+launchd 用新的 `deploy/com.quantboy.userstream.plist`（Label 是 `com.quantboy.userstream`）。不要改既有的 `com.quantboy.livewatch`。plist 裡寫的是 `REPLACE_USER`，沒有寫死使用者名稱。這個 PR 還沒審過之前，不要 bootstrap。
+
+安裝前先看實際使用者與家目錄，再替換路徑：
 
 ```bash
-cp deploy/com.quantboy.userstream.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.quantboy.userstream.plist
+id -un
+echo "$HOME"
+ls "$HOME/quantboy-live"
 ```
 
-程式路徑若不是 `/Users/frank/quantboy-live/user_stream.py`，先改 plist 再載入。
+確認 `user_stream.py` 會放在哪個目錄（通常是 `$HOME/quantboy-live`）。若家目錄是 `/Users/某個名字`，把 plist 裡的 `REPLACE_USER` 換成 `id -un` 的結果。若不是 `/Users/<名字>`，把程式路徑、WorkingDirectory、StandardOutPath、StandardErrorPath 四個都改成那個實際目錄。log 檔要在可寫的目錄。
+
+```bash
+USER_NAME=$(id -un)
+sed "s/REPLACE_USER/${USER_NAME}/g" deploy/com.quantboy.userstream.plist > "$HOME/Library/LaunchAgents/com.quantboy.userstream.plist"
+# 審過之後才載入：
+# launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.quantboy.userstream.plist"
+```
 
 ## O9
 

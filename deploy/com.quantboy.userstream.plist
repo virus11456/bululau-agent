@@ -7,11 +7,15 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/python3</string>
-		<string>/Users/frank/quantboy-live/user_stream.py</string>
+		<string>/Users/REPLACE_USER/quantboy-live/user_stream.py</string>
 		<string>--live</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>/Users/frank/quantboy-live</string>
+	<string>/Users/REPLACE_USER/quantboy-live</string>
+	<key>StandardOutPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/user_stream.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/user_stream.err.log</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

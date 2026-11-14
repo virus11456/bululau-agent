@@ -1,6 +1,26 @@
 # 手貼：小師弟市價、大師兄出場
 
-不要改 Mac 上的 `docs/skill.md`。下面這段是建議以後貼進技能說明的文字，這次只放在這裡。
+Mac 實盤篩網讀的是 `~/quantboy-paper/discretionary/prefilter.py`，repo 裡的對照檔是 `backups/mac/quantboy-paper/discretionary/prefilter.py`。不是 `src/prefilter.py`。
+
+部署時不要整份覆蓋。那份檔用 `from common import *`，log 寫在自己的目錄。做法：先把 Mac 原檔備份，再把 `src/prefilter.py` 裡的 `xiao_shidi`、`da_shixiong`、`filter_new_signals`、`cap_near` 和檔頭那些常數抄進去，保留 Mac 檔自己的 import 和路徑。`src/live_trader.py` 的 `--target-3r`、兩張止盈、2 根 4H 撤單，要手貼進 Mac 的 `live_trader.py`，不要整份覆蓋，也不要動 `_keys()`。
+
+`~/quantboy-gate/full_prompt.md` 裡小師弟那句要改成：
+
+```
+小師弟同短線結構停損，2R 一次全出，不平一半、不移保本。第二次下殺用市價。
+```
+
+不要改 `docs/skill.md`。
+
+## 待使用者確認的預設
+
+- 小師弟停損在最低點下方再留 `XIAO_STOP_CUSHION = 0.005`（0.5%）。BTC、ETH 另外至少離進場 3%。
+- 大師兄向下發散用收盤 < MA7 < MA25。週期 7 和 25 待確認。
+- 大師兄限價超過 `DA_LIMIT_EXPIRE_4H = 2` 根 4H 就撤剩餘進場單。
+
+## 建議技能文字
+
+不要改 `docs/skill.md`。下面這段是建議以後貼進技能說明的文字，這次只放在這裡。
 
 ```
 小師弟：流動性夠的幣都掃，不限 ETH。ETH 起跌要大於 100 點（遠大於 100 的更嚴數字未確認）。其他幣起跌大約 3% 以上。緩跌後急殺、爆量，彈回至少 40%。第二次下殺用市價，不先算死位置。

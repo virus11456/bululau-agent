@@ -54,22 +54,28 @@ def kuai_shidi(k15, rs):
                         plan="ladder limit buys (paper); exit 1-1.5R or any bounce; max 2h")
     return None
 
-# ETH 起跌要遠大於 100 點。原文寫「至少超過 100 點」，沒有第二個數字。這次用大於 100 點。
-# 其他幣大約 3% 以上。用跌幅 / 起跌高點。
+# ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點。這次用大於 100 點。
+# BTC 與其他幣用跌幅 / 起跌高點，至少 3%。
 XIAO_ETH_DROP_MIN = 100
 XIAO_ALT_DROP_PCT = 0.03
+XIAO_SLOW_BARS = 6
+XIAO_SLOW_VOL_MAX = 1.5
+XIAO_FLUSH_VOL = 3.0
+XIAO_FLUSH_SHARE = 0.40
+XIAO_BOUNCE_MIN = 0.40
+# 最低點下方的緩衝。預設 0.5%。待使用者確認。
+XIAO_STOP_CUSHION = 0.005
 XIAO_UNCONFIRMED = [
     "ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點，沒有更嚴的第二個數字。這次用大於 100 點，更嚴的門檻未確認。",
     "其他幣起跌大約 3% 以上。這次用跌幅除以起跌高點，至少 3%。「大約」要留多少誤差未確認。",
-    "BTC 起跌用點數還是 3% 未確認。這次只有 ETH 用點數，BTC 走其他幣的 3%。",
-    "前低下方再留多少未確認。BTC、ETH 取至少 3% 與前低的較低者。其他幣 15m 至少 1% 還是 2% 未確認，這次用 1%，並且不高於前低。",
-    "第二次下殺的 K 棒長什麼樣未確認。篩網仍是緩跌急殺、爆量、彈回 40% 以上；進場用市價，不在長黑那一根進。",
-    "成交後若實際虛損超過淨值 1%，要減倉、全平還是接受，未確認。這次不改 1% ，也不自動減碼。",
+    "停損在最低點下方再留緩衝。預設 0.5%（XIAO_STOP_CUSHION），待使用者確認。BTC、ETH 另外至少離進場 3%。",
+    "第二次下殺「回落到彈幅一半左右」的誤差帶未確認。這次用最後一根的低點碰到彈幅中線、且不破最低點。",
+    "成交後若實際虛損超過淨值 1%，要減倉、全平還是接受，未確認。這次不改 1%，也不自動減碼。",
 ]
 
 def xiao_drop_ok(symbol, high, low):
     drop = high - low
-    if symbol in ("ETHUSDT",):
+    if symbol == "ETHUSDT":
         if drop <= XIAO_ETH_DROP_MIN:
             return False, "ETH drop {0:.0f}pt <=100".format(drop)
         return True, None
@@ -80,34 +86,72 @@ def xiao_drop_ok(symbol, high, low):
     return True, None
 
 def xiao_shidi(k15, symbol="ETHUSDT"):
-    """小師弟：緩跌後急殺爆量，彈回 40–65%。ETH 起跌要超過 100 點，其他幣大約 3%。進場是市價。"""
-    w = k15[-40:]
-    li = min(range(len(w)), key=lambda i: w[i]["l"]); L = w[li]["l"]
-    if li < 4 or li > len(w) - 2: return None, "low too old/too fresh"
-    hi_i = max(range(0, li), key=lambda i: w[i]["h"]); H = w[hi_i]["h"]
+    """小師弟：緩跌、急殺爆量、彈回之後等第二次下殺。市價進場，不在反彈途中追。"""
+    if not k15 or len(k15) < 40:
+        return None, "15m 資料不足"
+    last_i = len(k15) - 1
+    search_from = max(26, last_i - 36)
+    if last_i - 1 <= search_from:
+        return None, "15m 資料不足"
+    li = min(range(search_from, last_i), key=lambda i: k15[i]["l"])
+    if li < 26:
+        return None, "low too old/too fresh"
+    slow = k15[li - XIAO_SLOW_BARS:li]
+    base = k15[li - XIAO_SLOW_BARS - 20:li - XIAO_SLOW_BARS]
+    if len(slow) < XIAO_SLOW_BARS or len(base) < 20:
+        return None, "緩跌不夠"
+    if slow[-1]["c"] >= slow[0]["o"]:
+        return None, "急殺前不是緩跌"
+    base_v = sum(x["v"] for x in base) / float(len(base)) or 1
+    slow_v = sum(x["v"] for x in slow) / float(XIAO_SLOW_BARS)
+    if slow_v > XIAO_SLOW_VOL_MAX * base_v:
+        return None, "緩跌量不平穩"
+    Lbar = k15[li]
+    L = Lbar["l"]
+    if Lbar["c"] >= Lbar["o"]:
+        return None, "急殺不是長黑"
+    prior20 = k15[li - 20:li]
+    av20 = sum(x["v"] for x in prior20) / 20.0 or 1
+    if Lbar["v"] < XIAO_FLUSH_VOL * av20:
+        return None, "急殺量不到 3 倍"
+    H = max(x["h"] for x in slow)
     drop = H - L
     ok, why = xiao_drop_ok(symbol, H, L)
     if not ok:
         return None, why
-    av = sum(x["v"] for x in k15[-60:-40]) / 20 or 1
-    flush = max(w[max(li - 2, 0):li + 1], key=lambda x: x["v"])
-    if flush["v"] < 2 * av or pct(flush["o"], flush["c"]) < 0.8: return None, "no volume flush long black"
-    last = w[-1]; c = last["c"]
-    if c <= last["o"]: return None, "last bar not green"
-    bounce = (c - L) / drop
-    if bounce < 0.4: return None, f"bounce {bounce:.0%} <40%"
-    if bounce > 0.65: return None, f"bounce {bounce:.0%} -> chasing"
-    min_pct = 0.03 if symbol in ("BTCUSDT", "ETHUSDT") else 0.01
-    stop = min(L, c * (1 - min_pct))
-    risk = c - stop
-    if risk <= 0: return None, "bad risk"
-    target = c + 2 * risk
-    rr = (target - c) / risk
-    if rr < RR_MIN: return None, f"rr {rr:.2f}"
-    return dict(setup="小師弟", tf="15m", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(rr, 2),
+    if drop <= 0 or (Lbar["o"] - Lbar["l"]) / drop < XIAO_FLUSH_SHARE:
+        return None, "急殺佔跌幅不到 40%"
+    between = k15[li + 1:last_i]
+    if len(between) < 2:
+        return None, "還沒有彈回"
+    peak = max(x["h"] for x in between)
+    if (peak - L) / drop < XIAO_BOUNCE_MIN:
+        return None, "彈回不到 40%"
+    half = L + 0.5 * (peak - L)
+    last = k15[last_i]
+    if last["l"] <= L:
+        return None, "第二次下殺破了最低點"
+    if last["l"] > half:
+        return None, "還沒回落到彈幅一半"
+    if last["c"] >= peak or last["h"] >= peak:
+        return None, "反彈途中不追"
+    entry = last["c"]
+    stop = L * (1 - XIAO_STOP_CUSHION)
+    if symbol in ("BTCUSDT", "ETHUSDT"):
+        stop = min(stop, entry * 0.97)
+    risk = entry - stop
+    if risk <= 0:
+        return None, "bad risk"
+    target = entry + 2 * risk
+    rr = (target - entry) / risk
+    if rr < RR_MIN:
+        return None, "rr {0:.2f}".format(rr)
+    return dict(setup="小師弟", tf="15m", entry=round(entry, 8), stop=round(stop, 8),
+                target=round(target, 8), rr=round(rr, 2),
                 drop_pt=round(drop, 1), drop_pct=round(drop / H * 100, 2) if H else None,
-                bounce_pct=round(bounce * 100), entry_type="market",
-                plan="第二次下殺市價進場。停損固定在前低下方。到 2R 一次全出。試算進場價是這一根收盤，實際止盈用成交均價重算。",
+                bounce_pct=round((peak - L) / drop * 100, 1), entry_type="market",
+                low_t=Lbar.get("t"), cushion=XIAO_STOP_CUSHION,
+                plan="第二次下殺市價進場。停損在最低點下方。到 2R 一次全出。試算進場價是這一根收盤，實際止盈用成交均價重算。",
                 unconfirmed=list(XIAO_UNCONFIRMED)), None
 
 def maset(k):
@@ -180,72 +224,144 @@ def funding(k1h, fr):
     return dict(setup="funding_rate", tf="1H", entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
                 rr=round(rr, 2), funding_pct=round(fr * 100, 3), sizing="2:3:5 (MA30 then MA45)"), None
 
-# 大師兄原文沒寫死的項目。不拿來擋單，候選裡照實標出。
+# 均線週期是這次用來表達向下發散的例子。待使用者確認。
+DA_MA_FAST = 7
+DA_MA_SLOW = 25
+DA_BLACK_BODY_MIN = 2.0
+DA_BLACK_BODY_MAX = 5.0
+DA_BLACK_VOL = 2.0
+DA_REBOUND_MIN = 10
+DA_REBOUND_MAX = 40
+DA_RECOVER = 0.50
+DA_RETEST_BAND = 0.03
+# 限價單掛著超過幾根 4H 就撤。待使用者確認。
+DA_LIMIT_EXPIRE_4H = 2
 DA_SHIXIONG_UNCONFIRMED = [
-    "均線週期未確認。不用 MA30/45/60 擋單。向下發散用後段高點更低、低點更低代理。",
-    "長黑實體要多大未確認。不套瘸師弟的 2% 或 4%。",
-    "跌破用長黑收盤低於前 10 根最低價代理。這 10 來自反彈最少根數，不是另寫的均線。",
+    "向下發散的均線週期待使用者確認。這次用收盤 < MA7 < MA25。",
+    "限價單超過幾根 4H 就撤，待使用者確認。這次用 2 根。",
     "前低下方再留多少未確認。停損取前低與 BTC/ETH 3%、小幣 10% 的較低者。",
-    "二次測前低要離前低多近未確認。這次把反彈段最低點落在最近一根、且收盤不破長黑低點，當成正在測。",
-    "反彈至少 10 根。原文寫至少 10–30 根以上，30 是不是上限未確認。",
-    "V 轉原文是 3–5 根、強勢約 3 根。3 根內收回長黑開盤才排除。第 4、5 根才收回不因此擋掉。",
-    "8H 要不要跟 4H 各掃一輪未確認。這次只掃 4H。",
-    "帶大量是特徵之一，倍數未確認，不把 3 倍寫成門檻。",
+    "8H 要不要跟 4H 各掃一輪未確認。這次只在新的 4H 收盤評估。",
 ]
 
+def _down_ma(k4):
+    closes = [x["c"] for x in k4]
+    fast, slow = ma(closes, DA_MA_FAST), ma(closes, DA_MA_SLOW)
+    if fast is None or slow is None:
+        return False
+    return k4[-1]["c"] < fast < slow
+
 def da_shixiong(k4, symbol):
-    """大師兄。只使用原文寫過的條件。沒寫死的數字放進 unconfirmed，不當成門檻。"""
-    if not k4 or len(k4) < 25:
+    """大師兄。只在最近一根已收 4H 是二次測前低時出候選。同一根長黑由呼叫端去重。"""
+    if not k4 or len(k4) < DA_MA_SLOW + DA_REBOUND_MIN + 10:
         return None, "4H 資料不足"
+    if not _down_ma(k4):
+        return None, "均線未下發散"
     last_i = len(k4) - 1
+    last = k4[last_i]
     found = None
-    for i in range(last_i - 10, 9, -1):
+    start = last_i - DA_REBOUND_MIN
+    stop_i = max(10, last_i - DA_REBOUND_MAX)
+    for i in range(start, stop_i - 1, -1):
         bar = k4[i]
         if bar["c"] >= bar["o"]:
             continue
-        prior = k4[max(0, i - 10):i]
-        if not prior or bar["c"] >= min(x["l"] for x in prior):
+        prior = k4[i - 10:i]
+        if len(prior) < 10:
+            continue
+        avg_body = sum(abs(x["o"] - x["c"]) for x in prior) / 10.0
+        body = bar["o"] - bar["c"]
+        if avg_body <= 0 or body < DA_BLACK_BODY_MIN * avg_body or body > DA_BLACK_BODY_MAX * avg_body:
+            continue
+        avg_v = sum(x["v"] for x in prior) / 10.0
+        if avg_v and bar["v"] < DA_BLACK_VOL * avg_v:
+            continue
+        if bar["c"] >= min(x["l"] for x in prior):
+            continue
+        closes = [x["c"] for x in k4[:i + 1]]
+        fast, slow = ma(closes, DA_MA_FAST), ma(closes, DA_MA_SLOW)
+        if fast is None or slow is None or not (bar["c"] < fast < slow):
+            continue
+        after = k4[i + 1:]
+        if not (DA_REBOUND_MIN <= len(after) <= DA_REBOUND_MAX):
+            continue
+        if any(x["c"] >= bar["o"] for x in after[:3]):
+            continue
+        span = bar["h"] - bar["l"]
+        peak = max(x["h"] for x in after)
+        if span <= 0 or peak < bar["l"] + DA_RECOVER * span:
+            continue
+        band = bar["l"] * (1 + DA_RETEST_BAND)
+        if any(bar["l"] < x["l"] <= band for x in after[:-1]):
+            continue
+        if not (bar["l"] < last["l"] <= band):
+            continue
+        if last["c"] <= bar["l"]:
             continue
         found = i
         break
     if found is None:
-        return None, "沒有長黑跌破，或長黑後不到 10 根"
+        return None, "沒有符合的長黑或不是二次測前低"
     black = k4[found]
     after = k4[found + 1:]
-    if any(x["c"] > black["o"] for x in after[:3]):
-        return None, "長黑後 3 根內收回，視為 V 轉走完"
-    if len(after) < 4:
-        return None, "反彈太短，看不出向下結構"
-    mid = len(after) // 2
-    first, second = after[:mid], after[mid:]
-    if not (max(x["h"] for x in second) < max(x["h"] for x in first)
-            and min(x["l"] for x in second) < min(x["l"] for x in first)):
-        return None, "後段沒有更低的高點和低點"
-    if k4[-1]["c"] <= black["l"]:
-        return None, "收盤跌破長黑低點"
-    retest = len(after) > 1 and k4[-1]["l"] <= min(x["l"] for x in after[:-1]) and k4[-1]["l"] > black["l"]
-    if retest:
-        entry = k4[-1]["c"]
-        mode = "二次測前低"
-    else:
-        entry = black["l"] + (black["h"] - black["l"]) / 3.0
-        mode = "長黑三分之一掛單"
+    entry = last["c"]
     min_pct = 0.03 if symbol in ("BTCUSDT", "ETHUSDT") else 0.10
     stop = min(black["l"], entry * (1 - min_pct))
     risk = entry - stop
     if risk <= 0:
         return None, "停損距離不對"
-    notes = list(DA_SHIXIONG_UNCONFIRMED)
-    if len(after) > 30:
-        notes.append("反彈已超過 30 根。原文寫至少 10–30 根以上，30 是不是上限未確認。")
-    if any(x["c"] > black["o"] for x in after[3:5]):
-        notes.append("第 4 或第 5 根收回長黑開盤。V 轉 3–5 根的邊界未確認，這筆不因此擋掉。")
     return dict(setup="大師兄", tf="4H", entry=round(entry, 8), stop=round(stop, 8),
                 target=round(entry + 2 * risk, 8), target_3r=round(entry + 3 * risk, 8),
-                flat_before_4r=round(entry + 4 * risk, 8), rr=2.0, entry_mode=mode,
-                black_low=black["l"], rebound_bars=len(after), min_stop_pct=min_pct * 100,
-                exit="2R 平 50%，剩下 50% 在 3R 平，4R 前全出。2R 後停損不動。不套 1.5R 平一半，不套 15m 時間停損。",
-                unconfirmed=notes, plan=mode), None
+                flat_before_4r=round(entry + 4 * risk, 8), rr=2.0, entry_mode="二次測前低",
+                entry_type="limit", black_low=black["l"], black_t=black.get("t"),
+                rebound_bars=len(after), min_stop_pct=min_pct * 100,
+                limit_expire_4h=DA_LIMIT_EXPIRE_4H,
+                ma_fast=DA_MA_FAST, ma_slow=DA_MA_SLOW,
+                exit="2R 平 50%，剩下 50% 在 3R 平，4R 前全出。2R 後停損不動。",
+                unconfirmed=list(DA_SHIXIONG_UNCONFIRMED), plan="二次測前低"), None
+
+SEEN_NAME = "signal_seen.jsonl"
+DA_NEAR_SKIP = {"4H 資料不足", "均線未下發散", "沒有符合的長黑或不是二次測前低"}
+
+def signal_id(cand):
+    setup = cand.get("setup")
+    if setup == "小師弟" and cand.get("low_t") is not None:
+        return "xiao|{0}|{1}".format(cand.get("symbol"), cand.get("low_t"))
+    if setup == "大師兄" and cand.get("black_t") is not None:
+        return "da|{0}|{1}".format(cand.get("symbol"), cand.get("black_t"))
+    return None
+
+def filter_new_signals(cands, path=None, record=True):
+    """同一個（幣、最低點或長黑）只留下一次。已看過的不再送進 gate，所以不會再 WAKE。"""
+    path = path or os.path.join(DATA_DIR, SEEN_NAME)
+    seen = set()
+    try:
+        with open(path) as handle:
+            for line in handle:
+                text = line.strip()
+                if text:
+                    seen.add(text)
+    except FileNotFoundError:
+        pass
+    kept, fresh = [], []
+    for cand in cands:
+        key = signal_id(cand)
+        if key and key in seen:
+            continue
+        kept.append(cand)
+        if key:
+            fresh.append(key)
+            seen.add(key)
+    if record and fresh:
+        with open(path, "a") as handle:
+            for key in fresh:
+                handle.write(key + "\n")
+    return kept
+
+def cap_near(near, limit=15):
+    """其他型態先留，小師弟和大師兄的未中籤不要把名額佔滿。"""
+    other = [n for n in near if n.get("setup") not in ("小師弟", "大師兄")]
+    screen = [n for n in near if n.get("setup") in ("小師弟", "大師兄")]
+    return (other + screen)[:limit]
 
 def kuai_today():
     d = datetime.datetime.now(TZ).strftime("%Y-%m-%d"); n = 0
@@ -287,8 +403,13 @@ def run(args):
         if not k or len(k) < 100: continue
         rs = dict(rs24=round(chg(k, 96) - btc24, 2), rs4h=round(chg(k, 16) - btc4, 2), big=qv >= BIG_QV, qv_m=round(qv / 1e6, 1))
         c, why = xiao_shidi(k, s)
-        if c or (why and not str(why).startswith("drop ") and not str(why).startswith("ETH drop")):
-            (cands if c else near).append(dict(symbol=s, **(c or {"setup": "小師弟", "fail": why}), **rs))
+        if c:
+            cands.append(dict(symbol=s, **c, **rs))
+        elif why and not str(why).startswith("drop ") and not str(why).startswith("ETH drop") and why not in (
+                "15m 資料不足", "緩跌不夠", "急殺前不是緩跌", "緩跌量不平穩", "急殺不是長黑",
+                "急殺量不到 3 倍", "急殺佔跌幅不到 40%", "還沒有彈回", "彈回不到 40%",
+                "第二次下殺破了最低點", "還沒回落到彈幅一半", "反彈途中不追", "low too old/too fresh"):
+            near.append(dict(symbol=s, setup="小師弟", fail=why, **rs))
         strong = rs["rs24"] > 0 and rs["rs4h"] > -1
         if strong and kuai_today() < 2:
             c = kuai_shidi(k, rs)
@@ -308,24 +429,35 @@ def run(args):
             c, why = funding(k1, fr); out.append(dict(symbol=s, **(c or {"setup": "funding_rate", "fail": why}), **rs))
         if kd:
             c, why = buluuliu(k1, kd); out.append(dict(symbol=s, **(c or {"setup": "布鹿流", "fail": why}), **rs))
-        k4 = _safe(klines, s, "4h", 80, end)
-        if k4:
-            c, why = da_shixiong(k4, s)
-            if c or why not in ("沒有長黑跌破，或長黑後不到 10 根", "4H 資料不足"):
-                out.append(dict(symbol=s, **(c or {"setup": "大師兄", "fail": why}), **rs))
         return out
     for res in pmap(s2, stage2):
         for r in res:
             (near if "fail" in r else cands).append(r)
+    # 大師兄不限 stage2 強勢幣。每輪用已收 4H，同一根長黑只出一次。
+    k4map = dict(zip([u[0] for u in uni], pmap(lambda u: _safe(klines, u[0], "4h", 80, end), uni)))
+    rs_by = {s: dict(rs24=round(chg(k15[s], 96) - btc24, 2), rs4h=round(chg(k15[s], 16) - btc4, 2),
+                     big=qv >= BIG_QV, qv_m=round(qv / 1e6, 1))
+             for s, qv in uni if k15.get(s) and len(k15[s]) >= 100}
+    for s, _qv in uni:
+        k4 = k4map.get(s)
+        if not k4:
+            continue
+        c, why = da_shixiong(k4, s)
+        rs = rs_by.get(s) or {}
+        if c:
+            cands.append(dict(symbol=s, **c, **rs))
+        elif why not in DA_NEAR_SKIP:
+            near.append(dict(symbol=s, setup="大師兄", fail=why, **rs))
     if guard["blocked"]:
         for c in cands: c["blocked_by_btc_guard"] = True
         notes.append(guard["why"])
-    live = [c for c in cands if not c.get("blocked_by_btc_guard")]
+    live = filter_new_signals([c for c in cands if not c.get("blocked_by_btc_guard")])
     for c in live: c["confidence_hint"] = "low (Asia daytime)" if asia_day else "normal"
+    screened = [n for n in near if n.get("setup") != "布鹿流" or "rr" in n.get("fail", "") or "confirmation" in n.get("fail", "")]
     out = dict(time=now_iso(), asof=args.asof, call_ai=bool(live), n_candidates=len(live), candidates=live,
                blocked=[c for c in cands if c.get("blocked_by_btc_guard")], btc=dict(last=btc[-1]["c"], chg24=round(btc24, 2), guard=guard),
                asia_daytime=asia_day, universe=len(uni), stage2=len(stage2), skipped=dict(avoid=skipped["avoid"], stock=len(skipped["stock"]), illiquid=skipped["illiquid"]),
-               near_misses=[n for n in near if n.get("setup") != "布鹿流" or "rr" in n.get("fail", "") or "confirmation" in n.get("fail", "")][:15],
+               near_misses=cap_near(screened),
                elapsed_s=round(time.time() - t0, 1), trigger_symbol=args.symbol)
     return out
 

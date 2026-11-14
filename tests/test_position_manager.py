@@ -106,8 +106,20 @@ class PositionManagerTest(unittest.TestCase):
         row = self.position(pattern="大師兄", target=120.0)
         pm.klines = lambda *_a, **_k: [bar(self.t0, 95.0, 145.0, 144.0)]
         self.assertEqual(pm.manage(row, events), "close")
-        self.assertEqual(row["exit_reason"], "flat_before_4r")
-        self.assertEqual(row["exit"], 140.0)
+        self.assertEqual(row["exit_reason"], "exit_3r_rest")
+        self.assertEqual(row["exit"], 130.0)
+        self.assertEqual(row["r"], 2.5)
+
+    def test_da_shixiong_stop_after_half_is_half_r(self):
+        events = []
+        row = self.position(pattern="大師兄", target=120.0)
+        pm.klines = lambda *_a, **_k: [
+            bar(self.t0, 95.0, 125.0, 124.0),
+            bar(self.t0 + 900000, 90.0, 110.0, 91.0),
+        ]
+        self.assertEqual(pm.manage(row, events), "close")
+        self.assertEqual(row["exit_reason"], "stop")
+        self.assertEqual(row["r"], 0.5)
         self.assertIsNone(pm.RULES["大師兄"]["be_at_r"])
         self.assertIsNone(pm.RULES["大師兄"]["time_bars"])
         self.assertEqual(pm.RULES["瘸師弟"]["be_at_r"], 0.5)

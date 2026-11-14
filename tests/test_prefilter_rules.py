@@ -25,8 +25,8 @@ prefilter = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(prefilter)
 
 
-def bar(o, h, l, c, v=10.0):
-    return {"t": 0, "o": o, "h": h, "l": l, "c": c, "v": v, "ct": 1}
+def bar(o, h, l, c, v=10.0, t=0):
+    return {"t": t, "o": o, "h": h, "l": l, "c": c, "v": v, "ct": t + 1}
 
 
 class KuaiRefTest(unittest.TestCase):
@@ -151,71 +151,109 @@ def _quiet(o, h, l, c, v=10.0):
 
 
 class XiaoScreenTest(unittest.TestCase):
-    def series(self, high, low, last_close, symbol_scale=1):
-        bars = [_quiet(100, 101, 99, 100, 10) for _ in range(20)]
-        window = [_quiet(high - 0.2, high - 0.1, high - 0.3, high - 0.2, 10) for _ in range(40)]
-        window[5] = _quiet(high - 0.5, high, high - 0.2, high - 0.4, 10)
-        window[20] = _quiet(low * 1.012, low * 1.012, low, low, 40)
-        window[-1] = _quiet(last_close - 0.2, last_close + 0.2, last_close - 0.1, last_close, 10)
-        return bars + window
-
-    def test_eth_needs_more_than_100_points_and_uses_market(self):
-        hit, why = prefilter.xiao_shidi(self.series(3500, 3300, 3400), "ETHUSDT")
-        self.assertIsNotNone(hit, why)
-        self.assertEqual(hit["entry_type"], "market")
-        self.assertEqual(hit["setup"], "小師弟")
-        self.assertLessEqual(hit["stop"], 3300)
-        self.assertGreater(hit["target"], hit["entry"])
-        self.assertTrue(any("未確認" in line for line in hit["unconfirmed"]))
-        miss, why = prefilter.xiao_shidi(self.series(3400, 3300, 3350), "ETHUSDT")
-        self.assertIsNone(miss)
-        self.assertIn("100", why)
-
-    def test_other_coins_use_about_3_percent(self):
-        hit, why = prefilter.xiao_shidi(self.series(100, 96, 98), "SOLUSDT")
-        self.assertIsNotNone(hit, why)
-        self.assertEqual(hit["entry_type"], "market")
-        self.assertGreaterEqual(hit["drop_pct"], 3)
-        miss, why = prefilter.xiao_shidi(self.series(100, 98, 99), "SOLUSDT")
-        self.assertIsNone(miss)
-        self.assertIn("3%", why)
-
-    def test_da_shixiong_not_on_the_black_bar_and_keeps_stop_floor(self):
+    def eth_series(self, flush_low=3300):
         bars = []
-        for i in range(10):
-            bars.append(bar(100, 102, 99, 101, 10))
-        bars.append(bar(110, 112, 90, 95, 30))
-        for i in range(9):
-            bars.append(bar(100, 108, 96, 101, 10))
-        for i in range(9):
-            bars.append(bar(98, 104, 94, 99, 10))
-        bars.append(bar(96, 97, 92, 96, 10))
+        for i in range(30):
+            px = 3600 - i
+            bars.append(bar(px + 1, px + 1.2, px, px + 0.4, 10, t=i))
+        for i in range(6):
+            o = 3560 - i * 12
+            c = o - 8
+            bars.append(bar(o, o, c, c, 10, t=30 + i))
+        bars.append(bar(3480, 3480, flush_low, flush_low + 20, 40, t=36))
+        for i, px in enumerate((3380, 3420, 3450)):
+            bars.append(bar(px - 5, px, px - 8, px - 2, 10, t=37 + i))
+        half = flush_low + 0.5 * (3450 - flush_low)
+        bars.append(bar(half + 4, half + 6, half - 2, half, 10, t=40))
+        return bars
+
+    def test_eth_second_selloff_is_market_and_stop_has_cushion(self):
+        hit, why = prefilter.xiao_shidi(self.eth_series(), "ETHUSDT")
+        self.assertIsNotNone(hit, why)
+        self.assertEqual(hit["entry_type"], "market")
+        self.assertLess(hit["stop"], 3300)
+        self.assertAlmostEqual(hit["stop"], min(3300 * (1 - prefilter.XIAO_STOP_CUSHION), hit["entry"] * 0.97), places=4)
+        self.assertEqual(prefilter.XIAO_STOP_CUSHION, 0.005)
+        self.assertIn("待使用者確認", " ".join(hit["unconfirmed"]))
+        chasing = self.eth_series()
+        chasing[-1] = bar(3460, 3465, 3440, 3462, 10, t=40)
+        miss, why = prefilter.xiao_shidi(chasing, "ETHUSDT")
+        self.assertIsNone(miss)
+        self.assertTrue(why)
+
+    def test_btc_uses_3_percent_and_alts_need_3_percent_drop(self):
+        btc, why = prefilter.xiao_shidi(self.eth_series(), "BTCUSDT")
+        self.assertIsNotNone(btc, why)
+        self.assertLessEqual(btc["stop"], btc["entry"] * 0.97 + 1e-6)
+        alt, why = prefilter.xiao_shidi(self._alt(), "SOLUSDT")
+        self.assertIsNotNone(alt, why)
+        self.assertGreaterEqual(alt["drop_pct"], 3)
+        ok, why = prefilter.xiao_drop_ok("SOLUSDT", 100, 98)
+        self.assertFalse(ok)
+        self.assertIn("3%", why)
+        ok, why = prefilter.xiao_drop_ok("BTCUSDT", 100, 98)
+        self.assertFalse(ok)
+
+    def _alt(self):
+        bars = []
+        for i in range(30):
+            px = 120 - i * 0.05
+            bars.append(bar(px + 0.1, px + 0.12, px, px + 0.04, 10, t=i))
+        for i in range(6):
+            o = 112 - i * 0.4
+            bars.append(bar(o, o, o - 0.3, o - 0.3, 10, t=30 + i))
+        bars.append(bar(109, 109, 100, 101, 40, t=36))
+        for i, px in enumerate((103, 105, 106)):
+            bars.append(bar(px - 0.4, px, px - 0.6, px - 0.2, 10, t=37 + i))
+        half = 100 + 0.5 * (106 - 100)
+        bars.append(bar(half + 0.3, half + 0.4, half - 0.2, half, 10, t=40))
+        return bars
+
+    def test_signal_fires_once_and_near_misses_keep_other_setups(self):
+        cand = {"symbol": "ETHUSDT", "setup": "小師弟", "low_t": 36}
+        path = os.path.join(prefilter.DATA_DIR, "signal-test.jsonl")
+        if os.path.exists(path):
+            os.remove(path)
+        first = prefilter.filter_new_signals([cand], path=path)
+        second = prefilter.filter_new_signals([cand], path=path)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+        near = [{"setup": "布鹿流", "fail": "rr"}] + [{"setup": "小師弟", "fail": "x"} for _ in range(20)]
+        capped = prefilter.cap_near(near, 15)
+        self.assertEqual(capped[0]["setup"], "布鹿流")
+        self.assertLessEqual(len(capped), 15)
+
+    def test_da_retest_only_and_one_black(self):
+        bars = self._da_bars()
         hit, why = prefilter.da_shixiong(bars, "BTCUSDT")
         self.assertIsNotNone(hit, why)
+        self.assertEqual(hit["entry_mode"], "二次測前低")
+        self.assertEqual(hit["entry_type"], "limit")
         self.assertGreaterEqual(hit["rebound_bars"], 10)
-        self.assertNotEqual(hit["entry_mode"], "")
-        self.assertLessEqual(hit["stop"], 90)
-        self.assertAlmostEqual(hit["target_3r"] - hit["entry"], 1.5 * (hit["target"] - hit["entry"]), places=4)
-        self.assertIn("4R", hit["exit"])
-        self.assertTrue(any("未確認" in line for line in hit["unconfirmed"]))
-        bars[12]["c"] = 111
-        miss, why = prefilter.da_shixiong(bars, "BTCUSDT")
-        self.assertIsNone(miss)
-        self.assertIn("V", why)
-        clean = []
-        for i in range(10):
-            clean.append(bar(100, 102, 99, 101, 10))
-        clean.append(bar(110, 112, 90, 95, 30))
-        for i in range(9):
-            clean.append(bar(100, 108, 96, 101, 10))
-        for i in range(9):
-            clean.append(bar(98, 104, 94, 99, 10))
-        clean.append(bar(96, 97, 92, 96, 10))
-        alt, why = prefilter.da_shixiong(clean, "SOLUSDT")
-        self.assertIsNotNone(alt, why)
-        self.assertLessEqual(alt["stop"], alt["entry"] * 0.9 + 1e-6)
+        self.assertLessEqual(hit["rebound_bars"], 40)
+        self.assertEqual(hit["limit_expire_4h"], 2)
+        self.assertIn("待使用者確認", " ".join(hit["unconfirmed"]))
+        v = [dict(b) for b in bars]
+        black = next(b for b in v if b["t"] == 40)
+        v[41]["c"] = black["o"] + 1
+        miss, why = prefilter.da_shixiong(v, "BTCUSDT")
+        self.assertIsNone(miss, why)
         import inspect
         self.assertIn('setup="funding_rate"', inspect.getsource(prefilter.funding))
+
+    def _da_bars(self):
+        bars = []
+        px = 180.0
+        for i in range(40):
+            px -= 1.2
+            bars.append(bar(px + 2, px + 2.1, px, px + 0.2, 10, t=i))
+        black_o = bars[-1]["c"] + 2
+        bars.append(bar(black_o, black_o + 1, 100, black_o - 6, 25, t=40))
+        for i in range(12):
+            c = 112 + (i % 3)
+            bars.append(bar(c + 0.4, 122 if i > 2 else 110, 108, c, 10, t=41 + i))
+        bars.append(bar(102.2, 102.6, 101, 101.5, 10, t=53))
+        return bars
 
 
 if __name__ == "__main__":

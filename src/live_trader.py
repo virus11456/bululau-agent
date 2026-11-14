@@ -970,8 +970,15 @@ def xiao_target_from_fill(side, avg, stop, tick):
         raw = avg - 2 * (stop - avg)
     return fmt(rnd(raw, tick, ROUND_DOWN if side == "BUY" else ROUND_UP))
 
+# 大師兄限價超過幾根 4H 就撤剩餘進場單。待使用者確認。
+DA_LIMIT_EXPIRE_4H = 2
+DA_LIMIT_EXPIRE_MS = DA_LIMIT_EXPIRE_4H * 4 * 60 * 60 * 1000
+
 def cmd_open(a):
     live = a.live; sym = a.symbol.upper(); side = a.side.upper()
+    if getattr(a, "setup", None) == "大師兄":
+        if a.entry_type != "limit" or not getattr(a, "target_3r", None):
+            raise SystemExit("大師兄要限價，並且要給 --target-3r。沒有 3R 全平價就拒絕開倉。")
     a.entry_type = resolve_entry_type(getattr(a, "setup", None), a.entry_type)
     acc = account(); s = day_state(acc); eq = equity_of(acc)
     # 風控閘門
@@ -995,6 +1002,11 @@ def cmd_open(a):
     stop, target = float(a.stop), float(a.target)
     if side == "BUY" and not (stop < entry < target) or side == "SELL" and not (target < entry < stop):
         raise SystemExit(f"停損/止盈方向錯誤：entry {entry} stop {stop} target {target}")
+    target_3r = None
+    if getattr(a, "target_3r", None):
+        target_3r = float(a.target_3r)
+        if side == "BUY" and not (target < target_3r) or side == "SELL" and not (target_3r < target):
+            raise SystemExit("大師兄的 --target-3r 要在 2R 止盈的外側")
     dist = abs(entry - stop) / entry
     lev = min(CFG["max_lev"], int(a.leverage or CFG["max_lev"]))
     risk_usdt = eq * CFG["risk_pct"]
@@ -1023,6 +1035,12 @@ def cmd_open(a):
             place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False)
             print("  [dry-run] 小師弟市價進場後會掛停損和止盈；這次不下單、不寫狀態")
             return
+        if a.setup == "大師兄":
+            tp3 = fmt(rnd(target_3r, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
+            print("  [dry-run] 成交後掛 2R 半倉 reduceOnly 止盈", tp_p)
+            print("  [dry-run] 成交後掛 3R closePosition 止盈", tp3)
+            print("  [dry-run] 大師兄這次不下單、不寫狀態")
+            return
         place_protect(sym, close_side, "STOP_MARKET", stop_p, False)
         print("  [dry-run] 止盈不預掛，成交後由 watch/manage 補"); return
     try: req("POST", "/fapi/v1/marginType", dict(symbol=sym, marginType="ISOLATED"), signed=True)
@@ -1044,8 +1062,10 @@ def cmd_open(a):
                 if p["symbol"] == sym: market_close(sym, float(p["positionAmt"]), True, "limit_stop_place_failed")
             raise SystemExit(f"預掛停損失敗，進場單已撤銷: {e}")
         # 限價成交前不預掛止盈。停損仍預掛：reduceOnly 空倉不會開出反向倉，成交當下就有保護。
-        st = load_state(); st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, orderId=oid,
-                                                                     qty=fmt(qty), side=side); save_state(st)
+        pending = dict(stop=stop_p, target=tp_p, setup=a.setup, orderId=oid, qty=fmt(qty), side=side)
+        if a.setup == "大師兄":
+            pending["target_3r"] = fmt(rnd(target_3r, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
+        st = load_state(); st.setdefault("pending", {})[sym] = pending; save_state(st)
         print("限價單已掛，停損已預掛；止盈等成交後補", oid); return
     if a.setup == "小師弟":
         avg = r.get("avgPrice")
@@ -1421,6 +1441,94 @@ def meta_from_pending(old, pd):
     return fresh
 
 
+def _da_limit_expired(order):
+    ts = order.get("time") or order.get("updateTime")
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return False
+    return int(time.time() * 1000) - ts >= DA_LIMIT_EXPIRE_MS
+
+def _expire_da_limit(sym, pd, order, amt, st, live):
+    """大師兄限價超過參數根數就撤剩餘進場單。有持倉就留下停損，沒有持倉連保護單一併撤。"""
+    try:
+        cancel_entry_order(sym, pd.get("orderId"), live)
+    except BinanceError as e:
+        if getattr(e, "code", None) != -2011:
+            log("error", msg="大師兄到期但撤進場單失敗", symbol=sym, err=str(e))
+            return
+    except Exception as e:
+        log("error", msg="大師兄到期但撤進場單失敗", symbol=sym, err=str(e))
+        return
+    if amt:
+        old = (st.get("meta") or {}).get(sym) or {}
+        st.setdefault("meta", {})[sym] = meta_from_pending(old, pd)
+    else:
+        for po in protect_orders(sym):
+            try:
+                cancel_protect(sym, po, live)
+            except Exception as e:
+                log("error", msg="大師兄到期但撤保護單失敗", symbol=sym, err=str(e))
+    st.get("pending", {}).pop(sym, None)
+    log("da_limit_expired", symbol=sym, orderId=order.get("orderId"), pos=amt,
+        expire_4h=DA_LIMIT_EXPIRE_4H)
+    print("{0} 大師兄限價超過 {1} 根 4H，撤剩餘進場單".format(sym, DA_LIMIT_EXPIRE_4H))
+    if live:
+        save_state(st)
+
+def _tp_matches(po, trigger, close_pos):
+    if not str(po.get("t") or "").startswith("TAKE"):
+        return False
+    if bool(po.get("cp")) != bool(close_pos):
+        return False
+    try:
+        got = Decimal(str(po.get("trig")))
+        want = Decimal(str(trigger))
+    except Exception:
+        return False
+    if want == 0:
+        return False
+    return abs(got - want) / abs(want) <= Decimal("0.002")
+
+def ensure_da_targets(sym, amt, m, algo, oo, st, live):
+    """成交後掛兩張。2R 用實際持倉的 50% reduceOnly，3R 用 closePosition。
+    2R 若已越過，只平一半，不把整倉平掉。3R 已越過才走 target_passed_at_fill。"""
+    entry_side = "BUY" if amt > 0 else "SELL"
+    close_side = "SELL" if amt > 0 else "BUY"
+    orders = protect_orders(sym, algo, oo)
+    if _mark_past_target(sym, entry_side, m.get("target_3r")):
+        close_because_target_passed(sym, amt, st, live)
+        return
+    try:
+        step = sym_info(sym)["step"]
+    except Exception:
+        step = Decimal("0.001")
+    half = rnd(Decimal(str(abs(amt))) * Decimal("0.5"), step)
+    if half > 0 and not any(_tp_matches(po, m.get("target"), False) for po in orders):
+        try:
+            place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m.get("target"), live, qty=fmt(half))
+        except BinanceError as e:
+            if e.code == -2021:
+                signed = float(half) if amt > 0 else -float(half)
+                try:
+                    market_close(sym, signed, live, "scale_50_at_2r")
+                except Exception as e2:
+                    log("error", msg="2R 半倉平倉失敗，保留停損", symbol=sym, err=str(e2))
+            else:
+                log("error", msg="補掛 2R 半倉止盈失敗", symbol=sym, err=str(e))
+        except Exception as e:
+            log("error", msg="補掛 2R 半倉止盈失敗", symbol=sym, err=str(e))
+    if not any(_tp_matches(po, m.get("target_3r"), True) for po in orders):
+        try:
+            place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m.get("target_3r"), live)
+        except BinanceError as e:
+            if e.code == -2021:
+                close_because_target_passed(sym, amt, st, live)
+            else:
+                log("error", msg="補掛 3R 止盈失敗", symbol=sym, err=str(e))
+        except Exception as e:
+            log("error", msg="補掛 3R 止盈失敗", symbol=sym, err=str(e))
+
 def cmd_manage(a):
     live = a.live; acc = account(); s = day_state(acc); dl = daily_loss_pct(acc, s)
     if dl >= CFG["daily_kill"] and not s["killed"]:
@@ -1453,6 +1561,9 @@ def cmd_manage(a):
         except BinanceError as e: log("warn", msg="查詢限價單失敗", symbol=sym, err=str(e)); continue
         stt = o["status"]; amt = held_amt.get(sym, 0.0)
         if stt in ("NEW", "PARTIALLY_FILLED"):
+            if pd.get("setup") == "大師兄" and _da_limit_expired(o):
+                _expire_da_limit(sym, pd, o, amt, st, live)
+                continue
             # 未終結：保護單維持整單數量（reduceOnly 不會反向開倉），確保後續成交也受保護
             print(f"{sym} 限價單 {stt} 已成交 {o.get('executedQty')}/{o.get('origQty')}"); continue
         st["pending"].pop(sym)
@@ -1505,6 +1616,9 @@ def cmd_manage(a):
             for po in protect_orders(sym, algo, oo):
                 if no_tp and str(po["t"]).startswith("TAKE"):
                     continue
+                # 大師兄 2R 是半倉 reduceOnly，不能改成跟持倉一樣大。
+                if m and m.get("setup") == "大師兄" and str(po["t"]).startswith("TAKE") and not po.get("cp"):
+                    continue
                 if po["cp"] or po["qty"] is None or Decimal(str(po["qty"])) == Decimal(str(abs(amt))): continue
                 kind = "STOP_MARKET" if po["t"].startswith("STOP") else "TAKE_PROFIT_MARKET"
                 print(f"  調整 {kind} 數量 {po['qty']} → {abs(amt)}")
@@ -1530,6 +1644,12 @@ def cmd_manage(a):
             try: place_protect(sym, close_side, "STOP_MARKET", m["stop"], live)
             except Exception as e:
                 log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
+        if m and m.get("setup") == "大師兄" and not no_tp:
+            if not m.get("target_3r"):
+                log("warn", msg="大師兄 2R 是平一半，沒有 3R 全平價就不全平", symbol=sym)
+            else:
+                ensure_da_targets(sym, amt, m, algo, oo, st, live)
+            continue
         if not has_tp and m and not no_tp:
             # 限價成交前不預掛止盈。成交後缺止盈才補。
             # 比較的是整倉出場價。大師兄的 target 是 2R 平 50%，全平只看 target_3r。
@@ -1793,6 +1913,7 @@ def main():
     o.add_argument("--entry-type", default="market", choices=["market", "limit"]); o.add_argument("--price")
     o.add_argument("--ladder", help="三檔限價，由淺到深，例如 97,96,95。權重 2:3:5。不給就維持單張")
     o.add_argument("--stop", required=True); o.add_argument("--target", required=True); o.add_argument("--setup", required=True)
+    o.add_argument("--target-3r", dest="target_3r", help="大師兄餘倉全出的 3R 價。沒有就拒絕開倉。")
     o.add_argument("--leverage", type=int); o.add_argument("--portion", type=float, default=1.0, choices=[0.25, 0.5, 1.0]); o.add_argument("--live", action="store_true")
     for n in ("manage", "flatten", "watch"):
         x = sub.add_parser(n); x.add_argument("--live", action="store_true")

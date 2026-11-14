@@ -363,17 +363,21 @@ class TargetPassedAtFillTest(unittest.TestCase):
         self.state["meta"]["XUSDT"] = {
             "setup": "大師兄", "stop": "90", "target": "120", "target_3r": "130",
         }
+        self.amt = "4"
         self.manage(True)
         self.assertEqual(self._market_orders(), [])
         posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
-        self.assertEqual(posted[0][2]["triggerPrice"], "130")
+        self.assertEqual(posted[0][2]["triggerPrice"], "120")
+        self.assertEqual(posted[0][2]["quantity"], "2")
+        self.assertEqual(posted[0][2]["reduceOnly"], "true")
+        self.assertEqual(posted[1][2]["triggerPrice"], "130")
+        self.assertEqual(posted[1][2]["closePosition"], "true")
         self.assertFalse(any(kind == "target_passed_at_fill" for kind, _kw in self.logs))
         self.calls.clear()
         self.mark = "130"
         self.manage(True)
         self.assertEqual(len(self._market_orders()), 1)
-        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
-                             and c[2].get("triggerPrice") == "120" for c in self.calls))
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
 
     def test_da_shixiong_without_3r_price_does_not_flatten_at_2r(self):
         self.mark = "125"

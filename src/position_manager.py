@@ -16,6 +16,8 @@ RULES = {  # be_at_r: move stop to entry at this R; time_bars: 15m bars to reach
     "funding_rate": dict(be_at_r=1.0, time_bars=None, max_bars=None, review_bars_1h=24),
 }
 PENDING_EXPIRY_BARS = 16  # 4h for unfilled limit plans unless pos has 'expires'
+# 大師兄限價超過幾根 4H 就撤。待使用者確認。一根 4H = 16 根 15m。
+DA_LIMIT_EXPIRE_4H = 2
 
 def iso_ms(s): return int(datetime.datetime.fromisoformat(s).timestamp() * 1000)
 def ms_iso(m): return datetime.datetime.fromtimestamp(m / 1000, TZ).isoformat(timespec="seconds")
@@ -34,7 +36,8 @@ def manage(p, events):
         else:
             n = len([k for k in klines(p["symbol"], "15m", 200) if k["t"] >= iso_ms(p["opened"])])
             exp = p.get("expires")
-            if (exp and time.time() * 1000 > iso_ms(exp)) or (not exp and n >= PENDING_EXPIRY_BARS):
+            limit_bars = DA_LIMIT_EXPIRE_4H * 16 if p.get("pattern") == "大師兄" else PENDING_EXPIRY_BARS
+            if (exp and time.time() * 1000 > iso_ms(exp)) or (not exp and n >= limit_bars):
                 events.append(ev(p, "cancel_unfilled", None, ks[-1])); return "remove"
             p["pm_last_bar"] = ks[-1]["t"]; return None
         ks = [k for k in ks if k["t"] >= since]
@@ -43,22 +46,22 @@ def manage(p, events):
     for k in ks:
         bars = int((k["t"] - t_open) / 900000) + 1
         if k["l"] <= p["stop"]:
+            if pattern == "大師兄" and p.get("scaled_2r"):
+                # 一半已在 2R 平掉，剩下一半打到原停損：0.5*2 + 0.5*(-1) = +0.5R
+                return close(p, events, p["stop"], "stop", k, r_value=0.5)
             return close(p, events, p["stop"], "breakeven_stop" if p["stop"] >= entry else "stop", k)
         if pattern == "小師弟":
             if R > 0 and k["h"] >= entry + 2 * R:
                 return close(p, events, entry + 2 * R, "exit_2r", k)
             continue
         if pattern == "大師兄":
-            if R > 0 and k["h"] >= entry + 4 * R:
-                if not p.get("scaled_2r"):
-                    p["scaled_2r"] = True
-                    events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
-                return close(p, events, entry + 4 * R, "flat_before_4r", k)
+            # 同一根碰到 3R 和 4R 時，3R 先成交，不記成 4R。
             if R > 0 and k["h"] >= entry + 3 * R:
                 if not p.get("scaled_2r"):
                     p["scaled_2r"] = True
                     events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
-                return close(p, events, entry + 3 * R, "exit_3r_rest", k)
+                # 一半在 2R、一半在 3R：0.5*2 + 0.5*3 = 2.5R
+                return close(p, events, entry + 3 * R, "exit_3r_rest", k, r_value=2.5)
             if R > 0 and k["h"] >= entry + 2 * R and not p.get("scaled_2r"):
                 p["scaled_2r"] = True
                 events.append(ev(p, "scale_50_at_2r", entry + 2 * R, k))
@@ -82,9 +85,12 @@ def ev(p, kind, price, k):
                 price=price, bar=ms_iso(k["t"]), stop=p["stop"], target=p.get("target"),
                 r=round((price - p["entry"]) / R, 2) if price and R > 0 and kind.startswith(("stop", "target", "time", "max", "breakeven_stop")) else None)
 
-def close(p, events, px, why, k):
+def close(p, events, px, why, k, r_value=None):
     e = ev(p, why, px, k); events.append(e)
-    p.update(closed=ms_iso(k["t"]), exit=px, exit_reason=why, r=e["r"] if e["r"] is not None else round((px - p["entry"]) / (p["entry"] - p["initial_stop"]), 2))
+    if r_value is None:
+        r_value = e["r"] if e["r"] is not None else round((px - p["entry"]) / (p["entry"] - p["initial_stop"]), 2)
+    e["r"] = r_value
+    p.update(closed=ms_iso(k["t"]), exit=px, exit_reason=why, r=r_value)
     return "close"
 
 def main():

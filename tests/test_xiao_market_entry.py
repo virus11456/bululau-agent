@@ -46,6 +46,7 @@ class Args:
         self.stop = kw.get("stop", "90")
         self.target = kw.get("target", "120")
         self.setup = kw.get("setup", "小師弟")
+        self.target_3r = kw.get("target_3r")
         self.leverage = None
         self.portion = 1.0
 
@@ -148,8 +149,22 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.assertEqual(lt.resolve_entry_type("大師兄", "limit"), "limit")
         self.assertEqual(lt.resolve_entry_type("瘸師弟", "limit"), "limit")
         self.assertEqual(lt.resolve_entry_type("布鹿流", "limit"), "limit")
-        text = self.run_open(Args(live=False, setup="大師兄", entry_type="limit", symbol="BTCUSDT"))
+        text = self.run_open(Args(live=False, setup="布鹿流", entry_type="limit", symbol="BTCUSDT"))
         posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order/test"]
         self.assertEqual(posted[0][2]["type"], "LIMIT")
         self.assertIn("止盈不預掛", text)
-        self.assertNotIn("不下單", text)
+
+    def test_da_open_refuses_without_3r_and_dry_run_shows_two_targets(self):
+        with self.assertRaises(SystemExit) as caught:
+            lt.cmd_open(Args(setup="大師兄", entry_type="limit"))
+        self.assertIn("target-3r", str(caught.exception))
+        with self.assertRaises(SystemExit):
+            lt.cmd_open(Args(setup="大師兄", entry_type="market", target_3r="130"))
+        text = self.run_open(Args(live=False, setup="大師兄", entry_type="limit",
+                                  symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("2R 半倉", text)
+        self.assertIn("3R closePosition", text)
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in self.calls))
+        self.assertTrue(lt._da_limit_expired({"time": 1}))
+        self.assertFalse(lt._da_limit_expired({"time": int(__import__("time").time() * 1000)}))
+        self.assertEqual(lt.DA_LIMIT_EXPIRE_4H, 2)

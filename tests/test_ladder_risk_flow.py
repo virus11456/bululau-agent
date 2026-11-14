@@ -541,6 +541,8 @@ class UserStreamTest(unittest.TestCase):
             calls.append((method, path))
             if method == "GET" and path == "/fapi/v1/order":
                 return {"orderId": 5, "status": "NEW", "executedQty": "0", "origQty": "1"}
+            if path == "/fapi/v2/positionRisk":
+                return [{"symbol": "XUSDT", "positionAmt": "0", "markPrice": "1.5"}]
             raise AssertionError((method, path))
 
         with patch("builtins.__import__", guarded), \
@@ -549,7 +551,8 @@ class UserStreamTest(unittest.TestCase):
                 patch.object(lt, "load_state", return_value=state), \
                 patch.object(lt, "save_state"):
             lt.cmd_watch(type("A", (), {"live": True})())
-        self.assertEqual(calls, [("GET", "/fapi/v1/order")])
+        self.assertIn(("GET", "/fapi/v1/order"), calls)
+        self.assertIn(("GET", "/fapi/v2/positionRisk"), calls)
 
     def test_idle_timeout_does_not_refresh_heartbeat(self):
         touches = {"n": 0}

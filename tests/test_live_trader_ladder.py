@@ -174,6 +174,9 @@ class OpenPathTest(unittest.TestCase):
         text = buf.getvalue()
         self.assertIn("[dry-run] POST /fapi/v1/order", text)
         self.assertEqual(text.count("'type': 'LIMIT'"), 3)
+        self.assertIn("STOP_MARKET", text)
+        self.assertNotIn("TAKE_PROFIT_MARKET", text)
+        self.assertIn("止盈不預掛", text)
 
     def test_level_below_min_qty_sends_nothing(self):
         from contextlib import ExitStack

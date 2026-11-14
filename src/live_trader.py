@@ -210,19 +210,14 @@ def day_state(acc):
 def daily_loss_pct(acc, s):
     return max(0.0, (s["day_start_equity"] - equity_of(acc)) / s["day_start_equity"]) if s["day_start_equity"] > 0 else 0.0
 
-def _today_start_ms():
-    now = now_tpe()
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(start.timestamp() * 1000)
-
 def _transfer_start_ms(s):
-    """沒有游標就從台北今天 00:00 開始。游標壞掉則回 None，呼叫端這輪不動。"""
+    """有游標就回傳毫秒。沒有游標回 None，呼叫端只做初始化、不打 API。讀不懂回 False，呼叫端這輪不動。"""
     if not isinstance(s, dict) or s.get("capital_flow_last_ms") in (None, ""):
-        return _today_start_ms()
+        return None
     try:
         return int(s.get("capital_flow_last_ms"))
     except (TypeError, ValueError):
-        return None
+        return False
 
 def _transfer_amount(row):
     raw = row.get("income")
@@ -262,16 +257,29 @@ def apply_capital_flows(s, live):
     """讀 USDT-M 劃轉，把當日風險基準加減進去。
 
     失敗、退避中、或回應不完整：這輪不改 state，也不推進 capital_flow_last_ms。
-    dry-run 仍讀、仍記 log，但不寫 state。回傳的字典帶重算後的基準，供這一輪的虧損檢查使用。
+    沒有游標的第一次只把游標設成現在，不讀劃轉，避免把今天已經算進基準的入金再加一次。
+    dry-run 仍記 log，但不寫 state。回傳的字典帶這一輪要用的基準。
     """
     if not isinstance(s, dict) or s.get("day_start_equity") in (None, ""):
         return s
-    if _backoff_blocking():
-        log("warn", msg="資金異動略過：退避中")
-        return s
     start_ms = _transfer_start_ms(s)
     if start_ms is None:
+        now_ms = int(now_tpe().timestamp() * 1000)
+        log("capital_flow_init", capital_flow_last_ms=now_ms)
+        if not live:
+            out = dict(s)
+            out["capital_flow_last_ms"] = now_ms
+            out["capital_flow_seen"] = []
+            return out
+        s["capital_flow_last_ms"] = now_ms
+        s["capital_flow_seen"] = []
+        save_state(s)
+        return s
+    if start_ms is False:
         log("warn", msg="資金異動略過：capital_flow_last_ms 讀不懂")
+        return s
+    if _backoff_blocking():
+        log("warn", msg="資金異動略過：退避中")
         return s
     try:
         rows = req("GET", "/fapi/v1/income",

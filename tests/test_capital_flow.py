@@ -85,7 +85,7 @@ class CapitalFlowTest(unittest.TestCase):
         if os.path.exists(limit):
             os.remove(limit)
 
-    def _apply(self, state, live=True):
+    def _apply(self, state, live=True, now=None):
         store = Store(state)
 
         def fake_req(method, path, params=None, signed=False, retries=5):
@@ -99,7 +99,7 @@ class CapitalFlowTest(unittest.TestCase):
         buf = io.StringIO()
         with patch.object(lt, "req", fake_req), \
                 patch.object(lt, "log", side_effect=lambda kind, **kw: self.logs.append((kind, kw))), \
-                patch.object(lt, "now_tpe", return_value=NOW), \
+                patch.object(lt, "now_tpe", return_value=now or NOW), \
                 patch.object(lt, "load_state", side_effect=store.load), \
                 patch.object(lt, "save_state", side_effect=store.save):
             with redirect_stdout(buf):
@@ -109,6 +109,73 @@ class CapitalFlowTest(unittest.TestCase):
 
     def flows(self):
         return [kw for kind, kw in self.logs if kind == "capital_flow"]
+
+    def test_missing_cursor_bootstraps_without_reading(self):
+        deposit_at = int(datetime(2026, 11, 14, 20, 0, 10, tzinfo=lt.TPE).timestamp() * 1000)
+        self.rows = [transfer(430869042813, "238.16898", deposit_at)]
+        for missing in (None, ""):
+            with self.subTest(missing=missing):
+                self.logs.clear()
+                self.calls.clear()
+                state = base_state(day_start_equity=10238.16898, capital_flow_last_ms=missing,
+                                   capital_flow_seen=["430869042813"])
+                out, store, _text = self._apply(state, live=True)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(out["day_start_equity"], 10238.16898)
+                self.assertEqual(out["capital_flow_last_ms"], int(NOW.timestamp() * 1000))
+                self.assertEqual(out["capital_flow_seen"], [])
+                self.assertEqual(store.state["capital_flow_last_ms"], int(NOW.timestamp() * 1000))
+                self.assertEqual(store.state["capital_flow_seen"], [])
+                self.assertEqual(store.state["day_start_equity"], 10238.16898)
+                self.assertEqual([kind for kind, _kw in self.logs], ["capital_flow_init"])
+                self.assertEqual(self.flows(), [])
+
+    def test_bootstrap_dry_run_logs_without_writing(self):
+        state = base_state()
+        del state["capital_flow_last_ms"]
+        out, store, _text = self._apply(state, live=False)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(store.saves, [])
+        self.assertNotIn("capital_flow_last_ms", store.state)
+        self.assertEqual(out["capital_flow_last_ms"], int(NOW.timestamp() * 1000))
+        self.assertEqual(out["capital_flow_seen"], [])
+        self.assertEqual(out["day_start_equity"], 10000.0)
+        self.assertEqual([kind for kind, _kw in self.logs], ["capital_flow_init"])
+
+    def test_first_run_after_bootstrap_skips_earlier_deposit(self):
+        later = datetime(2026, 11, 14, 21, 0, tzinfo=lt.TPE)
+        deposit_at = int(datetime(2026, 11, 14, 20, 0, 10, tzinfo=lt.TPE).timestamp() * 1000)
+        equity = 10238.16898
+        state = base_state(day_start_equity=equity, slice_margin=round(equity / lt.CFG["slices"], 4))
+        del state["capital_flow_last_ms"]
+        del state["capital_flow_seen"]
+        self.rows = [transfer(430869042813, "238.16898", deposit_at)]
+        _out, store, _text = self._apply(state, live=True, now=later)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(store.state["day_start_equity"], equity)
+        boot_ms = store.state["capital_flow_last_ms"]
+        self.assertEqual(boot_ms, int(later.timestamp() * 1000))
+        self.assertLess(deposit_at, boot_ms)
+        self.logs.clear()
+        self.calls.clear()
+        again, store2, _text = self._apply(store.state, live=True, now=later)
+        self.assertEqual(again["day_start_equity"], equity)
+        self.assertEqual(store2.state["day_start_equity"], equity)
+        self.assertEqual(self.flows(), [])
+        self.assertEqual(self.calls[0][2]["startTime"], boot_ms)
+        self.assertEqual(store2.state["capital_flow_seen"], [])
+
+    def test_corrupt_cursor_skips_without_changes(self):
+        self.rows = [transfer(1, "100", start_ms() + 1)]
+        state = base_state(capital_flow_last_ms="not-a-time", capital_flow_seen=["9"])
+        out, store, _text = self._apply(state)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(store.saves, [])
+        self.assertEqual(out["day_start_equity"], 10000.0)
+        self.assertEqual(out["capital_flow_last_ms"], "not-a-time")
+        self.assertEqual(out["capital_flow_seen"], ["9"])
+        self.assertTrue(any(kind == "warn" for kind, _kw in self.logs))
+        self.assertFalse(any(kind == "capital_flow_init" for kind, _kw in self.logs))
 
     def test_deposit_raises_baseline_and_slice(self):
         self.rows = [transfer(11, "1000", start_ms() + 1000)]

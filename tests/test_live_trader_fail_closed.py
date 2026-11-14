@@ -28,7 +28,8 @@ ACC = {
     "availableBalance": "700",
     "positions": [],
 }
-DAY = {"day_start_equity": 700.0, "slice_margin": 35.0, "halted_new": False, "killed": False}
+DAY = {"day_start_equity": 700.0, "slice_margin": 35.0, "halted_new": False, "killed": False,
+       "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 class LiveTraderFailClosedTest(unittest.TestCase):

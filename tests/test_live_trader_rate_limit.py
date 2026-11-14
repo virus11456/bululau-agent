@@ -29,7 +29,7 @@ ACC = {
     "positions": [],
 }
 DAY = {"day": "2026-11-14", "day_start_equity": 1000.0, "slice_margin": 50.0,
-       "halted_new": False, "killed": False}
+       "halted_new": False, "killed": False, "capital_flow_last_ms": 1, "capital_flow_seen": []}
 
 
 class Headers(object):

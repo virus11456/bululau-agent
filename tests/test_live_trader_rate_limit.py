@@ -236,6 +236,8 @@ class StatusCacheTest(unittest.TestCase):
 
         def open_req(method, path, params=None, signed=False, retries=5):
             calls.append(path)
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
             if path == "/fapi/v1/positionSide/dual":
                 return {"dualSidePosition": True}
             raise AssertionError(path)
@@ -442,6 +444,120 @@ class ManageStatusAndOrphanTest(unittest.TestCase):
         self.assertEqual(out["pending"]["XUSDT"]["orderId"], 1)
         self.assertEqual(out["day"], "2026-11-14")
         self.assertFalse(out["killed"])
+
+
+class ReadFailureAndOrphanTest(unittest.TestCase):
+    def test_with_status_algo_failure_is_not_zero(self):
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/openAlgoOrders":
+                raise lt.BinanceError(500, -1000, "algo down")
+            if path == "/fapi/v1/openOrders":
+                return []
+            if path in ("/fapi/v1/income", "/fapi/v1/userTrades"):
+                return []
+            raise AssertionError(path)
+
+        buf = io.StringIO()
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "account", return_value=dict(ACC)), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value={}), \
+                patch.object(lt, "save_state"), \
+                patch.object(lt, "log"):
+            with redirect_stdout(buf):
+                with self.assertRaises(lt.BinanceError):
+                    lt.cmd_manage(type("A", (), {"live": False, "with_status": True})())
+        text = buf.getvalue()
+        self.assertIn(lt.ALGO_ORDERS_UNREADABLE, text)
+        self.assertNotIn("條件單 0", text)
+
+    def test_algo_read_failure_does_not_flatten(self):
+        acc = dict(ACC)
+        acc["positions"] = [{"symbol": "XUSDT", "positionAmt": "2", "positionSide": "BOTH"}]
+        logs = []
+        calls = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path, (params or {}).get("symbol")))
+            if path == "/fapi/v1/openAlgoOrders":
+                raise lt.BinanceError(500, -1000, "algo down")
+            if path == "/fapi/v1/openOrders":
+                return []
+            if method == "POST":
+                raise AssertionError("讀取失敗不能市價平倉")
+            raise AssertionError((method, path))
+
+        buf = io.StringIO()
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "account", return_value=acc), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value={"pending": {}, "meta": {}}), \
+                patch.object(lt, "save_state"), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
+            with redirect_stdout(buf):
+                lt.cmd_manage(type("A", (), {"live": True, "with_status": False})())
+        self.assertFalse(any(m == "POST" for m, _p, _s in calls))
+        self.assertTrue(any(kw.get("symbol") == "XUSDT" and "跳過" in str(kw.get("msg")) for _k, kw in logs))
+        self.assertIn("條件單讀取失敗", buf.getvalue())
+        self.assertNotIn("市價平倉", buf.getvalue())
+
+    def test_close_and_reopen_clear_stale_symbol_orders(self):
+        state = {"orphan_scan_n": 1, "pending": {}, "meta": {"XUSDT": {"setup": "瘸師弟", "stop": "1", "target": "2"}}}
+        deleted = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            sym = (params or {}).get("symbol")
+            if path == "/fapi/v1/openAlgoOrders" and sym is None:
+                return []
+            if path == "/fapi/v1/openAlgoOrders" and sym == "XUSDT":
+                return [{"symbol": "XUSDT", "algoId": 9, "orderType": "TAKE_PROFIT_MARKET", "side": "SELL"}]
+            if path == "/fapi/v1/openOrders":
+                return []
+            if path in ("/fapi/v1/income", "/fapi/v1/userTrades"):
+                return []
+            if method == "DELETE" and path == "/fapi/v1/algoOrder":
+                deleted.append(params.get("algoId"))
+                return {}
+            raise AssertionError((method, path, sym))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "account", return_value=dict(ACC)), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value=json.loads(json.dumps(state))), \
+                patch.object(lt, "save_state"), \
+                patch.object(lt, "log"):
+            with redirect_stdout(io.StringIO()):
+                lt.cmd_manage(type("A", (), {"live": True, "with_status": False})())
+        self.assertIn(9, deleted)
+
+        deleted.clear()
+
+        def open_req(method, path, params=None, signed=False, retries=5):
+            sym = (params or {}).get("symbol")
+            if path == "/fapi/v1/openAlgoOrders":
+                return [{"symbol": "XUSDT", "algoId": 9, "orderType": "STOP_MARKET"}]
+            if path == "/fapi/v1/openOrders":
+                return []
+            if method == "DELETE" and path == "/fapi/v1/algoOrder":
+                deleted.append(params.get("algoId"))
+                return {}
+            if path == "/fapi/v1/positionSide/dual":
+                return {"dualSidePosition": True}
+            raise AssertionError((method, path, sym))
+
+        args = type("A", (), {
+            "live": True, "symbol": "XUSDT", "side": "BUY", "entry_type": "market",
+            "price": None, "stop": "1", "target": "2", "setup": "瘸師弟",
+            "leverage": None, "portion": 1.0,
+        })()
+        with patch.object(lt, "req", open_req), \
+                patch.object(lt, "account", return_value=dict(ACC)), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value={"pending": {}, "meta": {}}), \
+                patch.object(lt, "log"):
+            with self.assertRaises(SystemExit):
+                lt.cmd_open(args)
+        self.assertEqual(deleted, [9])
 
 
 if __name__ == "__main__":

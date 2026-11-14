@@ -16,7 +16,9 @@ Mac 的 `~/quantboy-live/live_trader.py` 不從 `config.py` 讀金鑰，sha1 前
 
 ## O2：`manage --with-status`
 
-只加在 `manage`。用這一輪已經拿到的帳戶、持倉、掛單印出跟 `status` 一樣的欄位，不再呼叫第二次 `account()`。沒有這個旗標時，manage 不印 status、也不多讀。
+只加在 `manage`。用這一輪已經拿到的帳戶印出跟 `status` 一樣的欄位，不再呼叫第二次 `account()`。條件單要另外做一次 fail-closed 的全量讀取；讀失敗印「條件單讀取失敗」並以非 0 結束，不能印「條件單 0」。沒有這個旗標時，manage 不印 status、也不多讀。
+
+某一幣的條件單或掛單讀失敗時，這一輪跳過該幣，記 log，不平倉。平倉後，以及同一幣沒有 pending 就再開倉之前，按幣清掉殘留的停損／止盈。
 
 ## O3：雙向與多資產只在 status 快取
 

@@ -2,7 +2,7 @@
 
 ## 2026-11-14（請求權重、減倉標記、平倉分類）
 
-- 418 立刻停、429 仍退避，並共用 `.ratelimit_until`。記下 `X-MBX-USED-WEIGHT-1M`，超過 1800 記 `weight_high`。`manage --with-status` 不再多讀一次帳戶。status 的雙向／多資產快取 1 小時，開倉仍即時查雙向。孤兒單改為每 4 輪全量掃一次，平倉那一輪也掃。
+- 418 立刻停、429 仍退避，並共用 `.ratelimit_until`。記下 `X-MBX-USED-WEIGHT-1M`，超過 1800 記 `weight_high`。`manage --with-status` 不再多讀一次帳戶；條件單讀失敗要印標記，不能印成 0。某一幣讀失敗就跳過，不平倉。平倉後和再開倉前按幣清殘留保護單。status 的雙向／多資產快取 1 小時，開倉仍即時查雙向。孤兒單改為每 4 輪全量掃一次，平倉那一輪也掃。
 - 階梯有一檔已結束、其餘還掛著時，watch 不再每分鐘叫 manage。減倉標記在階梯結束後仍留著。出場價對到 tick、已實現損益 4 位小數。滑價約 1% 或觸發後變成 MARKET 的 closePosition 止盈，記為止盈。手動全平會記 `position_closed`（reason=manual）並清 meta。
 
 ## 2026-11-14（平倉紀錄、watch 心跳、階梯不再空轉）

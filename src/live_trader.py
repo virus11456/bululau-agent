@@ -228,6 +228,41 @@ def open_orders(symbol=None):
     p = {"symbol": symbol} if symbol else {}
     return req("GET", "/fapi/v1/openOrders", p, signed=True)
 
+def cancel_symbol_orphans(sym, live):
+    """清掉這個幣上殘留的停損／止盈。平倉後、以及同一幣再開倉前都要做，避免舊單套到新倉。讀不到就不撤。"""
+    try:
+        algo = open_algo(sym, fail_closed=True) or []
+    except BinanceError as e:
+        log("warn", msg="條件單讀取失敗，本輪不撤孤兒單", symbol=sym, err=str(e))
+        algo = []
+    try:
+        oo = open_orders(sym) or []
+    except BinanceError as e:
+        log("warn", msg="掛單讀取失敗，本輪不撤孤兒單", symbol=sym, err=str(e))
+        oo = []
+    for o in algo:
+        if o.get("symbol") not in (None, sym):
+            continue
+        print("孤兒條件單", sym, o.get("algoId"))
+        if live:
+            try:
+                req("DELETE", "/fapi/v1/algoOrder", {"algoId": o["algoId"]}, signed=True)
+                log("cancel_orphan", order=o)
+            except BinanceError as e:
+                log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
+    for o in oo:
+        if o.get("symbol") not in (None, sym):
+            continue
+        if o.get("type") not in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"):
+            continue
+        print("孤兒條件單(舊端點)", sym, o.get("orderId"))
+        if live:
+            try:
+                req("DELETE", "/fapi/v1/order", {"symbol": sym, "orderId": o["orderId"]}, signed=True)
+                log("cancel_orphan", order=o)
+            except BinanceError as e:
+                log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
+
 def place_protect(symbol, close_side, otype, trigger, live, qty=None):
     """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
     size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
@@ -476,6 +511,8 @@ def open_ladder(a):
         raise SystemExit("已達同時 5 倉上限")
     if any(p["symbol"] == sym for p in pos):
         raise SystemExit("{0} 已有倉位（單幣最多 1 份）".format(sym))
+    if sym not in (load_state().get("pending") or {}):
+        cancel_symbol_orphans(sym, live)
     if req("GET", "/fapi/v1/positionSide/dual", signed=True).get("dualSidePosition"):
         if live:
             raise SystemExit("帳戶是雙向持倉模式，本模組只支援單向，請先改成單向")
@@ -674,6 +711,8 @@ def cmd_open(a):
     pos = positions(acc)
     if len(pos) >= CFG["max_positions"]: raise SystemExit("已達同時 5 倉上限")
     if any(p["symbol"] == sym for p in pos): raise SystemExit(f"{sym} 已有倉位（單幣最多 1 份）")
+    if sym not in (load_state().get("pending") or {}):
+        cancel_symbol_orphans(sym, live)
     if req("GET", "/fapi/v1/positionSide/dual", signed=True).get("dualSidePosition"):
         if live: raise SystemExit("帳戶是雙向持倉模式，本模組只支援單向，請先改成單向")
         print("  ⚠ 帳戶目前是雙向持倉模式，--live 會被拒絕（dry-run 繼續）")
@@ -997,15 +1036,18 @@ def cmd_manage(a):
     st["orphan_scan_n"] = scan_n
     known = set(held_amt) | set(st.get("pending") or {}) | set(st.get("meta") or {})
     oo_known, algo_known = [], []
+    order_unread = set()
     for sym in sorted(known):
         try:
             oo_known.extend(open_orders(sym) or [])
         except BinanceError as e:
-            log("warn", msg="openOrders 失敗", symbol=sym, err=str(e))
+            log("warn", msg="openOrders 失敗，本輪跳過", symbol=sym, err=str(e))
+            order_unread.add(sym)
         try:
-            algo_known.extend(open_algo(sym) or [])
+            algo_known.extend(open_algo(sym, fail_closed=True) or [])
         except BinanceError as e:
-            log("warn", msg="openAlgoOrders 失敗", symbol=sym, err=str(e))
+            log("warn", msg="條件單讀取失敗，本輪跳過", symbol=sym, err=str(e))
+            order_unread.add(sym)
     # 第 1、5、9… 輪做全量孤兒掃描，和以前每次都掃的結果在這些輪相同。
     # 平倉那一輪也全量掃，避免剛平掉的幣上的保護單要等下一輪。
     full_orphan = (scan_n % ORPHAN_SCAN_EVERY == 1)
@@ -1014,6 +1056,10 @@ def cmd_manage(a):
     oo = oo_known
     for p in positions(acc):
         sym = p["symbol"]; amt = float(p["positionAmt"]); close_side = "SELL" if amt > 0 else "BUY"
+        if sym in order_unread:
+            log("warn", msg="條件單讀取失敗，本輪不判斷停損、不平倉", symbol=sym)
+            print("{0} {1}".format(sym, ALGO_ORDERS_UNREADABLE))
+            continue
         types = {(o.get("orderType") or o.get("type")) for o in algo if o.get("symbol") == sym}
         types |= {o["type"] for o in oo if o["symbol"] == sym}
         has_sl = "STOP_MARKET" in types or "STOP" in types
@@ -1086,6 +1132,7 @@ def cmd_manage(a):
         print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label(closed["reason"]), py))
         st["meta"].pop(sym, None)
         closed_note = True
+        cancel_symbol_orphans(sym, live)
     if closed_note:
         full_orphan = True
     if full_orphan:
@@ -1109,8 +1156,14 @@ def cmd_manage(a):
             if live: req("DELETE", "/fapi/v1/order", {"symbol": o["symbol"], "orderId": o["orderId"]}, signed=True); log("cancel_orphan", order=o)
     print(f"當日虧損 {dl*100:.2f}%  持倉 {len(held)}")
     if getattr(a, "with_status", False):
+        try:
+            status_oo = open_orders() or []
+            status_ao = open_algo(fail_closed=True)
+        except BinanceError:
+            print(ALGO_ORDERS_UNREADABLE)
+            raise
         dual, multi = status_account_mode()
-        print_status_body(acc, s, positions(acc), oo, algo, dual, multi)
+        print_status_body(acc, s, positions(acc), status_oo, status_ao, dual, multi)
 
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；

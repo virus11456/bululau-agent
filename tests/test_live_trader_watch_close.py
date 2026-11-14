@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -96,7 +97,7 @@ class CloseAndHeartbeatTest(unittest.TestCase):
             lt.cmd_manage(type("A", (), {"live": True})())
         self.assertEqual(saved[-1]["meta"], {})
         closed = [kw for kind, kw in logs if kind == "position_closed"]
-        self.assertEqual(closed[0]["pnl"], 1.25)
+        self.assertEqual(closed[0]["pnl"], "1.2500")
 
     def test_heartbeat_at_most_once_per_hour_and_no_api(self):
         store = {"pending": {}}
@@ -197,12 +198,16 @@ class LadderWatchTest(unittest.TestCase):
         self.watch()
         self.assertEqual(self.managed, [1])
 
-    def test_finished_levels_trigger_even_if_qty_unchanged(self):
-        self.ladder(status="FILLED", executed="2", last_exec=5.0,
-                    algos=[_algo("XUSDT", "STOP_MARKET", 9), _algo("XUSDT", "TAKE_PROFIT_MARKET", 8)])
-        self.orders[2] = {"orderId": 2, "status": "FILLED", "executedQty": "3"}
+    def test_one_filled_level_does_not_call_manage_every_minute(self):
+        both = [_algo("XUSDT", "STOP_MARKET", 9), _algo("XUSDT", "TAKE_PROFIT_MARKET", 8)]
+        self.ladder(status="FILLED", executed="2", algos=both)
+        self.watch()
         self.watch()
         self.assertEqual(self.managed, [1])
+        self.assertEqual(self.store["pending"]["XUSDT"]["last_done"], 1)
+        self.orders[2] = {"orderId": 2, "status": "FILLED", "executedQty": "3"}
+        self.watch()
+        self.assertEqual(self.managed, [1, 1])
 
     def test_single_order_watch_is_unchanged(self):
         # 單張：掛著且沒成交，就算沒有止盈也不叫 manage。終結了才叫。
@@ -372,8 +377,8 @@ class MarkReducedTest(unittest.TestCase):
         self.assertEqual(sl["exit_side"], "SELL")
         self.assertEqual(sl["qty"], "2")
         self.assertEqual(sl["exit_price"], "100.1")
-        self.assertEqual(sl["pnl"], -1)
-        self.assertIn("出場價 100.1 觸發=停損 已實現 -1", text)
+        self.assertEqual(sl["pnl"], "-1.0000")
+        self.assertIn("出場價 100.1 觸發=停損 已實現 -1.0000", text)
 
         tp, text = run([
             {"side": "SELL", "price": "119.8", "qty": "1", "realizedPnl": "3", "time": 3},
@@ -389,6 +394,222 @@ class MarkReducedTest(unittest.TestCase):
         self.assertIsNone(bad["exit_price"])
         self.assertEqual(bad["reason"], "unknown")
         self.assertIn("出場價 null 觸發=未知", text)
+
+    def test_shell_tp_slippage_over_0_3_pct_is_tp(self):
+        # 實盤：SHELLUSDT 出場 0.03908、目標 0.03869，約 1%。沒有訂單類型也要靠放寬的價差帶。
+        state = {"pending": {}, "meta": {"SHELLUSDT": {"setup": "布鹿流", "stop": "0.03000", "target": "0.03869"}}}
+        logs = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/userTrades":
+                return [{"side": "SELL", "price": "0.03908", "qty": "100", "realizedPnl": "1", "time": 5}]
+            if path == "/fapi/v1/income":
+                return [{"income": "1"}]
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=ACC), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value=state), \
+                patch.object(lt, "save_state"):
+            lt.cmd_manage(type("A", (), {"live": False})())
+        closed = [kw for kind, kw in logs if kind == "position_closed"]
+        self.assertEqual(closed[0]["reason"], "tp")
+        self.assertEqual(closed[0]["symbol"], "SHELLUSDT")
+
+    def test_market_trigger_uses_close_position_algo(self):
+        # 觸發後的實單是 MARKET，價又離目標很遠。要對到條件單歷史才知道是止盈。
+        state = {"pending": {}, "meta": {"SHELLUSDT": {"setup": "布鹿流", "stop": "0.03000", "target": "0.03869"}}}
+        logs = []
+        calls = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path, dict(params or {})))
+            if path == "/fapi/v1/userTrades":
+                return [{"side": "SELL", "price": "0.05000", "qty": "10", "realizedPnl": "1",
+                         "time": 9, "orderId": 1041970304}]
+            if path == "/fapi/v1/order":
+                return {"orderId": 1041970304, "type": "MARKET", "origType": "MARKET", "symbol": "SHELLUSDT"}
+            if path == "/fapi/v1/allAlgoOrders":
+                self.assertEqual(method, "GET")
+                return [{
+                    "algoId": 3000002369870752,
+                    "actualOrderId": "1041970304",
+                    "orderType": "TAKE_PROFIT_MARKET",
+                    "closePosition": True,
+                    "symbol": "SHELLUSDT",
+                }]
+            if path == "/fapi/v1/income":
+                return []
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=ACC), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value=state), \
+                patch.object(lt, "save_state"):
+            lt.cmd_manage(type("A", (), {"live": False})())
+        closed = [kw for kind, kw in logs if kind == "position_closed"]
+        self.assertEqual(closed[0]["reason"], "tp")
+        self.assertTrue(any(m == "GET" and p == "/fapi/v1/allAlgoOrders" for m, p, _q in calls))
+        self.assertFalse(any(m != "GET" for m, _p, _q in calls))
+
+    def test_plain_market_far_from_stop_and_target_stays_other(self):
+        state = {"pending": {}, "meta": {"XUSDT": {"setup": "瘸師弟", "stop": "100", "target": "120"}}}
+        logs = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/userTrades":
+                return [{"side": "SELL", "price": "150", "qty": "1", "realizedPnl": "1", "time": 3, "orderId": 7}]
+            if path == "/fapi/v1/order":
+                return {"orderId": 7, "type": "MARKET", "origType": "MARKET"}
+            if path == "/fapi/v1/allAlgoOrders":
+                return []
+            if path == "/fapi/v1/income":
+                return []
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=ACC), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value=state), \
+                patch.object(lt, "save_state"):
+            lt.cmd_manage(type("A", (), {"live": False})())
+        closed = [kw for kind, kw in logs if kind == "position_closed"]
+        self.assertEqual(closed[0]["reason"], "other")
+
+    def test_exit_price_quantizes_to_tick_and_pnl_to_4dp(self):
+        state = {"pending": {}, "meta": {"XUSDT": {"setup": "瘸師弟", "stop": "0.01", "target": "0.03"}}}
+        logs = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/userTrades":
+                return [
+                    {"side": "SELL", "price": "0.02083", "qty": "2", "realizedPnl": "1", "time": 2},
+                    {"side": "SELL", "price": "0.02085", "qty": "1", "realizedPnl": "1", "time": 3},
+                ]
+            if path == "/fapi/v1/income":
+                return [{"income": "-9.354600999999999"}]
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        def fake_info(_symbol):
+            return {"tick": Decimal("0.00001")}
+
+        buf = io.StringIO()
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "sym_info", fake_info), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=ACC), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", return_value=state), \
+                patch.object(lt, "save_state"):
+            with redirect_stdout(buf):
+                lt.cmd_manage(type("A", (), {"live": False})())
+        closed = [kw for kind, kw in logs if kind == "position_closed"][0]
+        text = buf.getvalue()
+        self.assertEqual(closed["exit_price"], "0.02084")
+        self.assertIn("exit_price_raw", closed)
+        self.assertNotIn("0.020837", text)
+        self.assertEqual(closed["pnl"], "-9.3546")
+        self.assertIn("pnl_raw", closed)
+        self.assertIn("出場價 0.02084", text)
+        self.assertIn("已實現 -9.3546", text)
+        self.assertNotIn("-9.354600999999999", text)
+
+    def test_manual_flatten_writes_position_closed_and_drops_meta(self):
+        state = {"pending": {}, "meta": {"XUSDT": {"setup": "布鹿流", "stop": "1", "target": "2"}}}
+        saved = []
+        logs = []
+        acc = dict(ACC)
+        acc["positions"] = [{"symbol": "XUSDT", "positionAmt": "3", "positionSide": "BOTH"}]
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if method == "POST" and path == "/fapi/v1/order":
+                return {"orderId": 1}
+            if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
+            raise AssertionError((method, path))
+
+        def load():
+            return json.loads(json.dumps(state))
+
+        def save(s):
+            state.clear()
+            state.update(json.loads(json.dumps(s)))
+            saved.append(json.loads(json.dumps(s)))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=acc), \
+                patch.object(lt, "load_state", side_effect=load), \
+                patch.object(lt, "save_state", side_effect=save):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                lt.flatten_all(True, "manual_flatten")
+        closed = [kw for kind, kw in logs if kind == "position_closed"]
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["reason"], "manual")
+        self.assertEqual(closed[0]["symbol"], "XUSDT")
+        self.assertEqual(closed[0]["qty"], "3")
+        self.assertNotIn("XUSDT", state.get("meta") or {})
+        self.assertTrue(saved)
+        self.assertIn("觸發=手動", buf.getvalue())
+        self.assertTrue(any(kind == "market_close" and kw.get("reason") == "manual_flatten" for kind, kw in logs))
+
+    def test_ladder_finish_keeps_reduced_flags(self):
+        state = {
+            "pending": {"XUSDT": {
+                "ladder": True, "stop": "90", "target": "120", "setup": "布鹿流",
+                "orders": [{"orderId": 1}],
+            }},
+            "meta": {"XUSDT": {"setup": "布鹿流", "stop": "100.23", "target": "120", "reduced": True, "no_tp": True}},
+        }
+        acc = dict(ACC)
+        acc["positions"] = [{"symbol": "XUSDT", "positionAmt": "4", "positionSide": "BOTH"}]
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if method == "GET" and path == "/fapi/v1/order":
+                return {"orderId": 1, "status": "FILLED", "executedQty": "4", "origQty": "4"}
+            if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                return [
+                    {"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9, "quantity": "4",
+                     "closePosition": "false", "triggerPrice": "100.23"},
+                    {"symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 8, "quantity": "4",
+                     "closePosition": "false", "triggerPrice": "120"},
+                ] if "Algo" in path else []
+            raise AssertionError((method, path))
+
+        def load():
+            return json.loads(json.dumps(state))
+
+        def save(s):
+            state.clear()
+            state.update(json.loads(json.dumps(s)))
+
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log"), \
+                patch.object(lt, "account", return_value=acc), \
+                patch.object(lt, "day_state", return_value=dict(DAY)), \
+                patch.object(lt, "load_state", side_effect=load), \
+                patch.object(lt, "save_state", side_effect=save):
+            lt.cmd_manage(type("A", (), {"live": True})())
+        meta = state["meta"]["XUSDT"]
+        self.assertNotIn("XUSDT", state["pending"])
+        self.assertTrue(meta["reduced"])
+        self.assertTrue(meta["no_tp"])
+        self.assertEqual(meta["stop"], "100.23")
+        self.assertEqual(meta["target"], "120")
 
 
 class SingleOrderUnchangedTest(unittest.TestCase):
@@ -432,11 +653,23 @@ class SingleOrderUnchangedTest(unittest.TestCase):
                     mod.cmd_manage(type("A", (), {"live": True})())
             return calls, buf.getvalue(), logs
 
+        def posts(calls):
+            return [(m, p, params) for m, p, params in calls if m == "POST"]
+
+        def slim(logs):
+            out = []
+            for kind, kw in logs:
+                kw = dict(kw)
+                kw.pop("resp", None)
+                out.append((kind, kw))
+            return out
+
         old_calls, old_out, old_logs = run(old)
         new_calls, new_out, new_logs = run(lt)
-        self.assertEqual(new_calls, old_calls)
+        # O5 多了依幣種與定期全量的讀取；下單內容（方向、觸發價、數量、closePosition）不變。
+        self.assertEqual(posts(new_calls), posts(old_calls))
         self.assertEqual(new_out, old_out)
-        self.assertEqual(new_logs, old_logs)
+        self.assertEqual(slim(new_logs), slim(old_logs))
 
 
 if __name__ == "__main__":

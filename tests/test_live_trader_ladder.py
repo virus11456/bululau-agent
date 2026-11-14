@@ -266,13 +266,13 @@ class ManageLadderTest(unittest.TestCase):
             done = lt.manage_ladder_pending("PIEVERSEUSDT", pd, {"PIEVERSEUSDT": 2.0}, True)
         self.assertFalse(done)
         posted = [c for c in calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
-        self.assertEqual(len(posted), 2)
-        self.assertTrue(all(c[2]["quantity"] == "2" for c in posted))
-        self.assertEqual(posted[0][2]["triggerPrice"], "92.15")
-        self.assertEqual(posted[1][2]["triggerPrice"], "101.02")
-        cancels = [c for c in calls if c[0] == "DELETE"]
-        self.assertEqual(len(cancels), 2)
-        self.assertTrue(all(c[1] == "/fapi/v1/algoOrder" for c in cancels))
+        # 停損原本就是計畫總量 10，不縮小。止盈才改成實際持倉 2，觸發價不變。
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0][2]["type"], "TAKE_PROFIT_MARKET")
+        self.assertEqual(posted[0][2]["quantity"], "2")
+        self.assertEqual(posted[0][2]["triggerPrice"], "101.02")
+        self.assertEqual(posted[0][2]["reduceOnly"], "true")
+        self.assertNotIn("closePosition", posted[0][2])
 
     def test_flat_after_stop_cancels_resting_levels(self):
         calls = []

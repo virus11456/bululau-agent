@@ -3,7 +3,7 @@
 預設 dry-run；真實下單需加 --live 參數。資料目錄見 config.py。"""
 import os, sys, json, time, hmac, hashlib, argparse, fcntl, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, ROUND_HALF_UP
 from config import data_dir, events_path, load_api_keys
 
 BASE = "https://fapi.binance.com"
@@ -33,9 +33,74 @@ def tpe_ms(ms):
 class BinanceError(Exception):
     def __init__(self, status, code, msg): self.status, self.code, self.msg = status, code, msg; super().__init__(f"HTTP {status} code {code}: {msg}")
 
+# 跨程序共用。Mac 上是 ~/quantboy-live/.ratelimit_until。壞掉或沒有檔就當作沒有退避。
+RATELIMIT_NAME = ".ratelimit_until"
+WEIGHT_HIGH = 1800
+WEIGHT_1M_MAX = 0
+ORPHAN_SCAN_EVERY = 4
+ACCOUNT_MODE_NAME = ".account_mode_cache.json"
+ACCOUNT_MODE_TTL_S = 3600
+
+def _ratelimit_path():
+    return os.path.join(HOME, RATELIMIT_NAME)
+
+def read_ratelimit():
+    """回傳 (status, until_epoch)。檔案不在、空的、或格式不對就回 None。"""
+    try:
+        with open(_ratelimit_path()) as handle:
+            text = handle.read().strip()
+        status_s, until_s = text.split()
+        status = int(status_s)
+        until = float(until_s)
+    except Exception:
+        return None
+    if status not in (418, 429) or until != until:
+        return None
+    return status, until
+
+def write_ratelimit(status, until):
+    path = _ratelimit_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        handle.write("{0} {1}\n".format(int(status), float(until)))
+    os.replace(tmp, path)
+
+def _note_weight(headers):
+    """記下本程序看過的最高 X-MBX-USED-WEIGHT-1M。超過 1800 只記 log，不改請求。"""
+    global WEIGHT_1M_MAX
+    if headers is None or not hasattr(headers, "get"):
+        return
+    raw = headers.get("X-MBX-USED-WEIGHT-1M")
+    if raw is None:
+        raw = headers.get("x-mbx-used-weight-1m")
+    if raw is None:
+        return
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return
+    if value > WEIGHT_1M_MAX:
+        WEIGHT_1M_MAX = value
+    if value > WEIGHT_HIGH:
+        log("weight_high", weight=value)
+
+def _honor_ratelimit(path):
+    gate = read_ratelimit()
+    if not gate:
+        return
+    status, until = gate
+    remain = until - time.time()
+    if remain <= 0:
+        return
+    if status == 418:
+        log("backoff_418", path=path, wait=round(remain, 3), weight=WEIGHT_1M_MAX)
+        raise BinanceError(418, -1003, "shared 418 backoff")
+    time.sleep(remain)
+
 def req(method, path, params=None, signed=False, retries=5):
     params = dict(params or {})
     for attempt in range(retries):
+        _honor_ratelimit(path)
         p = dict(params); headers = {}
         if signed:
             key, sec = _keys()
@@ -49,14 +114,23 @@ def req(method, path, params=None, signed=False, retries=5):
         r = urllib.request.Request(url, method=method, headers=headers)
         try:
             with urllib.request.urlopen(r, timeout=15) as resp:
+                _note_weight(getattr(resp, "headers", None))
                 return json.loads(resp.read() or "null")
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
+            _note_weight(getattr(e, "headers", None))
             try: j = json.loads(body); code, msg = j.get("code"), j.get("msg")
             except Exception: code, msg = None, body[:200]
-            if e.code in (429, 418) or code == -1003:
+            if e.code == 418:
+                wait = int(e.headers.get("Retry-After") or 0) or 60
+                write_ratelimit(418, time.time() + wait)
+                log("backoff_418", path=path, status=418, code=code, wait=wait, weight=WEIGHT_1M_MAX)
+                raise BinanceError(418, code, msg)
+            if e.code == 429 or code == -1003:
                 wait = int(e.headers.get("Retry-After") or 0) or min(60, 2 ** (attempt + 1))
-                log("backoff", path=path, status=e.code, code=code, wait=wait); time.sleep(wait); continue
+                write_ratelimit(429, time.time() + wait)
+                log("backoff", path=path, status=e.code, code=code, wait=wait, weight=WEIGHT_1M_MAX)
+                time.sleep(wait); continue
             if e.code >= 500 and attempt < retries - 1: time.sleep(2 ** attempt); continue
             raise BinanceError(e.code, code, msg)
         except urllib.error.URLError as e:
@@ -153,6 +227,41 @@ def open_algo(symbol=None, *, fail_closed=False):
 def open_orders(symbol=None):
     p = {"symbol": symbol} if symbol else {}
     return req("GET", "/fapi/v1/openOrders", p, signed=True)
+
+def cancel_symbol_orphans(sym, live):
+    """清掉這個幣上殘留的停損／止盈。平倉後、以及同一幣再開倉前都要做，避免舊單套到新倉。讀不到就不撤。"""
+    try:
+        algo = open_algo(sym, fail_closed=True) or []
+    except BinanceError as e:
+        log("warn", msg="條件單讀取失敗，本輪不撤孤兒單", symbol=sym, err=str(e))
+        algo = []
+    try:
+        oo = open_orders(sym) or []
+    except BinanceError as e:
+        log("warn", msg="掛單讀取失敗，本輪不撤孤兒單", symbol=sym, err=str(e))
+        oo = []
+    for o in algo:
+        if o.get("symbol") not in (None, sym):
+            continue
+        print("孤兒條件單", sym, o.get("algoId"))
+        if live:
+            try:
+                req("DELETE", "/fapi/v1/algoOrder", {"algoId": o["algoId"]}, signed=True)
+                log("cancel_orphan", order=o)
+            except BinanceError as e:
+                log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
+    for o in oo:
+        if o.get("symbol") not in (None, sym):
+            continue
+        if o.get("type") not in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"):
+            continue
+        print("孤兒條件單(舊端點)", sym, o.get("orderId"))
+        if live:
+            try:
+                req("DELETE", "/fapi/v1/order", {"symbol": sym, "orderId": o["orderId"]}, signed=True)
+                log("cancel_orphan", order=o)
+            except BinanceError as e:
+                log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
 
 def place_protect(symbol, close_side, otype, trigger, live, qty=None):
     """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
@@ -402,6 +511,8 @@ def open_ladder(a):
         raise SystemExit("已達同時 5 倉上限")
     if any(p["symbol"] == sym for p in pos):
         raise SystemExit("{0} 已有倉位（單幣最多 1 份）".format(sym))
+    if sym not in (load_state().get("pending") or {}):
+        cancel_symbol_orphans(sym, live)
     if req("GET", "/fapi/v1/positionSide/dual", signed=True).get("dualSidePosition"):
         if live:
             raise SystemExit("帳戶是雙向持倉模式，本模組只支援單向，請先改成單向")
@@ -519,16 +630,65 @@ def open_ladder(a):
     return plan
 # --- kuai ladder (paste end) ---
 
-# ---------- 指令 ----------
-def cmd_status(a):
-    acc = account(); s = day_state(acc); eq = equity_of(acc)
-    pos = positions(acc)
+def _account_mode_path():
+    return os.path.join(HOME, ACCOUNT_MODE_NAME)
+
+def read_account_mode():
+    """status 用的 dual／multiAssets 快取。壞掉、過期、或不在就回 None。"""
+    try:
+        with open(_account_mode_path()) as handle:
+            data = json.load(handle)
+        if time.time() - float(data.get("ts") or 0) > ACCOUNT_MODE_TTL_S:
+            return None
+        return data.get("dual"), data.get("multi")
+    except Exception:
+        return None
+
+def write_account_mode(dual, multi):
+    path = _account_mode_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump({"ts": time.time(), "dual": dual, "multi": multi}, handle)
+    os.replace(tmp, path)
+
+def fetch_account_mode():
+    dual = req("GET", "/fapi/v1/positionSide/dual", signed=True)
+    try:
+        multi = req("GET", "/fapi/v1/multiAssetsMargin", signed=True)
+    except BinanceError as e:
+        multi = {"err": str(e)}
+    try:
+        write_account_mode(dual, multi)
+    except Exception:
+        pass
+    return dual, multi
+
+def status_account_mode():
+    """只給 status（以及 manage --with-status）用。open 不走這裡。"""
+    cached = read_account_mode()
+    if cached is not None:
+        return cached
+    return fetch_account_mode()
+
+def print_status_body(acc, s, pos, oo, ao, dual, multi):
+    eq = equity_of(acc)
     print(f"時間 {now_tpe():%Y-%m-%d %H:%M} 台北")
     print(f"錢包 {float(acc['totalWalletBalance']):.2f}  未實現 {float(acc['totalUnrealizedProfit']):+.2f}  淨值 {eq:.2f}  可用 {float(acc['availableBalance']):.2f} USDT")
     print(f"日初淨值 {s['day_start_equity']:.2f}  當日損益 {eq - s['day_start_equity']:+.2f} ({-daily_loss_pct(acc, s)*100:.2f}% 虧損側)  每份保證金 {s['slice_margin']:.2f}")
     print(f"停開新倉 {s['halted_new']}  全平旗標 {s['killed'] or os.path.exists(HALT_FLAG)}")
     print(f"持倉 {len(pos)}/{CFG['max_positions']}")
     for p in pos: print(f"  {p['symbol']} 數量 {p['positionAmt']} 進場 {p['entryPrice']} 未實現 {float(p['unrealizedProfit']):+.2f} 槓桿 {p['leverage']} 逐倉 {p['isolated']}")
+    print(f"一般掛單 {len(oo)}  條件單 {len(ao)}")
+    for o in oo: print(f"  {o['symbol']} {o['side']} {o['type']} 價 {o.get('price')} 觸發 {o.get('stopPrice')} 掛於 {tpe_ms(o.get('time'))} id {o.get('orderId')}")
+    for o in ao:
+        created = o.get("createTime") or o.get("bookTime") or o.get("time") or o.get("updateTime")
+        print(f"  [algo] {o.get('symbol')} {o.get('side')} {o.get('orderType') or o.get('type')} 觸發 {o.get('triggerPrice')} 掛於 {tpe_ms(created)} id {o.get('algoId')}")
+    print(f"雙向持倉 {dual.get('dualSidePosition')}  多資產模式 {multi.get('multiAssetsMargin', multi)}")
+
+# ---------- 指令 ----------
+def cmd_status(a):
+    acc = account(); s = day_state(acc)
+    pos = positions(acc)
     oo = open_orders()
     try:
         ao = open_algo(fail_closed=True)
@@ -536,15 +696,8 @@ def cmd_status(a):
         # 先印標記再拋出。main() 會以非 0 結束；即使有人忽略結束碼，這一行也不是「條件單 0」。
         print(ALGO_ORDERS_UNREADABLE)
         raise
-    print(f"一般掛單 {len(oo)}  條件單 {len(ao)}")
-    for o in oo: print(f"  {o['symbol']} {o['side']} {o['type']} 價 {o.get('price')} 觸發 {o.get('stopPrice')} 掛於 {tpe_ms(o.get('time'))} id {o.get('orderId')}")
-    for o in ao:
-        created = o.get("createTime") or o.get("bookTime") or o.get("time") or o.get("updateTime")
-        print(f"  [algo] {o.get('symbol')} {o.get('side')} {o.get('orderType') or o.get('type')} 觸發 {o.get('triggerPrice')} 掛於 {tpe_ms(created)} id {o.get('algoId')}")
-    dual = req("GET", "/fapi/v1/positionSide/dual", signed=True)
-    try: multi = req("GET", "/fapi/v1/multiAssetsMargin", signed=True)
-    except BinanceError as e: multi = {"err": str(e)}
-    print(f"雙向持倉 {dual.get('dualSidePosition')}  多資產模式 {multi.get('multiAssetsMargin', multi)}")
+    dual, multi = status_account_mode()
+    print_status_body(acc, s, pos, oo, ao, dual, multi)
 
 def cmd_open(a):
     live = a.live; sym = a.symbol.upper(); side = a.side.upper()
@@ -558,6 +711,8 @@ def cmd_open(a):
     pos = positions(acc)
     if len(pos) >= CFG["max_positions"]: raise SystemExit("已達同時 5 倉上限")
     if any(p["symbol"] == sym for p in pos): raise SystemExit(f"{sym} 已有倉位（單幣最多 1 份）")
+    if sym not in (load_state().get("pending") or {}):
+        cancel_symbol_orphans(sym, live)
     if req("GET", "/fapi/v1/positionSide/dual", signed=True).get("dualSidePosition"):
         if live: raise SystemExit("帳戶是雙向持倉模式，本模組只支援單向，請先改成單向")
         print("  ⚠ 帳戶目前是雙向持倉模式，--live 會被拒絕（dry-run 繼續）")
@@ -633,7 +788,8 @@ def cmd_open(a):
 
 def flatten_all(live, reason):
     acc = account()
-    for p in positions(acc):
+    held = list(positions(acc))
+    for p in held:
         market_close(p["symbol"], float(p["positionAmt"]), live, reason)
     for o in open_orders():
         if live: req("DELETE", "/fapi/v1/allOpenOrders", {"symbol": o["symbol"]}, signed=True)
@@ -641,6 +797,38 @@ def flatten_all(live, reason):
     for o in open_algo():
         if live: req("DELETE", "/fapi/v1/algoOrder", {"algoId": o["algoId"]}, signed=True)
         else: print("  [dry-run] 取消 algo", o.get("symbol"), o.get("algoId"))
+    if reason == "manual_flatten":
+        _record_manual_flat(live, held)
+
+def _record_manual_flat(live, held):
+    """手動全平要記 position_closed（reason=manual）並清掉 meta。dry-run 只記 log，不存檔。"""
+    st = load_state()
+    meta = st.get("meta") or {}
+    changed = False
+    for p in held:
+        sym = p.get("symbol")
+        if sym not in meta:
+            continue
+        m = meta.get(sym) or {}
+        try:
+            qty = fmt(abs(Decimal(str(p.get("positionAmt") or "0"))))
+        except Exception:
+            qty = None
+        try:
+            amt = float(p.get("positionAmt") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        side = "SELL" if amt > 0 else "BUY"
+        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+            exit_price=None, exit_side=side, qty=qty, reason="manual", pnl=None)
+        print("{0} 已平倉 出場價 null 觸發=手動 已實現 null".format(sym))
+        meta.pop(sym, None)
+        changed = True
+    if not changed:
+        return
+    st["meta"] = meta
+    if live:
+        save_state(st)
 
 def _price_gap(vwap, ref):
     try:
@@ -652,24 +840,79 @@ def _price_gap(vwap, ref):
         return None
 
 
-def classify_exit(vwap, meta, order_type):
-    """0.3% 以內對上 meta.stop / meta.target。對不上再看訂單類型。都沒有就是其他。"""
-    meta = meta or {}
-    band = Decimal("0.003")
-    ds = _price_gap(vwap, meta.get("stop"))
-    dt = _price_gap(vwap, meta.get("target"))
-    sl_ok = ds is not None and ds <= band
-    tp_ok = dt is not None and dt <= band
-    if sl_ok and (not tp_ok or ds <= dt):
-        return "stop"
-    if tp_ok:
-        return "tp"
-    kind = str(order_type or "").upper()
+# 1.5%。SHELL 止盈滑價約 1%（0.03908 / 目標 0.03869），0.3% 會被記成「其他」。
+EXIT_MATCH_BAND = Decimal("0.015")
+
+def _kind_reason(kind):
+    kind = str(kind or "").upper()
     if "TAKE" in kind:
         return "tp"
     if "STOP" in kind:
         return "stop"
+    return None
+
+def classify_exit(vwap, meta, order_type, algo_type=None):
+    """條件單或原單類型先算（closePosition 的止盈／停損觸發後實單常是 MARKET）。
+    類型對不上時，再用 1.5% 對 meta.stop / meta.target。都沒有就是其他。"""
+    for kind in (algo_type, order_type):
+        reason = _kind_reason(kind)
+        if reason:
+            return reason
+    meta = meta or {}
+    ds = _price_gap(vwap, meta.get("stop"))
+    dt = _price_gap(vwap, meta.get("target"))
+    sl_ok = ds is not None and ds <= EXIT_MATCH_BAND
+    tp_ok = dt is not None and dt <= EXIT_MATCH_BAND
+    if sl_ok and (not tp_ok or ds <= dt):
+        return "stop"
+    if tp_ok:
+        return "tp"
     return "other"
+
+def format_exit_price(symbol, price):
+    """出場價對到該幣 tick。查不到 tick 就維持原來的字串。回傳 (顯示, 原始或 None)。"""
+    raw = Decimal(str(price))
+    shown = raw
+    try:
+        tick = sym_info(symbol)["tick"]
+        if tick and tick > 0:
+            shown = raw.quantize(tick)
+    except Exception:
+        shown = raw
+    text = fmt(shown)
+    raw_text = fmt(raw)
+    return text, (raw_text if raw_text != text else None)
+
+def format_pnl(pnl):
+    """已實現損益固定 4 位小數。回傳 (顯示字串, 原始值或 None)。"""
+    original = Decimal(str(pnl))
+    shown = original.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    text = format(shown, "f")
+    return text, (pnl if shown != original else None)
+
+def _algo_type_for_order(symbol, order_id, start_ms):
+    """唯讀。用條件單歷史把觸發後的 orderId 對回 TAKE_PROFIT／STOP。對不到就 None。"""
+    try:
+        rows = req("GET", "/fapi/v1/allAlgoOrders",
+                   {"symbol": symbol, "startTime": start_ms, "limit": 100}, signed=True)
+    except Exception:
+        return None
+    if isinstance(rows, dict):
+        rows = rows.get("orders") or rows.get("data") or []
+    if not isinstance(rows, list):
+        return None
+    want = str(order_id)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ids = (row.get("actualOrderId"), row.get("actualId"))
+        if not any(i is not None and str(i) == want for i in ids):
+            continue
+        kind = row.get("orderType") or row.get("type") or ""
+        # closePosition 的止盈／停損一樣算止盈／停損，不因為觸發單是 MARKET 就變成其他。
+        if _kind_reason(kind):
+            return kind
+    return None
 
 
 def lookup_close(symbol, meta):
@@ -710,6 +953,7 @@ def lookup_close(symbol, meta):
         return unknown
     vwap = notion / qty
     order_type = None
+    algo_type = None
     oid = trail[-1].get("orderId")
     if oid:
         try:
@@ -718,12 +962,30 @@ def lookup_close(symbol, meta):
                 order_type = order.get("origType") or order.get("type") or order.get("orderType")
         except Exception:
             order_type = None
-    return {"exit_price": fmt(vwap), "exit_side": side or None, "qty": fmt(qty),
-            "reason": classify_exit(vwap, meta, order_type)}
+        if not _kind_reason(order_type):
+            algo_type = _algo_type_for_order(symbol, oid, start_ms)
+    shown, raw_px = format_exit_price(symbol, vwap)
+    out = {"exit_price": shown, "exit_side": side or None, "qty": fmt(qty),
+           "reason": classify_exit(vwap, meta, order_type, algo_type=algo_type)}
+    if raw_px is not None:
+        out["exit_price_raw"] = raw_px
+    return out
 
 
 def _exit_label(reason):
-    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知"}.get(reason, reason)
+    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知", "manual": "手動"}.get(reason, reason)
+
+def meta_from_pending(old, pd):
+    """階梯或限價轉成持倉時，已標記的減倉、成本停損、no_tp 不能被蓋掉。"""
+    fresh = {k: pd[k] for k in ("stop", "target", "setup") if k in pd}
+    old = old or {}
+    if old.get("reduced"):
+        fresh["reduced"] = True
+        if old.get("stop") not in (None, ""):
+            fresh["stop"] = old["stop"]
+        if old.get("no_tp"):
+            fresh["no_tp"] = True
+    return fresh
 
 
 def cmd_manage(a):
@@ -746,7 +1008,8 @@ def cmd_manage(a):
             done = manage_ladder_pending(sym, pd, held_amt, live)
             if done:
                 if done == "meta":
-                    st.setdefault("meta", {})[sym] = {k: pd[k] for k in ("stop", "target", "setup")}
+                    old = (st.get("meta") or {}).get(sym) or {}
+                    st.setdefault("meta", {})[sym] = meta_from_pending(old, pd)
                 st["pending"].pop(sym, None)
                 log("ladder_done", symbol=sym, pos=held_amt.get(sym, 0.0))
                 if live:
@@ -761,16 +1024,42 @@ def cmd_manage(a):
             print(f"{sym} 限價單 {stt} 已成交 {o.get('executedQty')}/{o.get('origQty')}"); continue
         st["pending"].pop(sym)
         if stt == "FILLED" or amt != 0:
-            st.setdefault("meta", {})[sym] = {k: pd[k] for k in ("stop", "target", "setup")}
+            old = (st.get("meta") or {}).get(sym) or {}
+            st.setdefault("meta", {})[sym] = meta_from_pending(old, pd)
             log("limit_done", symbol=sym, status=stt, executed=o.get("executedQty"), pos=amt)
             print(f"{sym} 限價單 {stt}，持倉 {amt}，轉為一般持倉管理")
         else:
             log("limit_dead", symbol=sym, status=stt); print(f"{sym} 限價單 {stt} 且無持倉，撤掉孤兒保護單")
             for po in protect_orders(sym): cancel_protect(sym, po, live)
         if live: save_state(st)
-    algo = open_algo(); oo = open_orders(); meta = {**st.get("pending", {}), **st.get("meta", {})}
+    scan_n = int(st.get("orphan_scan_n") or 0) + 1
+    st["orphan_scan_n"] = scan_n
+    known = set(held_amt) | set(st.get("pending") or {}) | set(st.get("meta") or {})
+    oo_known, algo_known = [], []
+    order_unread = set()
+    for sym in sorted(known):
+        try:
+            oo_known.extend(open_orders(sym) or [])
+        except BinanceError as e:
+            log("warn", msg="openOrders 失敗，本輪跳過", symbol=sym, err=str(e))
+            order_unread.add(sym)
+        try:
+            algo_known.extend(open_algo(sym, fail_closed=True) or [])
+        except BinanceError as e:
+            log("warn", msg="條件單讀取失敗，本輪跳過", symbol=sym, err=str(e))
+            order_unread.add(sym)
+    # 第 1、5、9… 輪做全量孤兒掃描，和以前每次都掃的結果在這些輪相同。
+    # 平倉那一輪也全量掃，避免剛平掉的幣上的保護單要等下一輪。
+    full_orphan = (scan_n % ORPHAN_SCAN_EVERY == 1)
+    meta = {**st.get("pending", {}), **st.get("meta", {})}
+    algo = algo_known
+    oo = oo_known
     for p in positions(acc):
         sym = p["symbol"]; amt = float(p["positionAmt"]); close_side = "SELL" if amt > 0 else "BUY"
+        if sym in order_unread:
+            log("warn", msg="條件單讀取失敗，本輪不判斷停損、不平倉", symbol=sym)
+            print("{0} {1}".format(sym, ALGO_ORDERS_UNREADABLE))
+            continue
         types = {(o.get("orderType") or o.get("type")) for o in algo if o.get("symbol") == sym}
         types |= {o["type"] for o in oo if o["symbol"] == sym}
         has_sl = "STOP_MARKET" in types or "STOP" in types
@@ -829,15 +1118,33 @@ def cmd_manage(a):
         except Exception:
             pnl = None
         closed = lookup_close(sym, m)
-        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
-            exit_price=closed["exit_price"], exit_side=closed["exit_side"], qty=closed["qty"],
-            reason=closed["reason"], pnl=pnl)
+        pnl_text, pnl_raw = (None, None) if pnl is None else format_pnl(pnl)
+        fields = dict(symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+                      exit_price=closed["exit_price"], exit_side=closed["exit_side"], qty=closed["qty"],
+                      reason=closed["reason"], pnl=pnl_text)
+        if closed.get("exit_price_raw") is not None:
+            fields["exit_price_raw"] = closed["exit_price_raw"]
+        if pnl_raw is not None:
+            fields["pnl_raw"] = pnl_raw
+        log("position_closed", **fields)
         px = "null" if closed["exit_price"] is None else closed["exit_price"]
-        py = "null" if pnl is None else pnl
+        py = "null" if pnl_text is None else pnl_text
         print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label(closed["reason"]), py))
         st["meta"].pop(sym, None)
         closed_note = True
-    if closed_note and live:
+        cancel_symbol_orphans(sym, live)
+    if closed_note:
+        full_orphan = True
+    if full_orphan:
+        try:
+            oo = open_orders() or []
+        except BinanceError as e:
+            log("warn", msg="openOrders 全量失敗", err=str(e)); oo = oo_known
+        try:
+            algo = open_algo() or []
+        except BinanceError as e:
+            log("warn", msg="openAlgoOrders 全量失敗", err=str(e)); algo = algo_known
+    if live:
         save_state(st)
     for o in algo:
         if o.get("symbol") not in held and o.get("symbol") not in st.get("pending", {}):
@@ -848,6 +1155,15 @@ def cmd_manage(a):
             print("孤兒條件單(舊端點)", o["symbol"], o["orderId"])
             if live: req("DELETE", "/fapi/v1/order", {"symbol": o["symbol"], "orderId": o["orderId"]}, signed=True); log("cancel_orphan", order=o)
     print(f"當日虧損 {dl*100:.2f}%  持倉 {len(held)}")
+    if getattr(a, "with_status", False):
+        try:
+            status_oo = open_orders() or []
+            status_ao = open_algo(fail_closed=True)
+        except BinanceError:
+            print(ALGO_ORDERS_UNREADABLE)
+            raise
+        dual, multi = status_account_mode()
+        print_status_body(acc, s, positions(acc), status_oo, status_ao, dual, multi)
 
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
@@ -866,7 +1182,10 @@ def cmd_watch(a):
             except (TypeError, ValueError):
                 due = True
         if due:
-            print("[watch] 無待成交限價單 {0}".format(now.strftime("%H:%M")))
+            line = "[watch] 無待成交限價單 {0}".format(now.strftime("%H:%M"))
+            if WEIGHT_1M_MAX:
+                line += " weight={0}".format(WEIGHT_1M_MAX)
+            print(line)
             st["watch_heartbeat"] = now.isoformat(timespec="seconds")
             save_state(st)
         return
@@ -877,7 +1196,7 @@ def cmd_watch(a):
             has_sl = any(str(t).startswith("STOP") for t in types)
             has_tp = any(str(t).startswith("TAKE") for t in types)
             total_exec = 0.0
-            any_done = False
+            done_n = 0
             for item in pd.get("orders") or []:
                 if not item.get("orderId"):
                     continue
@@ -887,17 +1206,23 @@ def cmd_watch(a):
                     log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
                 total_exec += float(o.get("executedQty") or 0)
                 if o["status"] not in ("NEW", "PARTIALLY_FILLED"):
-                    any_done = True
+                    done_n += 1
             prev = pd.get("last_exec")
             try:
                 prev_f = float(prev) if prev is not None else None
             except (TypeError, ValueError):
                 prev_f = None
             changed = prev_f is None or abs(total_exec - prev_f) > 1e-9
+            try:
+                prev_done = int(pd["last_done"]) if pd.get("last_done") is not None else None
+            except (TypeError, ValueError):
+                prev_done = None
+            done_increased = (prev_done is None and done_n > 0) or (prev_done is not None and done_n > prev_done)
             pd["last_exec"] = total_exec
+            pd["last_done"] = done_n
             save_state(st)
-            # 完全沒成交時，只缺預掛止盈不叫 manage。有成交才看缺單或數量變化；沒有停損仍要叫。
-            if any_done or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl):
+            # 完全沒成交時，只缺預掛止盈不叫 manage。已結束的檔數變多才再叫；第一檔成交、其餘還掛著，下一分鐘不要再叫。
+            if done_increased or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl):
                 log("watch_trigger", symbol=sym, executed=total_exec, ladder=True, has_sl=has_sl, has_tp=has_tp)
                 need = True
             continue
@@ -965,6 +1290,8 @@ def main():
     o.add_argument("--leverage", type=int); o.add_argument("--portion", type=float, default=1.0, choices=[0.25, 0.5, 1.0]); o.add_argument("--live", action="store_true")
     for n in ("manage", "flatten", "watch"):
         x = sub.add_parser(n); x.add_argument("--live", action="store_true")
+        if n == "manage":
+            x.add_argument("--with-status", action="store_true")
     mr = sub.add_parser("mark-reduced"); mr.add_argument("--symbol", required=True); mr.add_argument("--live", action="store_true")
     a = ap.parse_args()
     if a.cmd == "open": a.side = {"long": "BUY", "short": "SELL"}.get(a.side.lower(), a.side.upper())

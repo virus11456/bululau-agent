@@ -214,6 +214,8 @@ class OpenPathTest(unittest.TestCase):
                 return {"orderId": 11}
             if method == "DELETE":
                 return {}
+            if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
             raise AssertionError((method, path))
         with ExitStack() as stack:
             self.enter(stack)

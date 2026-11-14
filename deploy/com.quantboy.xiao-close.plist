@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.quantboy.xiao-close</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/REPLACE_USER/quantboy-live/xiao_close.py</string>
+		<string>--dry-run</string>
+		<string>--grace</string>
+		<string>5</string>
+		<string>--lock-wait</string>
+		<string>25</string>
+		<string>--prefilter</string>
+		<string>/Users/REPLACE_USER/quantboy-paper/discretionary/prefilter.py</string>
+		<string>--trader</string>
+		<string>/Users/REPLACE_USER/quantboy-live/live_trader.py</string>
+		<string>--seen</string>
+		<string>/Users/REPLACE_USER/quantboy-paper/discretionary/signal_seen.jsonl</string>
+		<string>--log</string>
+		<string>/Users/REPLACE_USER/quantboy-live/xiao_close_log.jsonl</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/REPLACE_USER/quantboy-live</string>
+	<key>StandardOutPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/xiao_close.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/xiao_close.err.log</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Minute</key>
+			<integer>0</integer>
+		</dict>
+		<dict>
+			<key>Minute</key>
+			<integer>15</integer>
+		</dict>
+		<dict>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Minute</key>
+			<integer>45</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

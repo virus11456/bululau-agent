@@ -4,7 +4,7 @@
 stdout：一個 JSON。結束碼：10＝有候選、要交給代理判斷；0＝沒有；2＝資料或限流錯誤，這輪不要判斷進場。
 用法：python3 src/prefilter.py [--symbol XUSDT] [--asof 'YYYY-MM-DDTHH:MM'] [--quiet]
 """
-import sys, json, time, datetime, argparse, os
+import sys, json, time, datetime, argparse, os, fcntl
 from common import *
 
 AVOID = {"INITUSDT", "EWZUSDT"}                 # hacked / manual avoid list (edit filters below)
@@ -337,9 +337,14 @@ def record_signals(args):
     """回放 --asof 和探測用的 --nolog 不寫去重紀錄，避免把歷史或試掃記成已看過。"""
     return not (getattr(args, "asof", None) or getattr(args, "nolog", False))
 
-def filter_new_signals(cands, path=None, record=True):
-    """同一個（幣、最低點或長黑）只留下一次。已看過的不再送進 gate，所以不會再 WAKE。"""
-    path = path or os.path.join(DATA_DIR, SEEN_NAME)
+def default_seen_path():
+    """去重檔。src 用 DATA_DIR。Mac 實盤 prefilter 沒有 DATA_DIR，貼過去之後用 HERE。"""
+    base = globals().get("DATA_DIR") or globals().get("HERE")
+    if not base:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, SEEN_NAME)
+
+def _take_new_signals(cands, path, record):
     seen = set()
     try:
         with open(path) as handle:
@@ -363,6 +368,22 @@ def filter_new_signals(cands, path=None, record=True):
             for key in fresh:
                 handle.write(key + "\n")
     return kept
+
+def filter_new_signals(cands, path=None, record=True):
+    """同一個（幣、最低點或長黑）只留下一次。已看過的不再送進 gate，所以不會再 WAKE。
+
+    record 為真時用旁邊的 .lock 檔跨程序互斥。收盤觸發器和 routine 不會同時把同一筆寫進去。
+    record 為假時不建去重檔，也不建鎖。
+    """
+    path = path or default_seen_path()
+    if not record:
+        return _take_new_signals(cands, path, False)
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    with open(path + ".lock", "a") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        return _take_new_signals(cands, path, True)
 
 def cap_near(near, limit=15):
     """其他型態先留，小師弟和大師兄的未中籤不要把名額佔滿。"""

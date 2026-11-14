@@ -49,7 +49,7 @@ def _user_stream_fresh():
 
 資料流呼叫 `manage` 時要拿 `live_trader.Lock()` 這把非阻塞鎖（`manage_under_lock`）。拿不到就晚一秒再試，不能讓 `SystemExit` 把程序殺掉，也不能在沒鎖的時候讀寫 `state.json`。成交事件先合併約 2.5 秒，只跑一次 manage。
 
-連上 websocket 之後要把 recv 逾時改成 180 秒。閒置逾時只送遮罩過的 ping，不更新心跳；心跳只在收到資料或 pong 時更新。超過兩個逾時週期都沒收到幀才重連。重連要指數退避。HTTP 429／418 寫進 `~/quantboy-live/.ratelimit_until`（跟 manage 同一份）。檔案時間還沒到就先睡，不要連線。418 睡完後程序正常結束。manage 失敗最多再試 2 次（一共 3 次），中間退避。客戶端的 ping／pong 必須加遮罩。
+連上 websocket 之後要把 recv 逾時改成 180 秒。閒置逾時只送遮罩過的 ping，不更新心跳；心跳只在收到資料或 pong 時更新。超過兩個逾時週期都沒收到幀才重連。重連要指數退避。HTTP 429／418 寫進 `~/quantboy-live/.ratelimit_until`（跟 manage 同一份）。檔案時間還沒到就先睡，不要連線。418 睡完後以非 0 結束，launchd 才會依 ThrottleInterval 再啟動。`.ratelimit_until` 只在新的到期時間更晚時覆寫。manage 失敗最多再試 2 次（一共 3 次），中間退避。客戶端的 ping／pong 必須加遮罩。
 
 plist 的 KeepAlive 不要寫 `true`。改成只在非正常結束時重啟，並加 60 秒節流：
 

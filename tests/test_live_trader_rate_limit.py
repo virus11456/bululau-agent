@@ -149,6 +149,17 @@ class RateLimitTest(unittest.TestCase):
         with open(os.path.join(self.tmp, ".ratelimit_until")) as handle:
             self.assertTrue(handle.read().startswith("429 "))
 
+    def test_write_keeps_the_later_expiry(self):
+        lt.write_ratelimit(418, 5000)
+        lt.write_ratelimit(429, 1000)
+        self.assertEqual(lt.read_ratelimit(), (418, 5000.0))
+        lt.write_ratelimit(429, 9000)
+        self.assertEqual(lt.read_ratelimit(), (429, 9000.0))
+        with open(lt._ratelimit_path(), "w") as handle:
+            handle.write("garbage\n")
+        lt.write_ratelimit(418, 50)
+        self.assertEqual(lt.read_ratelimit(), (418, 50.0))
+
     def test_weight_max_and_high_log(self):
         logs = []
         seen = {"n": 0}

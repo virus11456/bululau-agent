@@ -59,10 +59,15 @@ def read_ratelimit():
     return status, until
 
 def write_ratelimit(status, until):
+    """只在新的到期時間更晚時覆寫。較短的新退避不能把已經更長的擋掉。"""
+    until = float(until)
+    current = read_ratelimit()
+    if current is not None and current[1] >= until:
+        return
     path = _ratelimit_path()
     tmp = path + ".tmp"
     with open(tmp, "w") as handle:
-        handle.write("{0} {1}\n".format(int(status), float(until)))
+        handle.write("{0} {1}\n".format(int(status), until))
     os.replace(tmp, path)
 
 def _note_weight(headers):
@@ -200,6 +205,13 @@ def day_state(acc):
 
 def daily_loss_pct(acc, s):
     return max(0.0, (s["day_start_equity"] - equity_of(acc)) / s["day_start_equity"]) if s["day_start_equity"] > 0 else 0.0
+
+def fmt_pct(value):
+    """兩位小數。0 與負零都印成 0.00，不帶負號。"""
+    number = float(value)
+    if number == 0:
+        number = 0.0
+    return "{0:.2f}".format(number)
 
 def positions(acc):
     return [p for p in acc["positions"] if float(p["positionAmt"]) != 0]
@@ -598,9 +610,15 @@ def manage_ladder_pending(sym, pd, held_amt, live):
             log("error", msg="調整階梯保護單數量失敗", symbol=sym, err=str(e))
         return False
     if resting and filled > 0 and amt == 0:
-        # 快照是 0。保護單兩張都還在：可能只是成交還沒反映，這輪不撤。
-        # 停損或止盈已經不在：視為已經平倉，撤掉剩下的進場單。
-        protects = protect_orders(sym)
+        # 快照是 0。保護單讀不到就不能判斷是還沒反映、還是已經平倉，這輪不動。
+        try:
+            algo_rows = open_algo(sym, fail_closed=True)
+            order_rows = open_orders(sym) or []
+        except BinanceError as e:
+            log("warn", msg="階梯保護單讀取失敗，持倉為 0 但有成交，這輪不動", symbol=sym, err=str(e))
+            print("{0} 階梯保護單讀取失敗，這輪不動".format(sym))
+            return False
+        protects = protect_orders(sym, algo_rows, order_rows)
         has_sl = any(str(po["t"]).startswith("STOP") for po in protects)
         has_tp = any(str(po["t"]).startswith("TAKE") for po in protects)
         if has_sl and has_tp:
@@ -804,7 +822,8 @@ def print_status_body(acc, s, pos, oo, ao, dual, multi):
     eq = equity_of(acc)
     print(f"時間 {now_tpe():%Y-%m-%d %H:%M} 台北")
     print(f"錢包 {float(acc['totalWalletBalance']):.2f}  未實現 {float(acc['totalUnrealizedProfit']):+.2f}  淨值 {eq:.2f}  可用 {float(acc['availableBalance']):.2f} USDT")
-    print(f"日初淨值 {s['day_start_equity']:.2f}  當日損益 {eq - s['day_start_equity']:+.2f} ({-daily_loss_pct(acc, s)*100:.2f}% 虧損側)  每份保證金 {s['slice_margin']:.2f}")
+    print("日初淨值 {0:.2f}  當日損益 {1:+.2f} ({2}% 虧損側)  每份保證金 {3:.2f}".format(
+        s["day_start_equity"], eq - s["day_start_equity"], fmt_pct(-daily_loss_pct(acc, s) * 100), s["slice_margin"]))
     print(f"停開新倉 {s['halted_new']}  全平旗標 {s['killed'] or os.path.exists(HALT_FLAG)}")
     print(f"持倉 {len(pos)}/{CFG['max_positions']}")
     for p in pos: print(f"  {p['symbol']} 數量 {p['positionAmt']} 進場 {p['entryPrice']} 未實現 {float(p['unrealizedProfit']):+.2f} 槓桿 {p['leverage']} 逐倉 {p['isolated']}")
@@ -1284,7 +1303,7 @@ def cmd_manage(a):
         if o["symbol"] not in held and o["symbol"] not in st.get("pending", {}) and o["type"] in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
             print("孤兒條件單(舊端點)", o["symbol"], o["orderId"])
             if live: req("DELETE", "/fapi/v1/order", {"symbol": o["symbol"], "orderId": o["orderId"]}, signed=True); log("cancel_orphan", order=o)
-    print(f"當日虧損 {dl*100:.2f}%  持倉 {len(held)}")
+    print("當日虧損 {0}%  持倉 {1}".format(fmt_pct(dl * 100), len(held)))
     if getattr(a, "with_status", False):
         try:
             status_oo = open_orders() or []

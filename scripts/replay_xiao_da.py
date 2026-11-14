@@ -21,6 +21,7 @@ import prefilter  # noqa: E402
 
 START = int(datetime(2026, 10, 14, tzinfo=timezone.utc).timestamp() * 1000)
 END = int(datetime(2026, 11, 13, tzinfo=timezone.utc).timestamp() * 1000)
+MID = START + 15 * 24 * 60 * 60 * 1000
 MIN_QV = 5e6
 CACHE = os.environ.get("REPLAY_CACHE", "/tmp/vision-cache")
 UA = {"User-Agent": "bululau-replay"}
@@ -164,6 +165,7 @@ def bar_over_ioc(bar, cap):
 def scan_xiao(sym, bars):
     seen = set()
     out = []
+    slip = 0.003
     for i in range(40, len(bars)):
         if bars[i]["t"] < START or bars[i]["t"] >= END:
             continue
@@ -171,11 +173,13 @@ def scan_xiao(sym, bars):
         if not hit or hit.get("low_t") in seen:
             continue
         seen.add(hit.get("low_t"))
-        kind, r = walk(bars, i, hit["entry"], hit["stop"], hit["target"])
-        # 做多上限 = 收盤（數量把收盤到停損打滿 1%）。這根高點或收盤再高過它，IOC 不成交。
-        cap = hit["entry"]
+        cap = hit["entry"] * (1 + slip)
         abandoned = bar_over_ioc(bars[i], cap)
-        out.append(dict(kind=kind, r=r, ioc_abandoned=abandoned))
+        if abandoned:
+            out.append(dict(kind="abandoned", r=0.0, ioc_abandoned=True, t=bars[i]["t"]))
+            continue
+        kind, r = walk(bars, i, hit["entry"], hit["stop"], hit["target"])
+        out.append(dict(kind=kind, r=r, ioc_abandoned=False, t=bars[i]["t"]))
     return out
 
 
@@ -190,19 +194,24 @@ def scan_da(sym, bars):
             continue
         seen.add(hit.get("black_t"))
         kind, r = walk_da(bars, i, hit)
-        out.append(dict(kind=kind, r=r, black_t=hit.get("black_t")))
+        out.append(dict(kind=kind, r=r, black_t=hit.get("black_t"), t=bars[i]["t"]))
     return out
 
 
 def summarize(rows):
-    wins = sum(1 for r in rows if r["kind"] == "win")
-    losses = sum(1 for r in rows if r["kind"] == "loss")
-    opens = sum(1 for r in rows if r["kind"] == "open")
-    total = round(sum(r["r"] for r in rows), 2)
+    traded = [r for r in rows if not r.get("ioc_abandoned")]
+    wins = sum(1 for r in traded if r["kind"] == "win")
+    losses = sum(1 for r in traded if r["kind"] == "loss")
+    opens = sum(1 for r in traded if r["kind"] == "open")
+    total = round(sum(r["r"] for r in traded), 2)
     n = len(rows)
+    n_traded = len(traded)
+    closed = wins + losses
+    first = round(sum(r["r"] for r in traded if r.get("t", 0) < MID), 2)
+    second = round(sum(r["r"] for r in traded if r.get("t", 0) >= MID), 2)
     return dict(episodes=n, wins=wins, losses=losses, open=opens, r=total,
-                win_rate=round(wins / n, 3) if n else None,
-                ioc_abandoned=sum(1 for r in rows if r.get("ioc_abandoned")))
+                win_rate=round(wins / closed, 3) if closed else None,
+                ioc_abandoned=n - n_traded, r_first_15d=first, r_second_15d=second)
 
 
 def main():
@@ -241,7 +250,7 @@ def main():
         xiao_other=summarize(other),
         da=summarize(da),
         da_unique_blacks=len({(r.get("symbol"), r.get("black_t")) for r in da}),
-        note="小師弟 R：贏 +2、輸 -1。IOC 放棄是訊號那根的收盤或高點高於做多上限的筆數，不從上面的勝敗裡扣掉。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
+        note="小師弟做多上限是訊號收盤 × 1.003。高點或收盤超過它的筆數從勝、敗、未結和 R 合計扣掉。成交的 R 用訊號收盤。勝率是勝/(勝+敗)，未結和放棄不進分母。前半是 2026-10-14 到 10-28，後半是 10-29 到 11-12（UTC）。其他幣含 BTC，起跌 ≥5% 且急殺佔跌幅 ≥60%。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
     )
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return summary

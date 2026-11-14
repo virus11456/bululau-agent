@@ -14,7 +14,8 @@ EVENTS = events_path()                            # [{"time_tpe":"2026-10-31T20:
 HALT_FLAG = os.path.join(HOME, "HALT_REPORT_USER.flag")
 LOCK = os.path.join(HOME, ".lock")
 TPE = timezone(timedelta(hours=8))
-CFG = dict(slices=20, max_positions=5, max_lev=5, risk_pct=0.01, daily_stop=0.07, daily_kill=0.30, event_window_min=30)
+CFG = dict(slices=20, max_positions=5, max_lev=5, risk_pct=0.01, daily_stop=0.07, daily_kill=0.30,
+           event_window_min=30, xiao_slippage_pct=0.003)
 
 def now_tpe(): return datetime.now(TPE)
 def log(kind, **kw):
@@ -956,6 +957,15 @@ def resolve_entry_type(setup, requested):
         return "ioc"
     return requested
 
+def xiao_worst_price(side, mark, slip, tick):
+    """做多：標記價 × (1+滑價)，tick 往下。做空：標記價 × (1−滑價)，tick 往上。"""
+    mark = Decimal(str(mark))
+    slip = Decimal(str(slip))
+    tick = Decimal(str(tick))
+    if str(side).upper() == "BUY":
+        return rnd(mark * (Decimal(1) + slip), tick, ROUND_DOWN)
+    return rnd(mark * (Decimal(1) - slip), tick, ROUND_UP)
+
 def xiao_ioc_limit(side, qty, stop, budget, tick):
     """最遠限價：以該價成交時 |價−停損|×數量 仍不超過單筆風險預算。
 
@@ -1034,31 +1044,47 @@ def cmd_open(a):
     lev = min(CFG["max_lev"], int(a.leverage or CFG["max_lev"]))
     risk_usdt = eq * CFG["risk_pct"]
     margin = s["slice_margin"] * a.portion
-    notional = min(risk_usdt / dist, margin * lev)
-    qty = rnd(notional / entry, info["mstep"] if a.entry_type == "market" else info["step"])
-    if qty < info["minqty"] or qty * Decimal(str(entry)) < info["minnot"]:
-        raise SystemExit(f"數量 {qty} 低於最小量/最小名目 {info['minnot']}（停損太遠或份額太小）")
     close_side = "SELL" if side == "BUY" else "BUY"
     # 停損朝不利方向取整、止盈朝保守方向取整
     stop_p = fmt(rnd(stop, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
     tp_p = fmt(rnd(target, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
     if a.entry_type == "ioc":
-        cap = xiao_ioc_limit(side, qty, stop_p, risk_usdt, info["tick"])
-        loss_now = abs(Decimal(str(mark)) - Decimal(stop_p)) * qty
-        if cap is None or loss_now > Decimal(str(risk_usdt)):
+        worst = xiao_worst_price(side, mark, CFG["xiao_slippage_pct"], info["tick"])
+        stop_d = Decimal(stop_p)
+        room = (worst - stop_d) if side == "BUY" else (stop_d - worst)
+        if room <= 0:
             log("xiao_risk_over_1pct", symbol=sym, side=side, mark=str(mark), stop=stop_p,
-                qty=fmt(qty), est_loss=fmt(loss_now), risk_cap=round(risk_usdt, 2))
+                worst=fmt(worst), risk_cap=round(risk_usdt, 2))
             print("小師弟預估風險超過 1%，放棄不下單")
             return
-        order = dict(symbol=sym, side=side, type="LIMIT", quantity=fmt(qty), price=fmt(cap),
+        qty_risk = Decimal(str(risk_usdt)) / room
+        qty_margin = Decimal(str(margin * lev)) / worst
+        qty = rnd(min(qty_risk, qty_margin), info["step"])
+        if qty < info["minqty"] or qty * worst < info["minnot"]:
+            raise SystemExit(f"數量 {qty} 低於最小量/最小名目 {info['minnot']}（停損太遠或份額太小）")
+        cap = xiao_ioc_limit(side, qty, stop_p, risk_usdt, info["tick"])
+        if cap is None or (side == "BUY" and worst > cap) or (side == "SELL" and worst < cap):
+            log("xiao_risk_over_1pct", symbol=sym, side=side, mark=str(mark), stop=stop_p,
+                qty=fmt(qty), worst=fmt(worst), limit=None if cap is None else fmt(cap),
+                risk_cap=round(risk_usdt, 2))
+            print("小師弟預估風險超過 1%，放棄不下單")
+            return
+        order = dict(symbol=sym, side=side, type="LIMIT", quantity=fmt(qty), price=fmt(worst),
                      timeInForce="IOC", newOrderRespType="RESULT")
+        sizing_px = worst
     else:
+        notional = min(risk_usdt / dist, margin * lev)
+        qty = rnd(notional / entry, info["mstep"] if a.entry_type == "market" else info["step"])
+        if qty < info["minqty"] or qty * Decimal(str(entry)) < info["minnot"]:
+            raise SystemExit(f"數量 {qty} 低於最小量/最小名目 {info['minnot']}（停損太遠或份額太小）")
         order = dict(symbol=sym, side=side, type="MARKET" if a.entry_type == "market" else "LIMIT",
                      quantity=fmt(qty), newOrderRespType="RESULT")
         if a.entry_type == "limit":
             order.update(price=fmt(rnd(entry, info["tick"])), timeInForce="GTC")
+        sizing_px = Decimal(str(entry))
     plan = dict(symbol=sym, side=side, setup=a.setup, entry=entry, stop=stop_p, target=tp_p, qty=fmt(qty),
-                notional=round(float(qty) * entry, 2), lev=lev, est_loss=round(float(qty) * abs(entry - float(stop_p)), 2),
+                notional=round(float(qty) * float(sizing_px), 2), lev=lev,
+                est_loss=round(float(qty) * abs(float(sizing_px) - float(stop_p)), 2),
                 risk_cap=round(risk_usdt, 2), slice_margin=s["slice_margin"], portion=a.portion, margin=round(margin, 4), live=live)
     print("計畫:", json.dumps(plan, ensure_ascii=False))
     log("open_plan", **plan)
@@ -1503,6 +1529,8 @@ def meta_from_pending(old, pd):
             fresh["stop"] = old["stop"]
         if old.get("no_tp"):
             fresh["no_tp"] = True
+    if old.get("scaled_2r") or pd.get("scaled_2r"):
+        fresh["scaled_2r"] = True
     return fresh
 
 
@@ -1555,34 +1583,66 @@ def _tp_matches(po, trigger, close_pos):
         return False
     return abs(got - want) / abs(want) <= Decimal("0.002")
 
+def _mark_scaled_2r(sym, m, st, live):
+    """平過一次 2R 半倉就記在 meta。之後不再掛 2R，也不再市價平半。"""
+    m["scaled_2r"] = True
+    held = (st.get("meta") or {}).get(sym)
+    if isinstance(held, dict) and held is not m:
+        held["scaled_2r"] = True
+    pending = (st.get("pending") or {}).get(sym)
+    if isinstance(pending, dict):
+        pending["scaled_2r"] = True
+    if live:
+        save_state(st)
+
+def _protect_qty(po):
+    try:
+        return Decimal(str(po.get("qty") or "0"))
+    except Exception:
+        return Decimal(0)
+
 def ensure_da_targets(sym, amt, m, algo, oo, st, live):
     """成交後掛兩張。2R 用實際持倉的 50% reduceOnly，3R 用 closePosition。
-    2R 若已越過，只平一半，不把整倉平掉。3R 已越過才走 target_passed_at_fill。"""
+
+    scaled_2r 為真表示 2R 半倉已經平過：不再掛 2R，也不再市價平半，只補 3R。
+    2R 還沒觸發時，半倉數量隨實際持倉變大而調高。2R 已越過就只平一半並記下標記。
+    3R 已越過才走 target_passed_at_fill。
+    """
     entry_side = "BUY" if amt > 0 else "SELL"
     close_side = "SELL" if amt > 0 else "BUY"
     orders = protect_orders(sym, algo, oo)
     if _mark_past_target(sym, entry_side, m.get("target_3r")):
         close_because_target_passed(sym, amt, st, live)
         return
-    try:
-        step = sym_info(sym)["step"]
-    except Exception:
-        step = Decimal("0.001")
-    half = rnd(Decimal(str(abs(amt))) * Decimal("0.5"), step)
-    if half > 0 and not any(_tp_matches(po, m.get("target"), False) for po in orders):
+    if not m.get("scaled_2r"):
         try:
-            place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m.get("target"), live, qty=fmt(half))
-        except BinanceError as e:
-            if e.code == -2021:
-                signed = float(half) if amt > 0 else -float(half)
+            step = sym_info(sym)["step"]
+        except Exception:
+            step = Decimal("0.001")
+        half = rnd(Decimal(str(abs(amt))) * Decimal("0.5"), step)
+        existing = [po for po in orders if _tp_matches(po, m.get("target"), False)]
+        have = sum((_protect_qty(po) for po in existing), Decimal(0))
+        if half > 0 and have < half:
+            for po in existing:
                 try:
-                    market_close(sym, signed, live, "scale_50_at_2r")
-                except Exception as e2:
-                    log("error", msg="2R 半倉平倉失敗，保留停損", symbol=sym, err=str(e2))
-            else:
+                    cancel_protect(sym, po, live)
+                except Exception as e:
+                    log("error", msg="撤較小的 2R 半倉失敗", symbol=sym, err=str(e))
+            try:
+                place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m.get("target"), live, qty=fmt(half))
+            except BinanceError as e:
+                if e.code == -2021:
+                    signed = float(half) if amt > 0 else -float(half)
+                    try:
+                        market_close(sym, signed, live, "scale_50_at_2r")
+                    except Exception as e2:
+                        log("error", msg="2R 半倉平倉失敗，保留停損", symbol=sym, err=str(e2))
+                    else:
+                        _mark_scaled_2r(sym, m, st, live)
+                else:
+                    log("error", msg="補掛 2R 半倉止盈失敗", symbol=sym, err=str(e))
+            except Exception as e:
                 log("error", msg="補掛 2R 半倉止盈失敗", symbol=sym, err=str(e))
-        except Exception as e:
-            log("error", msg="補掛 2R 半倉止盈失敗", symbol=sym, err=str(e))
     if not any(_tp_matches(po, m.get("target_3r"), True) for po in orders):
         try:
             place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m.get("target_3r"), live)

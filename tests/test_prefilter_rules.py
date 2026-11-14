@@ -170,29 +170,38 @@ class XiaoScreenTest(unittest.TestCase):
     def test_eth_second_selloff_is_market_and_stop_has_cushion(self):
         hit, why = prefilter.xiao_shidi(self.eth_series(), "ETHUSDT")
         self.assertIsNotNone(hit, why)
-        self.assertEqual(hit["entry_type"], "market")
+        self.assertEqual(hit["entry_type"], "ioc")
         self.assertLess(hit["stop"], 3300)
         self.assertAlmostEqual(hit["stop"], min(3300 * (1 - prefilter.XIAO_STOP_CUSHION), hit["entry"] * 0.97), places=4)
         self.assertEqual(prefilter.XIAO_STOP_CUSHION, 0.005)
-        self.assertIn("待使用者確認", " ".join(hit["unconfirmed"]))
+        self.assertEqual(prefilter.XIAO_ALT_DROP_PCT, 0.05)
+        self.assertEqual(prefilter.XIAO_FLUSH_SHARE, 0.60)
+        self.assertIn("2026-11-14 維持", " ".join(hit["unconfirmed"]))
+        self.assertNotIn("至少 3%", " ".join(hit["unconfirmed"]))
         chasing = self.eth_series()
         chasing[-1] = bar(3460, 3465, 3440, 3462, 10, t=40)
         miss, why = prefilter.xiao_shidi(chasing, "ETHUSDT")
         self.assertIsNone(miss)
         self.assertTrue(why)
 
-    def test_btc_uses_3_percent_and_alts_need_3_percent_drop(self):
+    def test_btc_stop_stays_3_percent_and_alts_need_5_percent_and_60_share(self):
         btc, why = prefilter.xiao_shidi(self.eth_series(), "BTCUSDT")
         self.assertIsNotNone(btc, why)
         self.assertLessEqual(btc["stop"], btc["entry"] * 0.97 + 1e-6)
+        self.assertGreaterEqual(btc["drop_pct"], 5)
         alt, why = prefilter.xiao_shidi(self._alt(), "SOLUSDT")
         self.assertIsNotNone(alt, why)
-        self.assertGreaterEqual(alt["drop_pct"], 3)
-        ok, why = prefilter.xiao_drop_ok("SOLUSDT", 100, 98)
+        self.assertGreaterEqual(alt["drop_pct"], 5)
+        ok, why = prefilter.xiao_drop_ok("SOLUSDT", 100, 95.1)
         self.assertFalse(ok)
-        self.assertIn("3%", why)
-        ok, why = prefilter.xiao_drop_ok("BTCUSDT", 100, 98)
-        self.assertFalse(ok)
+        self.assertIn("5%", why)
+        ok, why = prefilter.xiao_drop_ok("BTCUSDT", 100, 95)
+        self.assertTrue(ok)
+        thin = self._alt()
+        thin[36] = bar(104, 104, 100, 101, 40, t=36)
+        miss, why = prefilter.xiao_shidi(thin, "SOLUSDT")
+        self.assertIsNone(miss)
+        self.assertIn("60%", why)
 
     def _alt(self):
         bars = []
@@ -223,6 +232,25 @@ class XiaoScreenTest(unittest.TestCase):
         self.assertEqual(capped[0]["setup"], "布鹿流")
         self.assertLessEqual(len(capped), 15)
 
+    def test_asof_and_nolog_do_not_write_seen(self):
+        class Opt(object):
+            def __init__(self, asof=None, nolog=False):
+                self.asof = asof
+                self.nolog = nolog
+        self.assertFalse(prefilter.record_signals(Opt(asof="2026-11-01T00:00")))
+        self.assertFalse(prefilter.record_signals(Opt(nolog=True)))
+        self.assertTrue(prefilter.record_signals(Opt()))
+        cand = {"symbol": "ETHUSDT", "setup": "小師弟", "low_t": 99}
+        path = os.path.join(prefilter.DATA_DIR, "signal-asof-test.jsonl")
+        if os.path.exists(path):
+            os.remove(path)
+        for opt in (Opt(asof="2026-11-01T00:00"), Opt(nolog=True)):
+            first = prefilter.filter_new_signals([cand], path=path, record=prefilter.record_signals(opt))
+            second = prefilter.filter_new_signals([cand], path=path, record=prefilter.record_signals(opt))
+            self.assertEqual(len(first), 1)
+            self.assertEqual(len(second), 1)
+        self.assertFalse(os.path.exists(path))
+
     def test_da_retest_only_and_one_black(self):
         bars = self._da_bars()
         hit, why = prefilter.da_shixiong(bars, "BTCUSDT")
@@ -232,7 +260,7 @@ class XiaoScreenTest(unittest.TestCase):
         self.assertGreaterEqual(hit["rebound_bars"], 10)
         self.assertLessEqual(hit["rebound_bars"], 40)
         self.assertEqual(hit["limit_expire_4h"], 2)
-        self.assertIn("待使用者確認", " ".join(hit["unconfirmed"]))
+        self.assertIn("2026-11-14 維持", " ".join(hit["unconfirmed"]))
         v = [dict(b) for b in bars]
         black = next(b for b in v if b["t"] == 40)
         v[41]["c"] = black["o"] + 1

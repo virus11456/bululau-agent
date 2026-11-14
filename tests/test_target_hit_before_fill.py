@@ -203,8 +203,10 @@ class TargetPassedAtFillTest(unittest.TestCase):
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "XUSDT", "positionAmt": self.amt, "markPrice": self.mark}]
             if path == "/fapi/v1/openAlgoOrders":
-                return [{"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9,
+                rows = [{"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9,
                          "quantity": self.amt.lstrip("-"), "closePosition": "false", "triggerPrice": "90"}]
+                rows.extend(getattr(self, "extra_algos", []))
+                return rows
             if path == "/fapi/v1/openOrders":
                 return [self.entry] if self.entry else []
             if method == "GET" and path == "/fapi/v1/order":
@@ -213,6 +215,9 @@ class TargetPassedAtFillTest(unittest.TestCase):
             if path in ("/fapi/v1/userTrades", "/fapi/v1/income"):
                 return []
             if method == "POST" and path == "/fapi/v1/algoOrder":
+                trig = str((params or {}).get("triggerPrice"))
+                if trig in getattr(self, "reject_triggers", ()):
+                    raise lt.BinanceError(400, -2021, "would immediately trigger")
                 if self.tp_error:
                     raise self.tp_error
                 return {"algoId": 21}
@@ -388,6 +393,64 @@ class TargetPassedAtFillTest(unittest.TestCase):
         self.assertTrue(any("平一半" in str(kw.get("msg")) for _k, kw in self.logs))
         self.assertEqual(lt.full_flatten_price(self.state["meta"]["XUSDT"]), None)
         self.assertEqual(lt.full_flatten_price({"setup": "小師弟", "target": "120"}), "120")
+
+    def _half_markets(self):
+        return [c for c in self._market_orders() if c[2].get("quantity") == "1"]
+
+    def test_da_2r_minus_2021_scales_once_and_stops(self):
+        """持倉 2、標記價 125（2R=120、3R=130）。-2021 後只平一半，下一輪不再砍。"""
+        self.mark = "125"
+        self.amt = "2"
+        self.reject_triggers = {"120"}
+        self.state["meta"]["XUSDT"] = {
+            "setup": "大師兄", "stop": "90", "target": "120", "target_3r": "130",
+        }
+        self.manage(True)
+        self.assertEqual(len(self._market_orders()), 1)
+        self.assertEqual(self._market_orders()[0][2]["quantity"], "1")
+        self.assertEqual(self._market_orders()[0][2]["side"], "SELL")
+        self.assertEqual(self._market_orders()[0][2]["reduceOnly"], "true")
+        self.assertTrue(self.state["meta"]["XUSDT"].get("scaled_2r"))
+        self.assertTrue(any(kind == "market_close" and kw.get("reason") == "scale_50_at_2r"
+                            for kind, kw in self.logs))
+        threes = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                  and c[2].get("triggerPrice") == "130" and c[2].get("closePosition") == "true"]
+        self.assertEqual(len(threes), 1)
+        self.calls.clear()
+        self.logs.clear()
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        twos = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                and c[2].get("triggerPrice") == "120"]
+        self.assertEqual(twos, [])
+        self.assertTrue(self.state["meta"]["XUSDT"].get("scaled_2r"))
+
+    def test_da_2r_half_grows_with_position_until_it_triggers(self):
+        self.mark = "110"
+        self.amt = "4"
+        self.extra_algos = [{
+            "symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 44,
+            "quantity": "1", "closePosition": "false", "triggerPrice": "120",
+        }]
+        self.state["meta"]["XUSDT"] = {
+            "setup": "大師兄", "stop": "90", "target": "120", "target_3r": "130",
+        }
+        self.manage(True)
+        self.assertTrue(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" and c[2].get("algoId") == 44
+                            for c in self.calls))
+        posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                  and c[2].get("triggerPrice") == "120"]
+        self.assertEqual(posted[0][2]["quantity"], "2")
+        self.assertEqual(posted[0][2]["reduceOnly"], "true")
+        self.assertFalse(self.state["meta"]["XUSDT"].get("scaled_2r"))
+        self.assertEqual(self._market_orders(), [])
+        self.calls.clear()
+        self.state["meta"]["XUSDT"]["scaled_2r"] = True
+        self.manage(True)
+        self.assertFalse(any(c[0] == "DELETE" for c in self.calls))
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" and c[2].get("quantity")
+                             for c in self.calls))
+        self.assertEqual(self._market_orders(), [])
 
 
 if __name__ == "__main__":

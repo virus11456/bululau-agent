@@ -60,6 +60,7 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.fail_stop = False
         self.avg = "100"
         self.filled = "10"
+        self.mark = "100"
         self.info = info()
 
     def run_open(self, args):
@@ -78,7 +79,7 @@ class XiaoMarketEntryTest(unittest.TestCase):
             if path == "/fapi/v1/positionSide/dual":
                 return {"dualSidePosition": False}
             if path == "/fapi/v1/premiumIndex":
-                return {"markPrice": "100"}
+                return {"markPrice": self.mark}
             if path in ("/fapi/v1/order/test", "/fapi/v1/marginType", "/fapi/v1/leverage"):
                 return {}
             if path == "/fapi/v2/positionRisk":
@@ -115,7 +116,11 @@ class XiaoMarketEntryTest(unittest.TestCase):
         entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
         self.assertEqual(entry[0][2]["type"], "LIMIT")
         self.assertEqual(entry[0][2]["timeInForce"], "IOC")
-        self.assertEqual(entry[0][2]["price"], "100")
+        self.assertEqual(entry[0][2]["price"], "100.3")
+        self.assertEqual(entry[0][2]["quantity"], "9.708")
+        self.assertLess(lt.Decimal(entry[0][2]["quantity"]), lt.Decimal("10"))
+        loss = (lt.Decimal(entry[0][2]["price"]) - lt.Decimal("90")) * lt.Decimal(entry[0][2]["quantity"])
+        self.assertLessEqual(loss, lt.Decimal("100"))
         self.assertEqual(entry[0][2]["side"], "BUY")
         protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual([c[2]["type"] for c in protects], ["STOP_MARKET", "TAKE_PROFIT_MARKET"])
@@ -126,15 +131,18 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.assertIn("已進場並掛好保護單", text)
 
     def test_long_and_short_caps_round_conservatively(self):
+        self.assertEqual(lt.xiao_worst_price("BUY", "100", "0.003", "0.01"), lt.Decimal("100.3"))
+        self.assertEqual(lt.xiao_worst_price("SELL", "100", "0.003", "0.01"), lt.Decimal("99.7"))
         self.assertEqual(lt.xiao_ioc_limit("BUY", "10", "90", "100", "0.01"), lt.Decimal("100"))
-        self.assertEqual(lt.xiao_ioc_limit("BUY", "10", "90", "100", "0.3"), lt.Decimal("99.9"))
         self.assertEqual(lt.xiao_ioc_limit("SELL", "10", "110", "100", "0.01"), lt.Decimal("100"))
-        self.assertEqual(lt.xiao_ioc_limit("SELL", "10", "110", "100", "0.3"), lt.Decimal("100.2"))
         text = self.run_open(Args(side="SELL", stop="110", target="80", symbol="ETHUSDT"))
         entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
         self.assertEqual(entry[0][2]["side"], "SELL")
         self.assertEqual(entry[0][2]["timeInForce"], "IOC")
-        self.assertEqual(entry[0][2]["price"], "100")
+        self.assertEqual(entry[0][2]["price"], "99.7")
+        self.assertEqual(entry[0][2]["quantity"], "9.708")
+        loss = (lt.Decimal("110") - lt.Decimal("99.7")) * lt.Decimal("9.708")
+        self.assertLessEqual(loss, lt.Decimal("100"))
 
     def test_ioc_unfilled_is_abandoned(self):
         self.filled = "0"
@@ -150,15 +158,16 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.avg = "99"
         self.run_open(Args())
         entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
-        self.assertEqual(entry[0][2]["quantity"], "10")
+        self.assertEqual(entry[0][2]["quantity"], "9.708")
         protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual(len(protects), 2)
         self.assertEqual(self.state["meta"]["ETHUSDT"]["target"], "117")
 
     def test_estimated_risk_over_one_percent_does_not_order(self):
+        self.mark = "90.2"
         self.info = info()
         self.info["tick"] = Decimal("1")
-        text = self.run_open(Args(stop="90.5"))
+        text = self.run_open(Args(stop="90"))
         self.assertIn("放棄不下單", text)
         self.assertTrue(any(kind == "xiao_risk_over_1pct" for kind, _kw in self.logs))
         self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in self.calls))

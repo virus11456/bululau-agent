@@ -55,20 +55,20 @@ def kuai_shidi(k15, rs):
     return None
 
 # ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點。這次用大於 100 點。
-# BTC 與其他幣用跌幅 / 起跌高點，至少 3%。
+# BTC 歸在其他幣：起跌跌幅 / 起跌高點至少 5%，急殺那一根至少佔整段跌幅 60%。
+# 停損不跟著這兩個門檻放寬。BTC、ETH 仍是最低點下方 0.5%，並且至少離進場 3%。
 XIAO_ETH_DROP_MIN = 100
-XIAO_ALT_DROP_PCT = 0.03
+XIAO_ALT_DROP_PCT = 0.05
 XIAO_SLOW_BARS = 6
 XIAO_SLOW_VOL_MAX = 1.5
 XIAO_FLUSH_VOL = 3.0
-XIAO_FLUSH_SHARE = 0.40
+XIAO_FLUSH_SHARE = 0.60
 XIAO_BOUNCE_MIN = 0.40
-# 最低點下方的緩衝。預設 0.5%。待使用者確認。
+# 最低點下方的緩衝。預設 0.5%。使用者 2026-11-14 維持。
 XIAO_STOP_CUSHION = 0.005
 XIAO_UNCONFIRMED = [
     "ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點，沒有更嚴的第二個數字。這次用大於 100 點，更嚴的門檻未確認。",
-    "其他幣起跌大約 3% 以上。這次用跌幅除以起跌高點，至少 3%。「大約」要留多少誤差未確認。",
-    "停損在最低點下方再留緩衝。預設 0.5%（XIAO_STOP_CUSHION），待使用者確認。BTC、ETH 另外至少離進場 3%。",
+    "停損在最低點下方再留緩衝。預設 0.5%（XIAO_STOP_CUSHION）。使用者 2026-11-14 維持。BTC、ETH 另外至少離進場 3%。這條 3% 是停損距離，不跟著其他幣 5% 的起跌門檻改。",
     "第二次下殺「回落到彈幅一半左右」的誤差帶未確認。這次用最後一根的低點碰到彈幅中線、且不破最低點。",
 ]
 
@@ -81,11 +81,11 @@ def xiao_drop_ok(symbol, high, low):
     if not high:
         return False, "bad high"
     if drop / high < XIAO_ALT_DROP_PCT:
-        return False, "drop {0:.1%} <3%".format(drop / high)
+        return False, "drop {0:.1%} <5%".format(drop / high)
     return True, None
 
 def xiao_shidi(k15, symbol="ETHUSDT"):
-    """小師弟：緩跌、急殺爆量、彈回之後等第二次下殺。市價進場，不在反彈途中追。"""
+    """小師弟：緩跌、急殺爆量、彈回之後等第二次下殺。限價 IOC，不在反彈途中追。"""
     if not k15 or len(k15) < 40:
         return None, "15m 資料不足"
     last_i = len(k15) - 1
@@ -119,7 +119,7 @@ def xiao_shidi(k15, symbol="ETHUSDT"):
     if not ok:
         return None, why
     if drop <= 0 or (Lbar["o"] - Lbar["l"]) / drop < XIAO_FLUSH_SHARE:
-        return None, "急殺佔跌幅不到 40%"
+        return None, "急殺佔跌幅不到 60%"
     between = k15[li + 1:last_i]
     if len(between) < 2:
         return None, "還沒有彈回"
@@ -148,9 +148,9 @@ def xiao_shidi(k15, symbol="ETHUSDT"):
     return dict(setup="小師弟", tf="15m", entry=round(entry, 8), stop=round(stop, 8),
                 target=round(target, 8), rr=round(rr, 2),
                 drop_pt=round(drop, 1), drop_pct=round(drop / H * 100, 2) if H else None,
-                bounce_pct=round((peak - L) / drop * 100, 1), entry_type="market",
+                bounce_pct=round((peak - L) / drop * 100, 1), entry_type="ioc",
                 low_t=Lbar.get("t"), cushion=XIAO_STOP_CUSHION,
-                plan="第二次下殺市價進場。停損在最低點下方。到 2R 一次全出。試算進場價是這一根收盤，實際止盈用成交均價重算。",
+                plan="第二次下殺限價 IOC。停損在最低點下方。到 2R 一次全出。試算進場價是這一根收盤，實際止盈用成交均價重算。上線用正常倉位。",
                 unconfirmed=list(XIAO_UNCONFIRMED)), None
 
 def maset(k):
@@ -223,7 +223,7 @@ def funding(k1h, fr):
     return dict(setup="funding_rate", tf="1H", entry=c, level=lvl, stop=round(stop, 8), target=round(target, 8),
                 rr=round(rr, 2), funding_pct=round(fr * 100, 3), sizing="2:3:5 (MA30 then MA45)"), None
 
-# 均線週期是這次用來表達向下發散的例子。待使用者確認。
+# 均線週期。使用者 2026-11-14 維持收盤 < MA7 < MA25。
 DA_MA_FAST = 7
 DA_MA_SLOW = 25
 DA_BLACK_BODY_MIN = 2.0
@@ -233,11 +233,11 @@ DA_REBOUND_MIN = 10
 DA_REBOUND_MAX = 40
 DA_RECOVER = 0.50
 DA_RETEST_BAND = 0.03
-# 限價單掛著超過幾根 4H 就撤。待使用者確認。
+# 限價單掛著超過幾根 4H 就撤。使用者 2026-11-14 維持 2 根。
 DA_LIMIT_EXPIRE_4H = 2
 DA_SHIXIONG_UNCONFIRMED = [
-    "向下發散的均線週期待使用者確認。這次用收盤 < MA7 < MA25。",
-    "限價單超過幾根 4H 就撤，待使用者確認。這次用 2 根。",
+    "向下發散的均線週期。使用者 2026-11-14 維持收盤 < MA7 < MA25。",
+    "限價單超過幾根 4H 就撤。使用者 2026-11-14 維持 2 根。",
     "前低下方再留多少未確認。停損取前低與 BTC/ETH 3%、小幣 10% 的較低者。",
     "8H 要不要跟 4H 各掃一輪未確認。這次只在新的 4H 收盤評估。",
 ]
@@ -329,6 +329,10 @@ def signal_id(cand):
         return "da|{0}|{1}".format(cand.get("symbol"), cand.get("black_t"))
     return None
 
+def record_signals(args):
+    """回放 --asof 和探測用的 --nolog 不寫去重紀錄，避免把歷史或試掃記成已看過。"""
+    return not (getattr(args, "asof", None) or getattr(args, "nolog", False))
+
 def filter_new_signals(cands, path=None, record=True):
     """同一個（幣、最低點或長黑）只留下一次。已看過的不再送進 gate，所以不會再 WAKE。"""
     path = path or os.path.join(DATA_DIR, SEEN_NAME)
@@ -406,7 +410,7 @@ def run(args):
             cands.append(dict(symbol=s, **c, **rs))
         elif why and not str(why).startswith("drop ") and not str(why).startswith("ETH drop") and why not in (
                 "15m 資料不足", "緩跌不夠", "急殺前不是緩跌", "緩跌量不平穩", "急殺不是長黑",
-                "急殺量不到 3 倍", "急殺佔跌幅不到 40%", "還沒有彈回", "彈回不到 40%",
+                "急殺量不到 3 倍", "急殺佔跌幅不到 60%", "還沒有彈回", "彈回不到 40%",
                 "第二次下殺破了最低點", "還沒回落到彈幅一半", "反彈途中不追", "low too old/too fresh"):
             near.append(dict(symbol=s, setup="小師弟", fail=why, **rs))
         strong = rs["rs24"] > 0 and rs["rs4h"] > -1
@@ -450,7 +454,8 @@ def run(args):
     if guard["blocked"]:
         for c in cands: c["blocked_by_btc_guard"] = True
         notes.append(guard["why"])
-    live = filter_new_signals([c for c in cands if not c.get("blocked_by_btc_guard")])
+    live = filter_new_signals([c for c in cands if not c.get("blocked_by_btc_guard")],
+                              record=record_signals(args))
     for c in live: c["confidence_hint"] = "low (Asia daytime)" if asia_day else "normal"
     screened = [n for n in near if n.get("setup") != "布鹿流" or "rr" in n.get("fail", "") or "confirmation" in n.get("fail", "")]
     out = dict(time=now_iso(), asof=args.asof, call_ai=bool(live), n_candidates=len(live), candidates=live,

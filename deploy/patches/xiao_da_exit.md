@@ -9,6 +9,14 @@
 瘸師弟仍是長黑低點下方 3%、4%、5% 三檔限價。大師兄仍是預掛限價。大師兄出場：2R 平 50%，其餘 3R 平，4R 前全出，2R 後停損不動。
 ```
 
+## 價已過整倉止盈
+
+部分成交觸發 `target_passed_at_fill` 的順序：先撤剩下的限價進場單，再市價 `reduceOnly` 平倉，最後清停損和止盈。市價平倉失敗就留下停損，不撤保護單。
+
+`-4130` 只記補掛失敗，不平倉。標記價還沒到整倉止盈，也不平倉。
+
+大師兄的 `target` 是 2R 平 50%，不是整倉。`target_passed_at_fill` 只拿 `target_3r`（3R 餘倉全出）比較。標記價過了 2R、還沒到 3R，就補掛 3R 止盈，不把整倉平掉。沒有 `target_3r` 時，不用 2R 去全平，也不把 2R 掛成 `closePosition` 止盈。
+
 ## 未確認
 
 見 `src/prefilter.py` 的 `XIAO_UNCONFIRMED` 和 `DA_SHIXIONG_UNCONFIRMED`。不要把那些句子改成新的擋單數字。

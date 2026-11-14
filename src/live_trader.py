@@ -1374,29 +1374,43 @@ def _record_target_passed_close(sym, st, live):
     if live:
         save_state(st)
 
-def close_because_target_passed(sym, amt, st, live):
-    """補掛止盈時價格已經越過止盈：市價 reduceOnly 平掉整個持倉。
+def full_flatten_price(meta):
+    """target_passed_at_fill 只看會把整倉平掉的那個價。
 
+    大師兄的 target 是 2R 平 50%，不是整倉。整倉出場價是 target_3r。
+    沒有 target_3r 就回 None，呼叫端不得拿 2R 去全平。
+    其他型態的 target 就是整倉出場價，小師弟的 2R 也是。
+    """
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("setup") == "大師兄":
+        px = meta.get("target_3r")
+        return px if px not in (None, "") else None
+    return meta.get("target")
+
+def close_because_target_passed(sym, amt, st, live):
+    """補掛止盈時價格已經越過整倉止盈：市價 reduceOnly 平掉整個持倉。
+
+    部分成交的順序：先撤剩餘進場單，再市價平倉，最後清停損和止盈。
     dry-run 只印「會市價平倉」，不下單、不寫狀態。
     市價平倉失敗就保留停損，記一筆失敗，這一輪不再重試。
-    平成之後撤掉剩下的進場單和條件單，並記 position_closed。
     """
     if not live:
         print("會市價平倉")
         return
+    _cancel_resting_entries(sym, st, True)
     try:
         market_close(sym, amt, True, "target_passed_at_fill")
     except Exception as e:
         log("error", msg="價已過止盈但市價平倉失敗，保留停損", symbol=sym, err=str(e),
             reason="target_passed_at_fill")
         return
-    _cancel_resting_entries(sym, st, True)
     cancel_symbol_orphans(sym, True)
     _record_target_passed_close(sym, st, True)
 
 def meta_from_pending(old, pd):
     """階梯或限價轉成持倉時，已標記的減倉、成本停損、no_tp 不能被蓋掉。"""
-    fresh = {k: pd[k] for k in ("stop", "target", "setup") if k in pd}
+    fresh = {k: pd[k] for k in ("stop", "target", "setup", "target_3r") if k in pd and pd[k] not in (None, "")}
     old = old or {}
     if old.get("reduced"):
         fresh["reduced"] = True
@@ -1518,21 +1532,25 @@ def cmd_manage(a):
                 log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
         if not has_tp and m and not no_tp:
             # 限價成交前不預掛止盈。成交後缺止盈才補。
-            # 價格已經越過止盈（標記價，或補掛收到 -2021）就市價平倉，不重試掛止盈。
-            # 其他失敗仍只記 log，下一輪再試。no_tp 仍只給減倉標記用。
+            # 比較的是整倉出場價。大師兄的 target 是 2R 平 50%，全平只看 target_3r。
+            # 標記價已到那個價，或補掛收到 -2021，才市價平倉。-4130 和其他錯誤只記 log。
             entry_side = "BUY" if amt > 0 else "SELL"
-            if _mark_past_target(sym, entry_side, m.get("target")):
-                close_because_target_passed(sym, amt, st, live)
-                continue
-            try:
-                place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
-            except BinanceError as e:
-                if e.code == -2021:
+            flat_px = full_flatten_price(m)
+            if m.get("setup") == "大師兄" and flat_px is None:
+                log("warn", msg="大師兄 2R 是平一半，沒有 3R 全平價就不全平", symbol=sym)
+            elif flat_px not in (None, ""):
+                if _mark_past_target(sym, entry_side, flat_px):
                     close_because_target_passed(sym, amt, st, live)
-                else:
+                    continue
+                try:
+                    place_protect(sym, close_side, "TAKE_PROFIT_MARKET", flat_px, live)
+                except BinanceError as e:
+                    if e.code == -2021:
+                        close_because_target_passed(sym, amt, st, live)
+                    else:
+                        log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+                except Exception as e:
                     log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
-            except Exception as e:
-                log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
     # 已無持倉的幣種：先把 meta 裡已平的記下來，再清孤兒保護單（清理本身不改）。
     held = {p["symbol"] for p in positions(acc)}
     closed_note = False

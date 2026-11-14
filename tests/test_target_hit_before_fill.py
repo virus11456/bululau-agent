@@ -308,10 +308,82 @@ class TargetPassedAtFillTest(unittest.TestCase):
         }}}
         self.entry = {"symbol": "XUSDT", "orderId": 77, "type": "LIMIT", "status": "PARTIALLY_FILLED"}
         self.manage(True)
-        self.assertTrue(any(c[0] == "DELETE" and c[1] == "/fapi/v1/order" and c[2].get("orderId") == 77
-                            for c in self.calls))
+        kinds = [(c[0], c[1], c[2].get("orderId"), c[2].get("type")) for c in self.calls]
+        entry_at = next(i for i, c in enumerate(self.calls)
+                        if c[0] == "DELETE" and c[1] == "/fapi/v1/order" and c[2].get("orderId") == 77)
+        market_at = next(i for i, c in enumerate(self.calls)
+                         if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET")
+        protect_at = next(i for i, c in enumerate(self.calls)
+                          if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder")
+        self.assertLess(entry_at, market_at)
+        self.assertLess(market_at, protect_at)
         self.assertEqual(len(self._market_orders()), 1)
         self.assertNotIn("XUSDT", self.state.get("pending") or {})
+        self.assertTrue(kinds)
+
+    def test_partial_close_failure_keeps_stop(self):
+        self.mark = "121"
+        self.close_error = lt.BinanceError(400, -2010, "close rejected")
+        self.state = {"meta": {"XUSDT": {"setup": "小師弟", "stop": "90", "target": "120"}},
+                      "pending": {"XUSDT": {"orderId": 77, "side": "BUY", "target": "120", "stop": "90", "setup": "小師弟"}}}
+        self.entry = {"symbol": "XUSDT", "orderId": 77, "type": "LIMIT", "status": "PARTIALLY_FILLED"}
+        self.manage(True)
+        self.assertTrue(any(c[0] == "DELETE" and c[1] == "/fapi/v1/order" for c in self.calls))
+        self.assertFalse(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        self.assertIn("XUSDT", self.state["meta"])
+        self.assertTrue(any("保留停損" in str(kw.get("msg")) for _k, kw in self.logs))
+
+    def test_mark_not_at_target_does_not_flatten_long_or_short(self):
+        self.mark = "119"
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(posted[0][2]["type"], "TAKE_PROFIT_MARKET")
+        self.assertEqual(posted[0][2]["triggerPrice"], "120")
+        self.calls.clear()
+        self.logs.clear()
+        self.amt = "-2"
+        self.mark = "121"
+        self.state["meta"]["XUSDT"]["side"] = "SELL"
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(posted[0][2]["triggerPrice"], "120")
+
+    def test_minus_4130_does_not_flatten(self):
+        self.tp_error = lt.BinanceError(400, -4130, "close position rejected")
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        self.assertIn("XUSDT", self.state["meta"])
+        self.assertFalse(any(kind == "target_passed_at_fill" for kind, _kw in self.logs))
+        self.assertTrue(any(kw.get("msg") == "補掛止盈失敗" for _k, kw in self.logs))
+
+    def test_da_shixiong_2r_scale_is_not_a_full_flatten(self):
+        self.mark = "125"
+        self.state["meta"]["XUSDT"] = {
+            "setup": "大師兄", "stop": "90", "target": "120", "target_3r": "130",
+        }
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(posted[0][2]["triggerPrice"], "130")
+        self.assertFalse(any(kind == "target_passed_at_fill" for kind, _kw in self.logs))
+        self.calls.clear()
+        self.mark = "130"
+        self.manage(True)
+        self.assertEqual(len(self._market_orders()), 1)
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                             and c[2].get("triggerPrice") == "120" for c in self.calls))
+
+    def test_da_shixiong_without_3r_price_does_not_flatten_at_2r(self):
+        self.mark = "125"
+        self.state["meta"]["XUSDT"] = {"setup": "大師兄", "stop": "90", "target": "120"}
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        self.assertTrue(any("平一半" in str(kw.get("msg")) for _k, kw in self.logs))
+        self.assertEqual(lt.full_flatten_price(self.state["meta"]["XUSDT"]), None)
+        self.assertEqual(lt.full_flatten_price({"setup": "小師弟", "target": "120"}), "120")
 
 
 if __name__ == "__main__":

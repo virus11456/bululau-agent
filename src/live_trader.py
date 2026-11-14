@@ -106,13 +106,18 @@ def account():
 def equity_of(acc):
     return float(acc["totalWalletBalance"]) + float(acc["totalUnrealizedProfit"])
 
+# 跨日只換這幾欄。pending、meta、watch_heartbeat 等不能在 00:00 被清掉。
+_DAY_FIELDS = ("day", "day_start_equity", "slice_margin", "halted_new", "killed", "created")
+
 def day_state(acc):
-    """每日 00:00 台北重算份額與日初淨值。"""
+    """每日 00:00 台北重算份額與日初淨值。只重設日欄，其餘原樣留著。"""
     s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
     if s.get("day") != today:
         eq = equity_of(acc)
-        s = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
-                 halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        fresh = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
+                     halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        kept = {k: v for k, v in s.items() if k not in _DAY_FIELDS}
+        s = dict(kept); s.update(fresh)
         save_state(s); log("day_reset", **s)
     return s
 

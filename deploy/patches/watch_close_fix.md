@@ -1,3 +1,44 @@
+# 手貼：跨日保留、平倉紀錄與 watch
+
+Mac 的 `~/quantboy-live/live_trader.py` 目前 sha1 是 `95522934`（未遮罩那份的前 8 碼）。它不從 `config.py` 讀金鑰。下面只貼函式，不要覆蓋整檔，也不要改 `_keys()`。
+
+## R1：跨日不要清掉 pending 和 meta
+
+`day_state()` 在 00:00 後第一次執行會整份換掉 state.json。改成只重設日欄。找到：
+
+```python
+def day_state(acc):
+    """每日 00:00 台北重算份額與日初淨值。"""
+    s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
+    if s.get("day") != today:
+        eq = equity_of(acc)
+        s = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
+                 halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        save_state(s); log("day_reset", **s)
+    return s
+```
+
+整段換成：
+
+```python
+# 跨日只換這幾欄。pending、meta、watch_heartbeat 等不能在 00:00 被清掉。
+_DAY_FIELDS = ("day", "day_start_equity", "slice_margin", "halted_new", "killed", "created")
+
+def day_state(acc):
+    """每日 00:00 台北重算份額與日初淨值。只重設日欄，其餘原樣留著。"""
+    s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
+    if s.get("day") != today:
+        eq = equity_of(acc)
+        fresh = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
+                     halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        kept = {k: v for k, v in s.items() if k not in _DAY_FIELDS}
+        s = dict(kept); s.update(fresh)
+        save_state(s); log("day_reset", **s)
+    return s
+```
+
+這一段不讀金鑰。先貼這段就能在今晚 00:00 前保住 DODOX 這種跨日掛單。
+
 # 手貼：平倉紀錄與 watch 不再空轉
 
 只改 Mac `~/quantboy-live/live_trader.py` 的 `cmd_manage` 與 `cmd_watch`。不要整份覆蓋，也不要改它的 `_keys()`、`open_algo` 說明或 `cmd_status` 格式。這兩段不讀 `config.py`。`req` 仍用 Mac 檔自己的金鑰。

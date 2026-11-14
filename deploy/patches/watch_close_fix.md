@@ -42,8 +42,13 @@
                 pnl = sum(float(r.get("income") or 0) for r in rows)
         except Exception:
             pnl = None
-        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"), pnl=pnl)
-        print("{0} 已平倉（交易所停損/止盈或手動），清除 meta".format(sym))
+        closed = lookup_close(sym, m)
+        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+            exit_price=closed["exit_price"], exit_side=closed["exit_side"], qty=closed["qty"],
+            reason=closed["reason"], pnl=pnl)
+        px = "null" if closed["exit_price"] is None else closed["exit_price"]
+        py = "null" if pnl is None else pnl
+        print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label(closed["reason"]), py))
         st["meta"].pop(sym, None)
         closed_note = True
     if closed_note and live:
@@ -137,3 +142,79 @@
 ```
 
 `if not pd.get("orderId"): continue` 之後的單張邏輯不要改。Mac 檔需要已有 `datetime` 與 `TPE`（`now_tpe` 用的那一個）。
+
+平倉紀錄會呼叫 `lookup_close` 和 `_exit_label`。這兩個加上 `_price_gap`、`classify_exit`，貼在 `def cmd_manage` 前面。內容與倉庫 `src/live_trader.py` 裡同名函式相同，不讀金鑰。
+
+## 持倉迴圈：減倉之後
+
+找到持倉迴圈裡這段：
+
+```python
+        print(f"{sym} {amt} 停損 {'有' if has_sl else '缺'} 止盈 {'有' if has_tp else '缺'}")
+        m = meta.get(sym)
+        # 指定數量的保護單：若限價單已終結，數量需等於實際持倉
+        if sym not in st.get("pending", {}):
+            for po in protect_orders(sym, algo, oo):
+                if po["cp"] or po["qty"] is None or Decimal(str(po["qty"])) == Decimal(str(abs(amt))): continue
+```
+
+在 `m = meta.get(sym)` 下一行加 `no_tp = bool(m and m.get("no_tp"))`。數量迴圈的第一行改成先跳過 no_tp 的止盈：
+
+```python
+            for po in protect_orders(sym, algo, oo):
+                if no_tp and str(po["t"]).startswith("TAKE"):
+                    continue
+                if po["cp"] or po["qty"] is None or Decimal(str(po["qty"])) == Decimal(str(abs(amt))): continue
+```
+
+然後把
+
+```python
+        if not has_sl:
+            if not m: log("error", msg="缺停損且無紀錄停損價，市價平倉", symbol=sym); market_close(sym, amt, live, "no_stop_no_meta"); continue
+            try: place_protect(sym, close_side, "STOP_MARKET", m["stop"], live)
+            except Exception as e:
+                log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
+        if not has_tp and m:
+            try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
+            except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+```
+
+換成
+
+```python
+        if no_tp:
+            for po in protect_orders(sym, algo, oo):
+                if not str(po["t"]).startswith("TAKE"):
+                    continue
+                print("no_tp_cancel {0}".format(sym))
+                log("no_tp_cancel", symbol=sym, id=po.get("id"))
+                try:
+                    cancel_protect(sym, po, live)
+                except Exception as e:
+                    log("error", msg="撤止盈失敗", symbol=sym, err=str(e))
+            has_tp = False
+        if not has_sl:
+            if not m: log("error", msg="缺停損且無紀錄停損價，市價平倉", symbol=sym); market_close(sym, amt, live, "no_stop_no_meta"); continue
+            # reduced 之後 meta.stop 已是成本價，缺停損就補掛在這個價，不是原來的結構停損。
+            try: place_protect(sym, close_side, "STOP_MARKET", m["stop"], live)
+            except Exception as e:
+                log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
+        if not has_tp and m and not no_tp:
+            try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
+            except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+```
+
+沒有 `no_tp` 時，補掛停損和止盈的請求與改之前相同。
+
+## mark-reduced
+
+在 `def cmd_flatten` 前面貼上倉庫裡的 `def cmd_mark_reduced`。它只讀 `positionRisk` 的 `entryPrice`，寫 meta，不掛單不撤單。
+
+`main()` 的子命令加：
+
+```python
+    mr = sub.add_parser("mark-reduced"); mr.add_argument("--symbol", required=True); mr.add_argument("--live", action="store_true")
+```
+
+分派字典加 `"mark-reduced": cmd_mark_reduced`。不要改 `open` 的風險參數。

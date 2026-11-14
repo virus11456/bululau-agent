@@ -650,6 +650,8 @@ def cmd_manage(a):
     st = load_state()
     # ---- 限價待成交單：成交/部分成交/取消/過期處理 ----
     held_amt = {p["symbol"]: float(p["positionAmt"]) for p in positions(acc)}
+    # 這一輪才從 pending 寫進 meta 的先留著。帳戶快照可能還沒看到成交，不能馬上當已平倉。
+    meta_at_start = set(st.get("meta") or {})
     for sym, pd in list(st.get("pending", {}).items()):
         if pd.get("ladder"):
             done = manage_ladder_pending(sym, pd, held_amt, live)
@@ -705,8 +707,29 @@ def cmd_manage(a):
         if not has_tp and m:
             try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
             except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
-    # 已無持倉的幣種：清掉孤兒保護單
+    # 已無持倉的幣種：先把 meta 裡已平的記下來，再清孤兒保護單（清理本身不改）。
     held = {p["symbol"] for p in positions(acc)}
+    closed_note = False
+    for sym in list(st.get("meta") or {}):
+        if sym not in meta_at_start or sym in held or sym in st.get("pending", {}):
+            continue
+        m = st["meta"].get(sym) or {}
+        pnl = None
+        try:
+            start_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+            rows = req("GET", "/fapi/v1/income",
+                       {"symbol": sym, "incomeType": "REALIZED_PNL", "startTime": start_ms, "limit": 1000},
+                       signed=True)
+            if isinstance(rows, list):
+                pnl = sum(float(r.get("income") or 0) for r in rows)
+        except Exception:
+            pnl = None
+        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"), pnl=pnl)
+        print("{0} 已平倉（交易所停損/止盈或手動），清除 meta".format(sym))
+        st["meta"].pop(sym, None)
+        closed_note = True
+    if closed_note and live:
+        save_state(st)
     for o in algo:
         if o.get("symbol") not in held and o.get("symbol") not in st.get("pending", {}):
             print("孤兒條件單", o.get("symbol"), o.get("algoId"))
@@ -718,16 +741,34 @@ def cmd_manage(a):
     print(f"當日虧損 {dl*100:.2f}%  持倉 {len(held)}")
 
 def cmd_watch(a):
-    """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫；
+    """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
     有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。"""
     st = load_state(); pend = st.get("pending", {})
-    if not pend: return
+    if not pend:
+        now = now_tpe()
+        last = st.get("watch_heartbeat")
+        due = True
+        if last:
+            try:
+                prev = datetime.fromisoformat(last)
+                if prev.tzinfo is None:
+                    prev = prev.replace(tzinfo=TPE)
+                due = (now - prev).total_seconds() >= 3600
+            except (TypeError, ValueError):
+                due = True
+        if due:
+            print("[watch] 無待成交限價單 {0}".format(now.strftime("%H:%M")))
+            st["watch_heartbeat"] = now.isoformat(timespec="seconds")
+            save_state(st)
+        return
     need = False
     for sym, pd in pend.items():
         if pd.get("ladder"):
             types = {po["t"] for po in protect_orders(sym)}
             has_sl = any(str(t).startswith("STOP") for t in types)
             has_tp = any(str(t).startswith("TAKE") for t in types)
+            total_exec = 0.0
+            any_done = False
             for item in pd.get("orders") or []:
                 if not item.get("orderId"):
                     continue
@@ -735,12 +776,21 @@ def cmd_watch(a):
                     o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": item["orderId"]}, signed=True, retries=2)
                 except BinanceError as e:
                     log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
-                executed = float(o.get("executedQty") or 0)
-                resting = o["status"] in ("NEW", "PARTIALLY_FILLED")
-                if (not resting) or executed > 0 or not has_sl or not has_tp:
-                    log("watch_trigger", symbol=sym, status=o["status"], executed=o.get("executedQty"), ladder=True)
-                    need = True
-                    break
+                total_exec += float(o.get("executedQty") or 0)
+                if o["status"] not in ("NEW", "PARTIALLY_FILLED"):
+                    any_done = True
+            prev = pd.get("last_exec")
+            try:
+                prev_f = float(prev) if prev is not None else None
+            except (TypeError, ValueError):
+                prev_f = None
+            changed = prev_f is None or abs(total_exec - prev_f) > 1e-9
+            pd["last_exec"] = total_exec
+            save_state(st)
+            # 完全沒成交時，只缺預掛止盈不叫 manage。有成交才看缺單或數量變化；沒有停損仍要叫。
+            if any_done or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl):
+                log("watch_trigger", symbol=sym, executed=total_exec, ladder=True, has_sl=has_sl, has_tp=has_tp)
+                need = True
             continue
         if not pd.get("orderId"): continue
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True, retries=2)

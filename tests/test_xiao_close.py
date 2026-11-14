@@ -550,6 +550,8 @@ class XiaoCloseIocTest(unittest.TestCase):
     def place(self, mark="100", tick="0.01", stop="90", target="120", fail_stop=False):
         calls = []
         algo_n = {"n": 0}
+        posted = []
+        lt.STOP_READBACK_SLEEP_S = 0
 
         def fake_req(method, path, params=None, signed=False, retries=5):
             calls.append((method, path, dict(params or {})))
@@ -561,7 +563,9 @@ class XiaoCloseIocTest(unittest.TestCase):
                 return {}
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "ETHUSDT", "positionAmt": "10", "markPrice": mark}]
-            if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders", "/fapi/v1/userTrades", "/fapi/v1/income"):
+            if path == "/fapi/v1/openAlgoOrders":
+                return list(posted)
+            if path in ("/fapi/v1/openOrders", "/fapi/v1/userTrades", "/fapi/v1/income"):
                 return []
             if method == "POST" and path == "/fapi/v1/order":
                 return {"orderId": 7, "avgPrice": mark, "executedQty": "1"}
@@ -569,6 +573,8 @@ class XiaoCloseIocTest(unittest.TestCase):
                 algo_n["n"] += 1
                 if fail_stop and algo_n["n"] == 1:
                     raise lt.BinanceError(400, -2021, "stop rejected")
+                posted.append({"algoId": 30, "symbol": (params or {}).get("symbol"),
+                               "algoStatus": "NEW", "orderType": (params or {}).get("type")})
                 return {"algoId": 30}
             if method == "DELETE":
                 return {}

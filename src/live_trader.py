@@ -390,13 +390,14 @@ def _read_position_mark(sym):
         return None, amt
     return mark, amt
 
-def place_protect(symbol, close_side, otype, trigger, live, qty=None):
-    """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
+# 停損送出後隔這麼久再讀條件單。測試把它改成 0。
+STOP_READBACK_SLEEP_S = 1.5
+
+def _post_protect(symbol, close_side, otype, trigger, qty):
+    """送出一張條件單。回傳交易所回應。"""
     size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
     algo = dict(algoType="CONDITIONAL", symbol=symbol, side=close_side, type=otype, triggerPrice=trigger,
                 workingType="MARK_PRICE", priceProtect="TRUE", **size)
-    if not live:
-        print("  [dry-run] POST /fapi/v1/algoOrder", algo); return {"dry": True}
     try:
         r = req("POST", "/fapi/v1/algoOrder", algo, signed=True)
     except BinanceError as e:
@@ -406,7 +407,79 @@ def place_protect(symbol, close_side, otype, trigger, live, qty=None):
         legacy = dict(symbol=symbol, side=close_side, type=otype, stopPrice=trigger,
                       workingType="MARK_PRICE", priceProtect="TRUE", **size)
         r = req("POST", "/fapi/v1/order", legacy, signed=True)
-    log("protect_placed", symbol=symbol, type=otype, trigger=trigger, qty=qty, resp=r); return r
+    log("protect_placed", symbol=symbol, type=otype, trigger=trigger, qty=qty, resp=r)
+    return r
+
+def _backoff_blocking():
+    """共用退避還在走就不要再打條件單查詢。"""
+    gate = read_ratelimit()
+    if not gate:
+        return False
+    _status, until = gate
+    try:
+        return float(until) - time.time() > 0
+    except (TypeError, ValueError):
+        return False
+
+def _algo_row_is_new(row, algo_id):
+    if str(row.get("algoId")) != str(algo_id):
+        return False
+    status = row.get("algoStatus")
+    if status in (None, ""):
+        status = row.get("status")
+    return str(status) == "NEW"
+
+def _stop_visible(symbol, algo_id):
+    """回查停損。退避中、418／429、網路或格式錯誤都當這次沒看到。"""
+    if algo_id in (None, ""):
+        return False
+    if _backoff_blocking():
+        return False
+    try:
+        data = req("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol}, signed=True, retries=1)
+    except Exception:
+        return False
+    if not isinstance(data, list):
+        return False
+    return any(_algo_row_is_new(row, algo_id) for row in data if isinstance(row, dict))
+
+def _confirm_stop(symbol, placed, close_side, otype, trigger, qty):
+    """停損送出後讀回來。第一次沒看到就再掛一次。兩次都沒有就拋出，讓原有的停損失敗路徑撤進場單。
+
+    退避檔還在走就不再查、也不再補掛，直接走停損失敗。
+    """
+    current = placed if isinstance(placed, dict) else {}
+    for attempt in (1, 2):
+        time.sleep(STOP_READBACK_SLEEP_S)
+        algo_id = current.get("algoId")
+        if _backoff_blocking():
+            log("stop_readback", symbol=symbol, algoId=algo_id, attempt=attempt, ok=False)
+            break
+        ok = _stop_visible(symbol, algo_id)
+        log("stop_readback", symbol=symbol, algoId=algo_id, attempt=attempt, ok=ok)
+        if ok:
+            print("停損已掛上")
+            return current
+        if attempt == 1 and not _backoff_blocking():
+            current = _post_protect(symbol, close_side, otype, trigger, qty)
+            continue
+        break
+    raise BinanceError(None, None, "停損回查兩次都沒有看到 NEW")
+
+def place_protect(symbol, close_side, otype, trigger, live, qty=None):
+    """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
+    size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
+    algo = dict(algoType="CONDITIONAL", symbol=symbol, side=close_side, type=otype, triggerPrice=trigger,
+                workingType="MARK_PRICE", priceProtect="TRUE", **size)
+    if not live:
+        print("  [dry-run] POST /fapi/v1/algoOrder", algo)
+        if str(otype).startswith("STOP"):
+            print("  [dry-run] 停損回查略過")
+        return {"dry": True}
+    placed = _post_protect(symbol, close_side, otype, trigger, qty)
+    if str(otype).startswith("STOP"):
+        return _confirm_stop(symbol, placed, close_side, otype, trigger, qty)
+    return placed
 
 def protect_orders(symbol, algo=None, oo=None):
     """回傳該幣種所有停損/止盈單 [(kind, id_key, id, qty, closePosition)]。"""

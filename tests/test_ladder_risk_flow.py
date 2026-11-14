@@ -56,6 +56,9 @@ class PartialStopTest(unittest.TestCase):
             if path == "/fapi/v1/openOrders":
                 return []
             if method == "POST" and path == "/fapi/v1/algoOrder":
+                protects.append({"algoId": 30, "symbol": (params or {}).get("symbol"), "orderType": (params or {}).get("type"),
+                                 "algoStatus": "NEW", "quantity": (params or {}).get("quantity"),
+                                 "triggerPrice": (params or {}).get("triggerPrice"), "closePosition": "false"})
                 return {"algoId": 30}
             if method == "DELETE":
                 return {}

@@ -78,6 +78,8 @@ class CloseAndHeartbeatTest(unittest.TestCase):
 
         def fake_req(method, path, params=None, signed=False, retries=5):
             if path == "/fapi/v1/income":
+                if (params or {}).get("incomeType") == "TRANSFER":
+                    return []
                 self.assertEqual(params["incomeType"], "REALIZED_PNL")
                 self.assertEqual(params["symbol"], "XUSDT")
                 self.assertIn("startTime", params)
@@ -268,6 +270,8 @@ class MarkReducedTest(unittest.TestCase):
                 return {"algoId": 20}
             if method == "DELETE":
                 return {}
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path, params))
 
         acc = dict(ACC)
@@ -316,6 +320,8 @@ class MarkReducedTest(unittest.TestCase):
                 return {"algoId": 21}
             if method == "DELETE":
                 return {}
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path))
 
         with patch.object(lt, "req", fake_req_qty), \
@@ -603,6 +609,8 @@ class MarkReducedTest(unittest.TestCase):
                     {"symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 8, "quantity": "4",
                      "closePosition": "false", "triggerPrice": "120"},
                 ] if "Algo" in path else []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             raise AssertionError((method, path))
 
         def load():
@@ -652,6 +660,8 @@ class LossPercentFormatTest(unittest.TestCase):
 
         def fake_req(method, path, params=None, signed=False, retries=5):
             if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
                 return []
             raise AssertionError((method, path))
 
@@ -703,6 +713,8 @@ class SingleOrderUnchangedTest(unittest.TestCase):
                     posted.append({"symbol": (params or {}).get("symbol"), "orderType": (params or {}).get("type"),
                                    "algoId": algo_id, "algoStatus": "NEW"})
                     return {"algoId": algo_id}
+                if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                    return []
                 raise AssertionError((method, path))
 
             buf = io.StringIO()

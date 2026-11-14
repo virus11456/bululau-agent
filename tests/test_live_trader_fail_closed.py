@@ -132,6 +132,8 @@ class LiveTraderFailClosedTest(unittest.TestCase):
         deleted = []
 
         def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             if method == "GET" and path == "/fapi/v1/openAlgoOrders":
                 return [{"symbol": "BTCUSDT", "algoId": 99, "orderType": "STOP_MARKET", "side": "SELL"}]
             if method == "GET" and path == "/fapi/v1/openOrders":

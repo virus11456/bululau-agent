@@ -102,6 +102,8 @@ class OpenPathTest(unittest.TestCase):
 
     def fake_req(self, method, path, params=None, signed=False, retries=5):
         self.calls.append((method, path, dict(params or {})))
+        if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+            return []
         if path == "/fapi/v1/positionSide/dual":
             return {"dualSidePosition": False}
         if path == "/fapi/v1/premiumIndex":
@@ -224,6 +226,8 @@ class OpenPathTest(unittest.TestCase):
             if method == "DELETE":
                 return {}
             if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"):
+                return []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
                 return []
             raise AssertionError((method, path))
         with ExitStack() as stack:

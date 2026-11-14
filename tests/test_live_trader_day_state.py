@@ -50,6 +50,8 @@ class DayResetTest(unittest.TestCase):
             "pending": {"DODOXUSDT": {"ladder": True, "orders": [{"orderId": 7, "price": "1"}]}},
             "meta": {"DODOXUSDT": {"setup": "瘸師弟", "stop": "0.9", "target": "1.2"}},
             "watch_heartbeat": "2026-11-13T23:10:00+08:00",
+            "capital_flow_last_ms": 1000,
+            "capital_flow_seen": ["99"],
         }
         out, saved = self.run_reset(previous)
         self.assertEqual(out["pending"], previous["pending"])
@@ -61,6 +63,8 @@ class DayResetTest(unittest.TestCase):
         self.assertEqual(out["slice_margin"], round(200 / lt.CFG["slices"], 4))
         self.assertFalse(out["halted_new"])
         self.assertFalse(out["killed"])
+        self.assertEqual(out["capital_flow_seen"], [])
+        self.assertEqual(out["capital_flow_last_ms"], int(NOW.timestamp() * 1000))
         self.assertTrue(str(out["created"]).startswith("2026-11-14"))
 
     def test_no_extra_keys_match_the_old_reset(self):
@@ -76,7 +80,8 @@ class DayResetTest(unittest.TestCase):
         eq = 200.0
         expected = dict(day="2026-11-14", day_start_equity=eq,
                         slice_margin=round(eq / lt.CFG["slices"], 4),
-                        halted_new=False, killed=False, created=out["created"])
+                        halted_new=False, killed=False, created=out["created"],
+                        capital_flow_last_ms=int(NOW.timestamp() * 1000), capital_flow_seen=[])
         self.assertEqual(out, expected)
         self.assertNotIn("pending", out)
         self.assertNotIn("meta", out)

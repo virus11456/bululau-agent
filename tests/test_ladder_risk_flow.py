@@ -178,6 +178,8 @@ class LadderExpireTest(unittest.TestCase):
                 return {"orderId": 5, "status": "NEW", "executedQty": "0", "origQty": "1", "time": old_ms}
             if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
                 return []
+            if path == "/fapi/v1/income" and (params or {}).get("incomeType") == "TRANSFER":
+                return []
             if method == "DELETE":
                 raise AssertionError("單張不該被逾時撤掉")
             raise AssertionError((method, path))

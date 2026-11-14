@@ -1218,7 +1218,119 @@ def lookup_close(symbol, meta):
 
 
 def _exit_label(reason):
-    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知", "manual": "手動"}.get(reason, reason)
+    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知", "manual": "手動",
+            "target_passed_at_fill": "價已過止盈"}.get(reason, reason)
+
+def _mark_past_target(sym, entry_side, target):
+    """標記價已到或越過計畫止盈就回 True。讀不到就回 None，讓呼叫端改試掛單。"""
+    if target in (None, ""):
+        return None
+    try:
+        mark, _amt = _read_position_mark(sym)
+    except Exception:
+        return None
+    if mark is None:
+        return None
+    try:
+        tgt = Decimal(str(target))
+    except Exception:
+        return None
+    return price_reached_target(entry_side, mark, tgt)
+
+def _cancel_resting_entries(sym, st, live):
+    """撤掉這個幣還掛著的限價進場單。停損、止盈留給後面的孤兒清理。"""
+    pd = (st.get("pending") or {}).get(sym) or {}
+    ids = []
+    if pd.get("ladder"):
+        for item in pd.get("orders") or []:
+            if item.get("orderId"):
+                ids.append(item["orderId"])
+    elif pd.get("orderId"):
+        ids.append(pd["orderId"])
+    try:
+        oo = open_orders(sym) or []
+    except Exception as e:
+        log("warn", msg="價已過止盈，進場單讀取失敗", symbol=sym, err=str(e))
+        oo = []
+    for order in oo:
+        if not isinstance(order, dict) or order.get("symbol") not in (None, sym):
+            continue
+        if order.get("type") != "LIMIT":
+            continue
+        if str(order.get("status") or "NEW") not in ("NEW", "PARTIALLY_FILLED"):
+            continue
+        if order.get("orderId"):
+            ids.append(order["orderId"])
+    seen = set()
+    for oid in ids:
+        if oid in seen:
+            continue
+        seen.add(oid)
+        try:
+            cancel_entry_order(sym, oid, live)
+        except BinanceError as e:
+            if e.code != -2011:
+                log("error", msg="價已過止盈但撤進場單失敗", symbol=sym, err=str(e), orderId=oid)
+        except Exception as e:
+            log("error", msg="價已過止盈但撤進場單失敗", symbol=sym, err=str(e), orderId=oid)
+
+def _record_target_passed_close(sym, st, live):
+    """平倉成功後沿用既有的出場紀錄，原因固定為 target_passed_at_fill。"""
+    m = {}
+    if sym in (st.get("meta") or {}):
+        m = st["meta"].get(sym) or {}
+    elif sym in (st.get("pending") or {}):
+        m = st["pending"].get(sym) or {}
+    closed = lookup_close(sym, m)
+    pnl = None
+    try:
+        start_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+        rows = req("GET", "/fapi/v1/income",
+                   {"symbol": sym, "incomeType": "REALIZED_PNL", "startTime": start_ms, "limit": 1000},
+                   signed=True)
+        if isinstance(rows, list):
+            pnl = sum(float(r.get("income") or 0) for r in rows)
+    except Exception:
+        pnl = None
+    pnl_text, pnl_raw = (None, None) if pnl is None else format_pnl(pnl)
+    fields = dict(symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+                  exit_price=closed.get("exit_price"), exit_side=closed.get("exit_side"), qty=closed.get("qty"),
+                  reason="target_passed_at_fill", pnl=pnl_text)
+    if closed.get("exit_price_raw") is not None:
+        fields["exit_price_raw"] = closed["exit_price_raw"]
+    if pnl_raw is not None:
+        fields["pnl_raw"] = pnl_raw
+    log("position_closed", **fields)
+    log("target_passed_at_fill", event="target_passed_at_fill", symbol=sym, reason="target_passed_at_fill")
+    px = "null" if closed.get("exit_price") is None else closed["exit_price"]
+    py = "null" if pnl_text is None else pnl_text
+    print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label("target_passed_at_fill"), py))
+    if isinstance(st.get("meta"), dict):
+        st["meta"].pop(sym, None)
+    if isinstance(st.get("pending"), dict):
+        st["pending"].pop(sym, None)
+    if live:
+        save_state(st)
+
+def close_because_target_passed(sym, amt, st, live):
+    """補掛止盈時價格已經越過止盈：市價 reduceOnly 平掉整個持倉。
+
+    dry-run 只印「會市價平倉」，不下單、不寫狀態。
+    市價平倉失敗就保留停損，記一筆失敗，這一輪不再重試。
+    平成之後撤掉剩下的進場單和條件單，並記 position_closed。
+    """
+    if not live:
+        print("會市價平倉")
+        return
+    try:
+        market_close(sym, amt, True, "target_passed_at_fill")
+    except Exception as e:
+        log("error", msg="價已過止盈但市價平倉失敗，保留停損", symbol=sym, err=str(e),
+            reason="target_passed_at_fill")
+        return
+    _cancel_resting_entries(sym, st, True)
+    cancel_symbol_orphans(sym, True)
+    _record_target_passed_close(sym, st, True)
 
 def meta_from_pending(old, pd):
     """階梯或限價轉成持倉時，已標記的減倉、成本停損、no_tp 不能被蓋掉。"""
@@ -1343,9 +1455,22 @@ def cmd_manage(a):
             except Exception as e:
                 log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
         if not has_tp and m and not no_tp:
-            # 限價成交前不預掛止盈，所以成交後缺止盈要在這裡補。失敗只記 log，下一輪再試；no_tp 仍只給減倉標記用。
-            try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
-            except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+            # 限價成交前不預掛止盈。成交後缺止盈才補。
+            # 價格已經越過止盈（標記價，或補掛收到 -2021）就市價平倉，不重試掛止盈。
+            # 其他失敗仍只記 log，下一輪再試。no_tp 仍只給減倉標記用。
+            entry_side = "BUY" if amt > 0 else "SELL"
+            if _mark_past_target(sym, entry_side, m.get("target")):
+                close_because_target_passed(sym, amt, st, live)
+                continue
+            try:
+                place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
+            except BinanceError as e:
+                if e.code == -2021:
+                    close_because_target_passed(sym, amt, st, live)
+                else:
+                    log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+            except Exception as e:
+                log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
     # 已無持倉的幣種：先把 meta 裡已平的記下來，再清孤兒保護單（清理本身不改）。
     held = {p["symbol"] for p in positions(acc)}
     closed_note = False

@@ -175,5 +175,144 @@ class TargetHitTest(unittest.TestCase):
         self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
 
 
+class TargetPassedAtFillTest(unittest.TestCase):
+    def setUp(self):
+        self.logs = []
+        self.calls = []
+        self.saved = []
+        self.state = {"pending": {}, "meta": {"XUSDT": {
+            "setup": "瘸師弟", "stop": "90", "target": "120", "side": "BUY",
+        }}}
+        self.amt = "1"
+        self.mark = "100"
+        self.tp_error = None
+        self.close_error = None
+        self.entry = None
+
+    def manage(self, live):
+        def load():
+            return json.loads(json.dumps(self.state))
+
+        def save(state):
+            self.state.clear()
+            self.state.update(json.loads(json.dumps(state)))
+            self.saved.append(json.loads(json.dumps(state)))
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            self.calls.append((method, path, dict(params or {})))
+            if path == "/fapi/v2/positionRisk":
+                return [{"symbol": "XUSDT", "positionAmt": self.amt, "markPrice": self.mark}]
+            if path == "/fapi/v1/openAlgoOrders":
+                return [{"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9,
+                         "quantity": self.amt.lstrip("-"), "closePosition": "false", "triggerPrice": "90"}]
+            if path == "/fapi/v1/openOrders":
+                return [self.entry] if self.entry else []
+            if method == "GET" and path == "/fapi/v1/order":
+                return {"orderId": (params or {}).get("orderId"), "status": "PARTIALLY_FILLED",
+                        "executedQty": "1", "origQty": "3"}
+            if path in ("/fapi/v1/userTrades", "/fapi/v1/income"):
+                return []
+            if method == "POST" and path == "/fapi/v1/algoOrder":
+                if self.tp_error:
+                    raise self.tp_error
+                return {"algoId": 21}
+            if method == "POST" and path == "/fapi/v1/order":
+                if self.close_error:
+                    raise self.close_error
+                return {"orderId": 50}
+            if method == "DELETE":
+                return {}
+            raise AssertionError((method, path, params))
+
+        acc = {
+            "totalWalletBalance": "1000", "totalUnrealizedProfit": "0", "availableBalance": "1000",
+            "positions": [{"symbol": "XUSDT", "positionAmt": self.amt, "positionSide": "BOTH"}],
+        }
+        day = {"day": "2026-11-14", "day_start_equity": 1000.0, "slice_margin": 50.0,
+               "halted_new": False, "killed": False}
+        buf = io.StringIO()
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "log", side_effect=lambda kind, **kw: self.logs.append((kind, kw))), \
+                patch.object(lt, "account", return_value=acc), \
+                patch.object(lt, "day_state", return_value=day), \
+                patch.object(lt, "load_state", side_effect=load), \
+                patch.object(lt, "save_state", side_effect=save), \
+                patch("urllib.request.urlopen", side_effect=AssertionError("network")):
+            with redirect_stdout(buf):
+                lt.cmd_manage(type("A", (), {"live": live})())
+        return buf.getvalue()
+
+    def _market_orders(self):
+        return [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+
+    def test_minus_2021_closes_and_records(self):
+        self.tp_error = lt.BinanceError(400, -2021, "would immediately trigger")
+        text = self.manage(True)
+        markets = self._market_orders()
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(markets[0][2]["type"], "MARKET")
+        self.assertEqual(markets[0][2]["reduceOnly"], "true")
+        self.assertEqual(markets[0][2]["side"], "SELL")
+        self.assertTrue(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        self.assertNotIn("XUSDT", self.state.get("meta") or {})
+        closed = [kw for kind, kw in self.logs if kind == "position_closed"]
+        self.assertEqual(closed[0]["reason"], "target_passed_at_fill")
+        self.assertTrue(any(kind == "target_passed_at_fill" for kind, _kw in self.logs))
+        self.assertIn("觸發=價已過止盈", text)
+        algo_posts = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(len(algo_posts), 1)
+
+    def test_mark_past_target_closes_long_without_placing_tp(self):
+        self.mark = "120"
+        self.manage(True)
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        markets = self._market_orders()
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(markets[0][2]["side"], "SELL")
+        self.assertEqual(markets[0][2]["reduceOnly"], "true")
+        self.assertNotIn("XUSDT", self.state.get("meta") or {})
+
+    def test_mark_past_target_closes_short(self):
+        self.amt = "-2"
+        self.mark = "120"
+        self.state["meta"]["XUSDT"]["side"] = "SELL"
+        self.manage(True)
+        markets = self._market_orders()
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(markets[0][2]["side"], "BUY")
+        self.assertEqual(markets[0][2]["reduceOnly"], "true")
+        self.assertNotIn("XUSDT", self.state.get("meta") or {})
+
+    def test_market_close_failure_keeps_stop(self):
+        self.mark = "130"
+        self.close_error = lt.BinanceError(400, -2010, "close rejected")
+        self.manage(True)
+        self.assertFalse(any(c[0] == "DELETE" for c in self.calls))
+        self.assertIn("XUSDT", self.state["meta"])
+        self.assertFalse(any(kind == "position_closed" for kind, _kw in self.logs))
+        self.assertTrue(any("保留停損" in str(kw.get("msg")) for _k, kw in self.logs))
+
+    def test_dry_run_prints_and_does_not_order(self):
+        self.mark = "130"
+        text = self.manage(False)
+        self.assertIn("會市價平倉", text)
+        self.assertFalse(any(c[0] == "POST" for c in self.calls))
+        self.assertFalse(any(c[0] == "DELETE" for c in self.calls))
+        self.assertEqual(self.saved, [])
+        self.assertIn("XUSDT", self.state["meta"])
+
+    def test_partial_fill_closes_position_and_cancels_resting_entry(self):
+        self.mark = "121"
+        self.state = {"meta": {}, "pending": {"XUSDT": {
+            "orderId": 77, "side": "BUY", "target": "120", "stop": "90", "setup": "小師弟",
+        }}}
+        self.entry = {"symbol": "XUSDT", "orderId": 77, "type": "LIMIT", "status": "PARTIALLY_FILLED"}
+        self.manage(True)
+        self.assertTrue(any(c[0] == "DELETE" and c[1] == "/fapi/v1/order" and c[2].get("orderId") == 77
+                            for c in self.calls))
+        self.assertEqual(len(self._market_orders()), 1)
+        self.assertNotIn("XUSDT", self.state.get("pending") or {})
+
+
 if __name__ == "__main__":
     unittest.main()

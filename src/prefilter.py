@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""機械篩選：布鹿流 / 小師弟(ETH) / 瘸師弟 / 資金費率法。只讀幣安公開端點，不下單。
+"""機械篩選：布鹿流 / 小師弟 / 瘸師弟 / 大師兄 / 資金費率法。只讀幣安公開端點，不下單。
 實盤最終判斷以 docs/strategy.md 為準（2026-11-03 例行流程）。亞洲盤的 confidence_hint 是舊提示，代理不得依它降份。
 stdout：一個 JSON。結束碼：10＝有候選、要交給代理判斷；0＝沒有；2＝資料或限流錯誤，這輪不要判斷進場。
 用法：python3 src/prefilter.py [--symbol XUSDT] [--asof 'YYYY-MM-DDTHH:MM'] [--quiet]
@@ -54,14 +54,41 @@ def kuai_shidi(k15, rs):
                         plan="ladder limit buys (paper); exit 1-1.5R or any bounce; max 2h")
     return None
 
-def xiao_shidi(k15):
-    """小師弟 (ETH only): slow 15m decline then volume flush; drop >=100pt; bounce >=40% of drop; last bar green."""
+# ETH 起跌要遠大於 100 點。原文寫「至少超過 100 點」，沒有第二個數字。這次用大於 100 點。
+# 其他幣大約 3% 以上。用跌幅 / 起跌高點。
+XIAO_ETH_DROP_MIN = 100
+XIAO_ALT_DROP_PCT = 0.03
+XIAO_UNCONFIRMED = [
+    "ETH 起跌要遠大於 100 點。原文只寫至少超過 100 點，沒有更嚴的第二個數字。這次用大於 100 點，更嚴的門檻未確認。",
+    "其他幣起跌大約 3% 以上。這次用跌幅除以起跌高點，至少 3%。「大約」要留多少誤差未確認。",
+    "BTC 起跌用點數還是 3% 未確認。這次只有 ETH 用點數，BTC 走其他幣的 3%。",
+    "前低下方再留多少未確認。BTC、ETH 取至少 3% 與前低的較低者。其他幣 15m 至少 1% 還是 2% 未確認，這次用 1%，並且不高於前低。",
+    "第二次下殺的 K 棒長什麼樣未確認。篩網仍是緩跌急殺、爆量、彈回 40% 以上；進場用市價，不在長黑那一根進。",
+    "成交後若實際虛損超過淨值 1%，要減倉、全平還是接受，未確認。這次不改 1% ，也不自動減碼。",
+]
+
+def xiao_drop_ok(symbol, high, low):
+    drop = high - low
+    if symbol in ("ETHUSDT",):
+        if drop <= XIAO_ETH_DROP_MIN:
+            return False, "ETH drop {0:.0f}pt <=100".format(drop)
+        return True, None
+    if not high:
+        return False, "bad high"
+    if drop / high < XIAO_ALT_DROP_PCT:
+        return False, "drop {0:.1%} <3%".format(drop / high)
+    return True, None
+
+def xiao_shidi(k15, symbol="ETHUSDT"):
+    """小師弟：緩跌後急殺爆量，彈回 40–65%。ETH 起跌要超過 100 點，其他幣大約 3%。進場是市價。"""
     w = k15[-40:]
     li = min(range(len(w)), key=lambda i: w[i]["l"]); L = w[li]["l"]
     if li < 4 or li > len(w) - 2: return None, "low too old/too fresh"
     hi_i = max(range(0, li), key=lambda i: w[i]["h"]); H = w[hi_i]["h"]
     drop = H - L
-    if drop < 100: return None, f"drop {drop:.0f}pt <100"
+    ok, why = xiao_drop_ok(symbol, H, L)
+    if not ok:
+        return None, why
     av = sum(x["v"] for x in k15[-60:-40]) / 20 or 1
     flush = max(w[max(li - 2, 0):li + 1], key=lambda x: x["v"])
     if flush["v"] < 2 * av or pct(flush["o"], flush["c"]) < 0.8: return None, "no volume flush long black"
@@ -70,16 +97,18 @@ def xiao_shidi(k15):
     bounce = (c - L) / drop
     if bounce < 0.4: return None, f"bounce {bounce:.0%} <40%"
     if bounce > 0.65: return None, f"bounce {bounce:.0%} -> chasing"
-    stop = min(L, c * 0.97)  # ETH 至少 3%，並且在前低或更低。再往下留多少，原文未確認。
+    min_pct = 0.03 if symbol in ("BTCUSDT", "ETHUSDT") else 0.01
+    stop = min(L, c * (1 - min_pct))
     risk = c - stop
     if risk <= 0: return None, "bad risk"
     target = c + 2 * risk
     rr = (target - c) / risk
     if rr < RR_MIN: return None, f"rr {rr:.2f}"
     return dict(setup="小師弟", tf="15m", entry=c, stop=round(stop, 8), target=round(target, 8), rr=round(rr, 2),
-                drop_pt=round(drop, 1), bounce_pct=round(bounce * 100),
-                plan="2R 一次全出；停損固定在前低下方；不平一半、不移保本",
-                unconfirmed=["前低下方再留多少未確認。ETH 取至少 3% 與前低的較低者。"]), None
+                drop_pt=round(drop, 1), drop_pct=round(drop / H * 100, 2) if H else None,
+                bounce_pct=round(bounce * 100), entry_type="market",
+                plan="第二次下殺市價進場。停損固定在前低下方。到 2R 一次全出。試算進場價是這一根收盤，實際止盈用成交均價重算。",
+                unconfirmed=list(XIAO_UNCONFIRMED)), None
 
 def maset(k):
     cl = [x["c"] for x in k]
@@ -257,8 +286,8 @@ def run(args):
         k = k15.get(s)
         if not k or len(k) < 100: continue
         rs = dict(rs24=round(chg(k, 96) - btc24, 2), rs4h=round(chg(k, 16) - btc4, 2), big=qv >= BIG_QV, qv_m=round(qv / 1e6, 1))
-        if s == "ETHUSDT":
-            c, why = xiao_shidi(k)
+        c, why = xiao_shidi(k, s)
+        if c or (why and not str(why).startswith("drop ") and not str(why).startswith("ETH drop")):
             (cands if c else near).append(dict(symbol=s, **(c or {"setup": "小師弟", "fail": why}), **rs))
         strong = rs["rs24"] > 0 and rs["rs4h"] > -1
         if strong and kuai_today() < 2:

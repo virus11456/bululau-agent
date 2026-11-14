@@ -950,8 +950,29 @@ def cmd_status(a):
     dual, multi = status_account_mode()
     print_status_body(acc, s, pos, oo, ao, dual, multi)
 
+def resolve_entry_type(setup, requested):
+    """小師弟第二次下殺用市價。瘸師弟、大師兄和其他型態維持呼叫端給的方式。"""
+    if setup == "小師弟":
+        return "market"
+    return requested
+
+def xiao_target_from_fill(side, avg, stop, tick):
+    """實際成交均價重算 2R，只改止盈價。停損與數量不動。算不出來就回 None。"""
+    avg = Decimal(str(avg))
+    stop = Decimal(str(stop))
+    if side == "BUY":
+        if avg <= stop:
+            return None
+        raw = avg + 2 * (avg - stop)
+    else:
+        if avg >= stop:
+            return None
+        raw = avg - 2 * (stop - avg)
+    return fmt(rnd(raw, tick, ROUND_DOWN if side == "BUY" else ROUND_UP))
+
 def cmd_open(a):
     live = a.live; sym = a.symbol.upper(); side = a.side.upper()
+    a.entry_type = resolve_entry_type(getattr(a, "setup", None), a.entry_type)
     acc = account(); s = day_state(acc); eq = equity_of(acc)
     # 風控閘門
     if os.path.exists(HALT_FLAG) or s["killed"]: raise SystemExit("已觸發 30% 全平，需回報使用者，禁止開倉")
@@ -997,6 +1018,11 @@ def cmd_open(a):
     req("POST", "/fapi/v1/order/test", order, signed=True); print("  /order/test 通過")
     if not live:
         print(f"  [dry-run] 設定 {sym} ISOLATED、槓桿 {lev}x"); print("  [dry-run] POST /fapi/v1/order", order)
+        if a.setup == "小師弟":
+            place_protect(sym, close_side, "STOP_MARKET", stop_p, False)
+            place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False)
+            print("  [dry-run] 小師弟市價進場後會掛停損和止盈；這次不下單、不寫狀態")
+            return
         place_protect(sym, close_side, "STOP_MARKET", stop_p, False)
         print("  [dry-run] 止盈不預掛，成交後由 watch/manage 補"); return
     try: req("POST", "/fapi/v1/marginType", dict(symbol=sym, marginType="ISOLATED"), signed=True)
@@ -1021,13 +1047,49 @@ def cmd_open(a):
         st = load_state(); st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, orderId=oid,
                                                                      qty=fmt(qty), side=side); save_state(st)
         print("限價單已掛，停損已預掛；止盈等成交後補", oid); return
+    if a.setup == "小師弟":
+        avg = r.get("avgPrice")
+        rebuilt = xiao_target_from_fill(side, avg, stop_p, info["tick"]) if avg not in (None, "", "0", "0.0") else None
+        if rebuilt:
+            log("xiao_target_from_fill", symbol=sym, avg=str(avg), stop=stop_p, target=rebuilt, planned=tp_p)
+            tp_p = rebuilt
+        if avg not in (None, "", "0", "0.0"):
+            try:
+                slip = abs(Decimal(str(avg)) - Decimal(stop_p)) * Decimal(qty)
+                if slip > Decimal(str(risk_usdt)):
+                    log("warn", msg="成交後實際虛損超過 1% 風控，處理方式未確認", symbol=sym,
+                        est_loss=fmt(slip), risk_cap=round(risk_usdt, 2))
+            except Exception:
+                pass
+    signed_amt = float(qty) * (1 if side == "BUY" else -1)
     try:
         place_protect(sym, close_side, "STOP_MARKET", stop_p, True)
     except Exception as e:
         log("error", msg="停損掛單失敗，立即市價平倉", err=str(e))
-        market_close(sym, float(qty) * (1 if side == "BUY" else -1), True, "stop_place_failed"); raise SystemExit(f"停損失敗已平倉: {e}")
-    try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True)
-    except Exception as e: log("error", msg="止盈掛單失敗（停損已在）", err=str(e))
+        try:
+            market_close(sym, signed_amt, True, "stop_place_failed")
+        except Exception as e2:
+            log("error", msg="停損失敗且市價平倉失敗，不再重試", symbol=sym, err=str(e2))
+            raise SystemExit("停損失敗且平倉失敗: {0}".format(e2))
+        raise SystemExit("停損失敗已平倉: {0}".format(e))
+    if a.setup == "小師弟" and _mark_past_target(sym, side, tp_p):
+        st = load_state()
+        st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup)
+        save_state(st)
+        close_because_target_passed(sym, signed_amt, st, True)
+        return
+    try:
+        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True)
+    except BinanceError as e:
+        if a.setup == "小師弟" and e.code == -2021:
+            st = load_state()
+            st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup)
+            save_state(st)
+            close_because_target_passed(sym, signed_amt, st, True)
+            return
+        log("error", msg="止盈掛單失敗（停損已在）", symbol=sym, err=str(e))
+    except Exception as e:
+        log("error", msg="止盈掛單失敗（停損已在）", symbol=sym, err=str(e))
     st = load_state(); st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup); save_state(st)
     print("已進場並掛好保護單", r.get("avgPrice"), r.get("executedQty"))
 

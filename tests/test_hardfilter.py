@@ -201,9 +201,13 @@ class BlacklistAndRunTest(unittest.TestCase):
     def test_other_setups_are_kept_without_fetch(self):
         def no_fetch(*_a):
             raise AssertionError("不該抓 K 線")
-        body = {"candidates": [{"symbol": "ETHUSDT", "setup": "小師弟"}, {"symbol": "SOLUSDT", "setup": "funding_rate"}]}
+        body = {"candidates": [
+            {"symbol": "ETHUSDT", "setup": "小師弟"},
+            {"symbol": "SOLUSDT", "setup": "funding_rate"},
+            {"symbol": "BTCUSDT", "setup": "大師兄"},
+        ]}
         out = hf.run(body, no_fetch, T0)
-        self.assertEqual(len(out["kept"]), 2)
+        self.assertEqual(len(out["kept"]), 3)
         self.assertEqual(out["blocked"], [])
 
     def test_per_candidate_data_error_keeps(self):

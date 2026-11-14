@@ -146,5 +146,77 @@ class PromptTextTest(unittest.TestCase):
         self.assertNotIn("不追離好球帶或深殺反彈", prompt)
 
 
+def _quiet(o, h, l, c, v=10.0):
+    return bar(o, h, l, c, v)
+
+
+class XiaoScreenTest(unittest.TestCase):
+    def series(self, high, low, last_close, symbol_scale=1):
+        bars = [_quiet(100, 101, 99, 100, 10) for _ in range(20)]
+        window = [_quiet(high - 0.2, high - 0.1, high - 0.3, high - 0.2, 10) for _ in range(40)]
+        window[5] = _quiet(high - 0.5, high, high - 0.2, high - 0.4, 10)
+        window[20] = _quiet(low * 1.012, low * 1.012, low, low, 40)
+        window[-1] = _quiet(last_close - 0.2, last_close + 0.2, last_close - 0.1, last_close, 10)
+        return bars + window
+
+    def test_eth_needs_more_than_100_points_and_uses_market(self):
+        hit, why = prefilter.xiao_shidi(self.series(3500, 3300, 3400), "ETHUSDT")
+        self.assertIsNotNone(hit, why)
+        self.assertEqual(hit["entry_type"], "market")
+        self.assertEqual(hit["setup"], "小師弟")
+        self.assertLessEqual(hit["stop"], 3300)
+        self.assertGreater(hit["target"], hit["entry"])
+        self.assertTrue(any("未確認" in line for line in hit["unconfirmed"]))
+        miss, why = prefilter.xiao_shidi(self.series(3400, 3300, 3350), "ETHUSDT")
+        self.assertIsNone(miss)
+        self.assertIn("100", why)
+
+    def test_other_coins_use_about_3_percent(self):
+        hit, why = prefilter.xiao_shidi(self.series(100, 96, 98), "SOLUSDT")
+        self.assertIsNotNone(hit, why)
+        self.assertEqual(hit["entry_type"], "market")
+        self.assertGreaterEqual(hit["drop_pct"], 3)
+        miss, why = prefilter.xiao_shidi(self.series(100, 98, 99), "SOLUSDT")
+        self.assertIsNone(miss)
+        self.assertIn("3%", why)
+
+    def test_da_shixiong_not_on_the_black_bar_and_keeps_stop_floor(self):
+        bars = []
+        for i in range(10):
+            bars.append(bar(100, 102, 99, 101, 10))
+        bars.append(bar(110, 112, 90, 95, 30))
+        for i in range(9):
+            bars.append(bar(100, 108, 96, 101, 10))
+        for i in range(9):
+            bars.append(bar(98, 104, 94, 99, 10))
+        bars.append(bar(96, 97, 92, 96, 10))
+        hit, why = prefilter.da_shixiong(bars, "BTCUSDT")
+        self.assertIsNotNone(hit, why)
+        self.assertGreaterEqual(hit["rebound_bars"], 10)
+        self.assertNotEqual(hit["entry_mode"], "")
+        self.assertLessEqual(hit["stop"], 90)
+        self.assertAlmostEqual(hit["target_3r"] - hit["entry"], 1.5 * (hit["target"] - hit["entry"]), places=4)
+        self.assertIn("4R", hit["exit"])
+        self.assertTrue(any("未確認" in line for line in hit["unconfirmed"]))
+        bars[12]["c"] = 111
+        miss, why = prefilter.da_shixiong(bars, "BTCUSDT")
+        self.assertIsNone(miss)
+        self.assertIn("V", why)
+        clean = []
+        for i in range(10):
+            clean.append(bar(100, 102, 99, 101, 10))
+        clean.append(bar(110, 112, 90, 95, 30))
+        for i in range(9):
+            clean.append(bar(100, 108, 96, 101, 10))
+        for i in range(9):
+            clean.append(bar(98, 104, 94, 99, 10))
+        clean.append(bar(96, 97, 92, 96, 10))
+        alt, why = prefilter.da_shixiong(clean, "SOLUSDT")
+        self.assertIsNotNone(alt, why)
+        self.assertLessEqual(alt["stop"], alt["entry"] * 0.9 + 1e-6)
+        import inspect
+        self.assertIn('setup="funding_rate"', inspect.getsource(prefilter.funding))
+
+
 if __name__ == "__main__":
     unittest.main()

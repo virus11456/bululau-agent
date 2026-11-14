@@ -68,3 +68,59 @@ class PositionManagerTest(unittest.TestCase):
         self.assertEqual(result, "close")
         self.assertEqual(row["exit_reason"], "target")
         self.assertEqual(row["exit"], 120.0)
+
+    def test_xiao_full_exit_at_2r_and_stop_stays(self):
+        events = []
+        row = self.position(pattern="小師弟", target=120.0)
+        pm.klines = lambda *_a, **_k: [bar(self.t0, 95.0, 110.0, 109.0)]
+        self.assertIsNone(pm.manage(row, events))
+        self.assertEqual(row["stop"], 90.0)
+        self.assertEqual(events, [])
+        events = []
+        pm.klines = lambda *_a, **_k: [bar(self.t0 + 900000, 95.0, 120.0, 119.0)]
+        row["pm_last_bar"] = self.t0
+        result = pm.manage(row, events)
+        self.assertEqual(result, "close")
+        self.assertEqual(row["exit_reason"], "exit_2r")
+        self.assertEqual(row["exit"], 120.0)
+        self.assertEqual(row["stop"], 90.0)
+        self.assertIsNone(pm.RULES["小師弟"]["be_at_r"])
+        self.assertIsNone(pm.RULES["小師弟"]["time_bars"])
+
+    def test_da_shixiong_scales_at_2r_and_is_flat_before_4r(self):
+        events = []
+        row = self.position(pattern="大師兄", target=120.0)
+        pm.klines = lambda *_a, **_k: [bar(self.t0, 95.0, 125.0, 124.0)]
+        self.assertIsNone(pm.manage(row, events))
+        self.assertEqual(row["stop"], 90.0)
+        self.assertTrue(row["scaled_2r"])
+        self.assertEqual(events[0]["action"], "scale_50_at_2r")
+        events = []
+        row = self.position(pattern="大師兄", target=120.0)
+        pm.klines = lambda *_a, **_k: [bar(self.t0, 95.0, 135.0, 134.0)]
+        self.assertEqual(pm.manage(row, events), "close")
+        self.assertEqual(row["exit_reason"], "exit_3r_rest")
+        self.assertEqual(row["exit"], 130.0)
+        self.assertEqual(row["stop"], 90.0)
+        events = []
+        row = self.position(pattern="大師兄", target=120.0)
+        pm.klines = lambda *_a, **_k: [bar(self.t0, 95.0, 145.0, 144.0)]
+        self.assertEqual(pm.manage(row, events), "close")
+        self.assertEqual(row["exit_reason"], "exit_3r_rest")
+        self.assertEqual(row["exit"], 130.0)
+        self.assertEqual(row["r"], 2.5)
+
+    def test_da_shixiong_stop_after_half_is_half_r(self):
+        events = []
+        row = self.position(pattern="大師兄", target=120.0)
+        pm.klines = lambda *_a, **_k: [
+            bar(self.t0, 95.0, 125.0, 124.0),
+            bar(self.t0 + 900000, 90.0, 110.0, 91.0),
+        ]
+        self.assertEqual(pm.manage(row, events), "close")
+        self.assertEqual(row["exit_reason"], "stop")
+        self.assertEqual(row["r"], 0.5)
+        self.assertIsNone(pm.RULES["大師兄"]["be_at_r"])
+        self.assertIsNone(pm.RULES["大師兄"]["time_bars"])
+        self.assertEqual(pm.RULES["瘸師弟"]["be_at_r"], 0.5)
+        self.assertEqual(pm.RULES["布鹿流"]["be_at_r"], 1.0)

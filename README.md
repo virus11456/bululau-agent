@@ -19,7 +19,7 @@
 
 沒有改的紅線：BTC 破位 guard、重大事件前後 30 分鐘、單筆 1%／20 份／最多 5 倉／最多 5 倍、日虧 7%／30%、妖幣 1/4 份、60 秒 watch。
 
-已部署檔 sha1：`~/quantboy-auto-scan/prefilter.py` `9e8bddf7`、`~/quantboy-gate/hardfilter.py` `905b3b49`、未遮罩 `~/quantboy-gate/full_prompt.md` `028711bc5166062e93dfecc946f11923e0882c4e`（2026-11-13 13:11 台北）、`~/quantboy-paper/discretionary/prefilter.py` `29d182f9`。
+routine 實際帶的初篩是 `--prefilter /Users/frank/quantboy-paper/discretionary/prefilter.py`（操盤手 2026-11-14 實查 sha1 `29d182f9`）。部署以這份為準。`~/quantboy-auto-scan/prefilter.py`（sha1 `9e8bddf7`）實盤未使用。其餘已部署檔：`~/quantboy-gate/hardfilter.py` `905b3b49`、未遮罩 `~/quantboy-gate/full_prompt.md` `028711bc5166062e93dfecc946f11923e0882c4e`（2026-11-13 13:11 台北）。
 
 ## 現行掃描與尚未部署的目標分工
 

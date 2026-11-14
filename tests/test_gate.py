@@ -433,6 +433,28 @@ class GateHardfilterTest(unittest.TestCase):
         self.assertIn("=== hardfilter", out)
         self.assertEqual(self.log_rows()[-1]["n_candidates"], 1)
 
+    def test_xiao_and_da_shixiong_are_kept_and_printed_for_the_prompt(self):
+        import hardfilter as hf
+        xiao = {"symbol": "ETHUSDT", "setup": "小師弟", "entry": 3400, "stop": 3300, "target": 3600}
+        da = {"symbol": "BTCUSDT", "setup": "大師兄", "entry": 100, "stop": 90, "target": 120}
+
+        def real(text):
+            def no_fetch(*_a):
+                raise AssertionError("不該抓 K 線")
+            out = hf.run(json.loads(text), no_fetch, 1762790400000)
+            return ok(json.dumps(out, ensure_ascii=False))
+
+        runner = FakeRunner(prefilter=self.pref(xiao, da), when=self.when, hardfilter=real)
+        code, out = self.run_gate(runner)
+        self.assertEqual(code, gate.WAKE)
+        self.assertTrue(out.splitlines()[0].startswith("WAKE candidates"), out)
+        self.assertIn("=== prefilter", out)
+        self.assertIn("=== hardfilter", out)
+        self.assertIn("小師弟", out)
+        self.assertIn("大師兄", out)
+        self.assertEqual(self.log_rows()[-1]["n_candidates"], 2)
+        self.assertEqual(self.log_rows()[-1]["hardfilter"]["blocked"], [])
+
     def test_hardfilter_failures_keep_candidates_and_wake(self):
         bad = [
             {"code": 2, "stdout": json.dumps({"ok": False, "error": "rate_limited: 429 on klines CAPUSDT"}), "stderr": ""},

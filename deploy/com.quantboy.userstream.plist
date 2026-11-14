@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.quantboy.userstream</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/REPLACE_USER/quantboy-live/user_stream.py</string>
+		<string>--live</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/REPLACE_USER/quantboy-live</string>
+	<key>StandardOutPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/user_stream.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/REPLACE_USER/quantboy-live/user_stream.err.log</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+</dict>
+</plist>

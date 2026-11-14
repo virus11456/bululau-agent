@@ -165,8 +165,11 @@ def fmt(d): return format(d.normalize(), "f")
 class Lock:
     def __enter__(self):
         self.f = open(LOCK, "w")
-        try: fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise SystemExit("另一個 live_trader 正在執行（檔案鎖），稍後再試")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.f.close()
+            raise SystemExit("另一個 live_trader 正在執行（檔案鎖），稍後再試")
         return self
     def __exit__(self, *a): fcntl.flock(self.f, fcntl.LOCK_UN); self.f.close()
 
@@ -409,6 +412,126 @@ def cancel_entry_order(symbol, order_id, live):
     req("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, signed=True)
     log("cancel_entry", symbol=symbol, orderId=order_id)
 
+LADDER_EXPIRE_MS = 2 * 60 * 60 * 1000
+
+def resize_ladder_partial(symbol, close_side, position_qty, planned_qty, live):
+    """部分成交：止盈數量改成實際持倉，觸發價不重算。
+
+    停損維持計畫總量，而且一定是 reduceOnly（有數量就不能同時 closePosition）。
+    幣安的 reduceOnly 只會減倉，數量大於現倉也不會開出反向倉。
+    closePosition=true 不能帶 quantity，所以這裡不用它，才能把停損數量留在計畫總量。
+    """
+    for po in protect_orders(symbol):
+        is_stop = str(po["t"]).startswith("STOP")
+        if is_stop and po.get("cp"):
+            continue
+        target = planned_qty if is_stop else position_qty
+        if po["qty"] is not None and Decimal(str(po["qty"])) == target:
+            continue
+        if (not is_stop) and (po.get("cp") or po["qty"] is None):
+            continue
+        kind = "STOP_MARKET" if is_stop else "TAKE_PROFIT_MARKET"
+        print("  調整 {0} 數量 {1} → {2}".format(kind, po["qty"], fmt(target)))
+        place_protect(symbol, close_side, kind, po["trig"], live, qty=fmt(target))
+        cancel_protect(symbol, po, live)
+
+
+def ladder_anchor_ms(pd, orders):
+    """掛出時間。優先用 pending 裡的 placed_at，否則用交易所訂單的 time。"""
+    raw = pd.get("placed_at")
+    if raw:
+        try:
+            return int(datetime.fromisoformat(str(raw)).timestamp() * 1000)
+        except (TypeError, ValueError):
+            pass
+    times = []
+    for order in orders or []:
+        if order.get("time"):
+            try:
+                times.append(int(order["time"]))
+            except (TypeError, ValueError):
+                continue
+    return min(times) if times else None
+
+
+def expire_unfilled_ladder(sym, pd, rows, held_amt, live, now_ms=None):
+    """超過 2 小時仍未成交的進場單撤掉。已成交的倉與它的停損止盈不動。
+
+    任何一張進場單撤不掉，或撤完再查仍有成交，都不撤預掛停損，pending 也留著。
+    停損和止盈只在每一張的 executedQty 重新查過、確認是 0、而且沒有持倉時才撤。
+    回傳 drop / partial / None。
+    """
+    anchor = ladder_anchor_ms(pd, rows)
+    if anchor is None:
+        return None
+    now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    if now_ms - anchor < LADDER_EXPIRE_MS:
+        return None
+    resting = [o for o in rows if o.get("status") in ("NEW", "PARTIALLY_FILLED")]
+    if not resting:
+        return None
+    amt = held_amt.get(sym, 0.0) if held_amt else 0.0
+    cancel_failed = False
+    for order in resting:
+        log("ladder_expire", symbol=sym, orderId=order.get("orderId"), status=order.get("status"))
+        try:
+            cancel_entry_order(sym, order.get("orderId"), live)
+        except BinanceError as e:
+            # -2011 代表單已經不在，不能當成「成交量是 0」。下面再查一次。
+            if e.code == -2011:
+                log("ladder_expire", symbol=sym, orderId=order.get("orderId"), gone=True)
+            else:
+                cancel_failed = True
+                log("error", msg="逾時撤階梯進場單失敗", symbol=sym, err=str(e))
+        except Exception as e:
+            cancel_failed = True
+            log("error", msg="逾時撤階梯進場單失敗", symbol=sym, err=str(e))
+    if cancel_failed:
+        return None
+    filled = Decimal(0)
+    unconfirmed = False
+    for order in rows:
+        oid = order.get("orderId")
+        if not oid:
+            unconfirmed = True
+            continue
+        try:
+            fresh = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": oid}, signed=True)
+        except BinanceError as e:
+            # 查不到就不能證明成交量是 0，停損留著。
+            log("warn", msg="逾時撤單後再查失敗", symbol=sym, orderId=oid, code=e.code)
+            unconfirmed = True
+            continue
+        except Exception as e:
+            log("warn", msg="逾時撤單後再查失敗", symbol=sym, orderId=oid, err=str(e))
+            unconfirmed = True
+            continue
+        if not isinstance(fresh, dict):
+            unconfirmed = True
+            continue
+        filled += _filled_qty(fresh)
+        if fresh.get("status") in ("NEW", "PARTIALLY_FILLED"):
+            unconfirmed = True
+    if filled > 0 or amt:
+        return "partial"
+    if unconfirmed or not live:
+        return None
+    for po in protect_orders(sym):
+        kind = str(po["t"])
+        if kind.startswith("STOP"):
+            which = "stop"
+        elif kind.startswith("TAKE"):
+            which = "tp"
+        else:
+            continue
+        log("ladder_expire", symbol=sym, cancel=which, id=po.get("id"))
+        try:
+            cancel_protect(sym, po, live)
+        except Exception as e:
+            log("error", msg="逾時撤預掛保護單失敗", symbol=sym, err=str(e))
+    return "drop"
+
+
 def resize_protects(symbol, close_side, qty, live):
     """把停損與止盈的數量改成 qty。價格沿用掛著的觸發價，不重算。先掛新再撤舊。"""
     changed = False
@@ -449,6 +572,11 @@ def manage_ladder_pending(sym, pd, held_amt, live):
             return False
     if len(rows) != len(pd.get("orders") or []):
         return False
+    expired = expire_unfilled_ladder(sym, pd, rows, held_amt, live)
+    if expired == "drop":
+        return "drop"
+    if expired == "partial":
+        return False
     filled = sum((_filled_qty(o) for o in rows), Decimal(0))
     resting = [o for o in rows if o.get("status") in ("NEW", "PARTIALLY_FILLED")]
     amt = held_amt.get(sym, 0.0)
@@ -462,8 +590,10 @@ def manage_ladder_pending(sym, pd, held_amt, live):
     if resting and amt != 0:
         close_side = "SELL" if amt > 0 else "BUY"
         print("{0} 階梯部分成交，持倉 {1}，還有 {2} 檔未完成".format(sym, amt, len(resting)))
+        planned = Decimal(str(pd["qty"])) if pd.get("qty") else sum(
+            (Decimal(str(o.get("origQty") or "0")) for o in rows), Decimal(0))
         try:
-            resize_protects(sym, close_side, Decimal(str(abs(amt))), live)
+            resize_ladder_partial(sym, close_side, Decimal(str(abs(amt))), planned, live)
         except Exception as e:
             log("error", msg="調整階梯保護單數量失敗", symbol=sym, err=str(e))
         return False
@@ -624,7 +754,7 @@ def open_ladder(a):
         log("error", msg="階梯預掛止盈失敗（停損已在）", err=str(e))
     st = load_state()
     st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, qty=fmt(qty), side=side,
-                                              ladder=True, orders=placed)
+                                              ladder=True, orders=placed, placed_at=now_tpe().isoformat(timespec="seconds"))
     save_state(st)
     print("三檔限價已掛，停損/止盈已同步預掛（reduceOnly 合計數量）", [x["orderId"] for x in placed])
     return plan
@@ -1165,9 +1295,24 @@ def cmd_manage(a):
         dual, multi = status_account_mode()
         print_status_body(acc, s, positions(acc), status_oo, status_ao, dual, multi)
 
+def _user_stream_fresh():
+    """Mac 還沒放 user_stream.py 時，60 秒 watch 照舊輪詢，不要因 ImportError 停擺。"""
+    try:
+        from user_stream import heartbeat_fresh
+    except ImportError:
+        return False
+    try:
+        return bool(heartbeat_fresh())
+    except Exception:
+        return False
+
+
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
-    有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。"""
+    有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。
+    使用者資料流的心跳還新的時候，這支不打 API，當備援。沒有那個檔就照舊輪詢。"""
+    if _user_stream_fresh():
+        return
     st = load_state(); pend = st.get("pending", {})
     if not pend:
         now = now_tpe()
@@ -1197,6 +1342,7 @@ def cmd_watch(a):
             has_tp = any(str(t).startswith("TAKE") for t in types)
             total_exec = 0.0
             done_n = 0
+            fetched = []
             for item in pd.get("orders") or []:
                 if not item.get("orderId"):
                     continue
@@ -1204,6 +1350,7 @@ def cmd_watch(a):
                     o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": item["orderId"]}, signed=True, retries=2)
                 except BinanceError as e:
                     log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
+                fetched.append(o)
                 total_exec += float(o.get("executedQty") or 0)
                 if o["status"] not in ("NEW", "PARTIALLY_FILLED"):
                     done_n += 1
@@ -1221,8 +1368,12 @@ def cmd_watch(a):
             pd["last_exec"] = total_exec
             pd["last_done"] = done_n
             save_state(st)
-            # 完全沒成交時，只缺預掛止盈不叫 manage。已結束的檔數變多才再叫；第一檔成交、其餘還掛著，下一分鐘不要再叫。
-            if done_increased or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl):
+            # 已結束的檔數變多才再叫。超過 2 小時仍有未成交檔，也要叫 manage 去撤。
+            expired = False
+            anchor = ladder_anchor_ms(pd, fetched)
+            if anchor is not None and int(time.time() * 1000) - anchor >= LADDER_EXPIRE_MS:
+                expired = any(o.get("status") in ("NEW", "PARTIALLY_FILLED") for o in fetched)
+            if done_increased or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl) or expired:
                 log("watch_trigger", symbol=sym, executed=total_exec, ladder=True, has_sl=has_sl, has_tp=has_tp)
                 need = True
             continue

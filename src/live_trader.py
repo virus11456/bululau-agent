@@ -951,10 +951,33 @@ def cmd_status(a):
     print_status_body(acc, s, pos, oo, ao, dual, multi)
 
 def resolve_entry_type(setup, requested):
-    """小師弟第二次下殺用市價。瘸師弟、大師兄和其他型態維持呼叫端給的方式。"""
+    """小師弟用限價 IOC。瘸師弟、大師兄和其他型態維持呼叫端給的方式。"""
     if setup == "小師弟":
-        return "market"
+        return "ioc"
     return requested
+
+def xiao_ioc_limit(side, qty, stop, budget, tick):
+    """最遠限價：以該價成交時 |價−停損|×數量 仍不超過單筆風險預算。
+
+    做多是上限，依 tick 往下取整。做空是下限，依 tick 往上取整。
+    取整後沒有還在預算裡的價，回 None。
+    """
+    qty = Decimal(str(qty))
+    stop = Decimal(str(stop))
+    budget = Decimal(str(budget))
+    tick = Decimal(str(tick))
+    if qty <= 0 or budget <= 0 or tick <= 0:
+        return None
+    room = budget / qty
+    if str(side).upper() == "BUY":
+        price = rnd(stop + room, tick, ROUND_DOWN)
+        if price <= stop or (price - stop) * qty > budget:
+            return None
+        return price
+    price = rnd(stop - room, tick, ROUND_UP)
+    if price <= 0 or price >= stop or (stop - price) * qty > budget:
+        return None
+    return price
 
 def xiao_target_from_fill(side, avg, stop, tick):
     """實際成交均價重算 2R，只改止盈價。停損與數量不動。算不出來就回 None。"""
@@ -1019,8 +1042,21 @@ def cmd_open(a):
     # 停損朝不利方向取整、止盈朝保守方向取整
     stop_p = fmt(rnd(stop, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
     tp_p = fmt(rnd(target, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
-    order = dict(symbol=sym, side=side, type="MARKET" if a.entry_type == "market" else "LIMIT", quantity=fmt(qty), newOrderRespType="RESULT")
-    if a.entry_type == "limit": order.update(price=fmt(rnd(entry, info["tick"])), timeInForce="GTC")
+    if a.entry_type == "ioc":
+        cap = xiao_ioc_limit(side, qty, stop_p, risk_usdt, info["tick"])
+        loss_now = abs(Decimal(str(mark)) - Decimal(stop_p)) * qty
+        if cap is None or loss_now > Decimal(str(risk_usdt)):
+            log("xiao_risk_over_1pct", symbol=sym, side=side, mark=str(mark), stop=stop_p,
+                qty=fmt(qty), est_loss=fmt(loss_now), risk_cap=round(risk_usdt, 2))
+            print("小師弟預估風險超過 1%，放棄不下單")
+            return
+        order = dict(symbol=sym, side=side, type="LIMIT", quantity=fmt(qty), price=fmt(cap),
+                     timeInForce="IOC", newOrderRespType="RESULT")
+    else:
+        order = dict(symbol=sym, side=side, type="MARKET" if a.entry_type == "market" else "LIMIT",
+                     quantity=fmt(qty), newOrderRespType="RESULT")
+        if a.entry_type == "limit":
+            order.update(price=fmt(rnd(entry, info["tick"])), timeInForce="GTC")
     plan = dict(symbol=sym, side=side, setup=a.setup, entry=entry, stop=stop_p, target=tp_p, qty=fmt(qty),
                 notional=round(float(qty) * entry, 2), lev=lev, est_loss=round(float(qty) * abs(entry - float(stop_p)), 2),
                 risk_cap=round(risk_usdt, 2), slice_margin=s["slice_margin"], portion=a.portion, margin=round(margin, 4), live=live)
@@ -1031,9 +1067,9 @@ def cmd_open(a):
     if not live:
         print(f"  [dry-run] 設定 {sym} ISOLATED、槓桿 {lev}x"); print("  [dry-run] POST /fapi/v1/order", order)
         if a.setup == "小師弟":
+            print("  [dry-run] 小師弟限價 IOC", order["price"], "成交後會掛停損和止盈；這次不下單、不寫狀態")
             place_protect(sym, close_side, "STOP_MARKET", stop_p, False)
             place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False)
-            print("  [dry-run] 小師弟市價進場後會掛停損和止盈；這次不下單、不寫狀態")
             return
         if a.setup == "大師兄":
             tp3 = fmt(rnd(target_3r, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
@@ -1048,6 +1084,49 @@ def cmd_open(a):
         if e.code != -4046: raise   # -4046 = 已是逐倉
     req("POST", "/fapi/v1/leverage", dict(symbol=sym, leverage=lev), signed=True)
     r = req("POST", "/fapi/v1/order", order, signed=True); log("entry_order", order=order, resp=r)
+    if a.entry_type == "ioc":
+        filled = Decimal(str(r.get("executedQty") or "0"))
+        if filled <= 0:
+            log("xiao_ioc_unfilled", symbol=sym, side=side, price=order.get("price"), qty=order.get("quantity"))
+            print("小師弟 IOC 沒成交，放棄該筆")
+            return
+        avg = r.get("avgPrice")
+        rebuilt = xiao_target_from_fill(side, avg, stop_p, info["tick"]) if avg not in (None, "", "0", "0.0") else None
+        if rebuilt:
+            log("xiao_target_from_fill", symbol=sym, avg=str(avg), stop=stop_p, target=rebuilt, planned=tp_p)
+            tp_p = rebuilt
+        signed_amt = float(filled) if side == "BUY" else -float(filled)
+        try:
+            place_protect(sym, close_side, "STOP_MARKET", stop_p, True)
+        except Exception as e:
+            log("error", msg="停損掛單失敗，立即市價平倉", err=str(e))
+            try:
+                market_close(sym, signed_amt, True, "stop_place_failed")
+            except Exception as e2:
+                log("error", msg="停損失敗且市價平倉失敗，不再重試", symbol=sym, err=str(e2))
+                raise SystemExit("停損失敗且平倉失敗: {0}".format(e2))
+            raise SystemExit("停損失敗已平倉: {0}".format(e))
+        if _mark_past_target(sym, side, tp_p):
+            st = load_state()
+            st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup)
+            save_state(st)
+            close_because_target_passed(sym, signed_amt, st, True)
+            return
+        try:
+            place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True)
+        except BinanceError as e:
+            if e.code == -2021:
+                st = load_state()
+                st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup)
+                save_state(st)
+                close_because_target_passed(sym, signed_amt, st, True)
+                return
+            log("error", msg="止盈掛單失敗（停損已在）", symbol=sym, err=str(e))
+        except Exception as e:
+            log("error", msg="止盈掛單失敗（停損已在）", symbol=sym, err=str(e))
+        st = load_state(); st.setdefault("meta", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup); save_state(st)
+        print("已進場並掛好保護單", r.get("avgPrice"), r.get("executedQty"))
+        return
     if a.entry_type == "limit":
         oid = r.get("orderId")
         # 同步預掛：指定數量 + reduceOnly 停損/止盈（單向模式，成交前即生效）
@@ -1067,20 +1146,6 @@ def cmd_open(a):
             pending["target_3r"] = fmt(rnd(target_3r, info["tick"], ROUND_DOWN if side == "BUY" else ROUND_UP))
         st = load_state(); st.setdefault("pending", {})[sym] = pending; save_state(st)
         print("限價單已掛，停損已預掛；止盈等成交後補", oid); return
-    if a.setup == "小師弟":
-        avg = r.get("avgPrice")
-        rebuilt = xiao_target_from_fill(side, avg, stop_p, info["tick"]) if avg not in (None, "", "0", "0.0") else None
-        if rebuilt:
-            log("xiao_target_from_fill", symbol=sym, avg=str(avg), stop=stop_p, target=rebuilt, planned=tp_p)
-            tp_p = rebuilt
-        if avg not in (None, "", "0", "0.0"):
-            try:
-                slip = abs(Decimal(str(avg)) - Decimal(stop_p)) * Decimal(qty)
-                if slip > Decimal(str(risk_usdt)):
-                    log("warn", msg="成交後實際虛損超過 1% 風控，處理方式未確認", symbol=sym,
-                        est_loss=fmt(slip), risk_cap=round(risk_usdt, 2))
-            except Exception:
-                pass
     signed_amt = float(qty) * (1 if side == "BUY" else -1)
     try:
         place_protect(sym, close_side, "STOP_MARKET", stop_p, True)

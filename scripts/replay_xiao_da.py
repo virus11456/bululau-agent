@@ -156,6 +156,11 @@ def walk_da(bars, i, hit):
     return "open", held
 
 
+def bar_over_ioc(bar, cap):
+    """訊號那根的收盤或高點高於做多上限，這筆 IOC 算不成交。"""
+    return bar["c"] > cap or bar["h"] > cap
+
+
 def scan_xiao(sym, bars):
     seen = set()
     out = []
@@ -167,7 +172,10 @@ def scan_xiao(sym, bars):
             continue
         seen.add(hit.get("low_t"))
         kind, r = walk(bars, i, hit["entry"], hit["stop"], hit["target"])
-        out.append(dict(kind=kind, r=r))
+        # 做多上限 = 收盤（數量把收盤到停損打滿 1%）。這根高點或收盤再高過它，IOC 不成交。
+        cap = hit["entry"]
+        abandoned = bar_over_ioc(bars[i], cap)
+        out.append(dict(kind=kind, r=r, ioc_abandoned=abandoned))
     return out
 
 
@@ -193,7 +201,8 @@ def summarize(rows):
     total = round(sum(r["r"] for r in rows), 2)
     n = len(rows)
     return dict(episodes=n, wins=wins, losses=losses, open=opens, r=total,
-                win_rate=round(wins / n, 3) if n else None)
+                win_rate=round(wins / n, 3) if n else None,
+                ioc_abandoned=sum(1 for r in rows if r.get("ioc_abandoned")))
 
 
 def main():
@@ -232,7 +241,7 @@ def main():
         xiao_other=summarize(other),
         da=summarize(da),
         da_unique_blacks=len({(r.get("symbol"), r.get("black_t")) for r in da}),
-        note="小師弟 R：贏 +2、輸 -1。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
+        note="小師弟 R：贏 +2、輸 -1。IOC 放棄是訊號那根的收盤或高點高於做多上限的筆數，不從上面的勝敗裡扣掉。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
     )
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return summary

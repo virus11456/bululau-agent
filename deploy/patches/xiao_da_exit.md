@@ -7,7 +7,7 @@ Mac 實盤篩網讀的是 `~/quantboy-paper/discretionary/prefilter.py`，repo �
 `~/quantboy-gate/full_prompt.md` 裡小師弟那句要改成：
 
 ```
-小師弟同短線結構停損，2R 一次全出，不平一半、不移保本。第二次下殺用市價。
+小師弟同短線結構停損，2R 一次全出，不平一半、不移保本。第二次下殺用限價 IOC，滑價上限是單筆淨值 1%。
 ```
 
 不要改 `docs/skill.md`。
@@ -23,9 +23,9 @@ Mac 實盤篩網讀的是 `~/quantboy-paper/discretionary/prefilter.py`，repo �
 不要改 `docs/skill.md`。下面這段是建議以後貼進技能說明的文字，這次只放在這裡。
 
 ```
-小師弟：流動性夠的幣都掃，不限 ETH。ETH 起跌要大於 100 點（遠大於 100 的更嚴數字未確認）。其他幣起跌大約 3% 以上。緩跌後急殺、爆量，彈回至少 40%。第二次下殺用市價，不先算死位置。
-開單：python3 live_trader.py open --symbol XUSDT --side long --entry-type market --stop 前低下方 --target 試算2R --setup 小師弟
-就算傳入 limit，程式也會改成市價。成交後立刻掛停損和止盈。數量用現有 1% 風控，以標記價和停損計算，成交後不改數量。止盈只用實際成交均價重算 2R。停損掛不上就立刻市價 reduceOnly 平倉。止盈收到 -2021 或標記價已越過止盈，走 target_passed_at_fill。成交後實際虛損超過 1% 怎麼處理未確認，不自動減碼。
+小師弟：流動性夠的幣都掃，不限 ETH。ETH 起跌要大於 100 點（遠大於 100 的更嚴數字未確認）。其他幣起跌大約 3% 以上。緩跌後急殺、爆量，彈回至少 40%。第二次下殺用限價 IOC，不改掛市價。
+開單：python3 live_trader.py open --symbol XUSDT --side long --stop 前低下方 --target 試算2R --setup 小師弟
+程式會改成限價 IOC。價格設在以該價成交時虧損仍不超過淨值 1% 的最遠一檔，再依 tick 往保守方向取整。下單前預估就超過 1% 就放棄，記 xiao_risk_over_1pct。IOC 沒成交也放棄，記 xiao_ioc_unfilled，不重試。部分成交保留已成交數量，立刻掛停損和止盈。數量用現有 1% 風控。止盈只用實際成交均價重算 2R。停損掛不上就立刻市價 reduceOnly 平倉。止盈收到 -2021 或標記價已越過止盈，走 target_passed_at_fill。
 瘸師弟仍是長黑低點下方 3%、4%、5% 三檔限價。大師兄仍是預掛限價。大師兄出場：2R 平 50%，其餘 3R 平，4R 前全出，2R 後停損不動。
 ```
 

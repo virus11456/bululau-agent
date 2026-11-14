@@ -40,7 +40,7 @@ class Args:
     def __init__(self, **kw):
         self.live = kw.get("live", True)
         self.symbol = kw.get("symbol", "ETHUSDT")
-        self.side = "BUY"
+        self.side = kw.get("side", "BUY")
         self.entry_type = kw.get("entry_type", "limit")
         self.price = kw.get("price", "100")
         self.stop = kw.get("stop", "90")
@@ -58,7 +58,9 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.saved = []
         self.state = {"pending": {}, "meta": {}}
         self.fail_stop = False
-        self.avg = "101"
+        self.avg = "100"
+        self.filled = "10"
+        self.info = info()
 
     def run_open(self, args):
         def load():
@@ -84,7 +86,7 @@ class XiaoMarketEntryTest(unittest.TestCase):
             if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders", "/fapi/v1/userTrades", "/fapi/v1/income"):
                 return []
             if method == "POST" and path == "/fapi/v1/order":
-                return {"orderId": 7, "avgPrice": self.avg, "executedQty": "10"}
+                return {"orderId": 7, "avgPrice": self.avg, "executedQty": self.filled}
             if method == "POST" and path == "/fapi/v1/algoOrder":
                 algo_n["n"] += 1
                 if self.fail_stop and algo_n["n"] == 1:
@@ -100,7 +102,7 @@ class XiaoMarketEntryTest(unittest.TestCase):
                 patch.object(lt, "account", return_value=ACC), \
                 patch.object(lt, "day_state", return_value=dict(DAY)), \
                 patch.object(lt, "upcoming_event", return_value=None), \
-                patch.object(lt, "sym_info", return_value=info()), \
+                patch.object(lt, "sym_info", return_value=self.info), \
                 patch.object(lt, "load_state", side_effect=load), \
                 patch.object(lt, "save_state", side_effect=save), \
                 patch("urllib.request.urlopen", side_effect=AssertionError("network")):
@@ -108,28 +110,68 @@ class XiaoMarketEntryTest(unittest.TestCase):
                 lt.cmd_open(args)
         return buf.getvalue()
 
-    def test_market_entry_places_stop_and_target_from_fill(self):
+    def test_ioc_entry_places_stop_and_target_from_fill(self):
         text = self.run_open(Args())
         entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
-        self.assertEqual(entry[0][2]["type"], "MARKET")
-        self.assertNotIn("price", entry[0][2])
+        self.assertEqual(entry[0][2]["type"], "LIMIT")
+        self.assertEqual(entry[0][2]["timeInForce"], "IOC")
+        self.assertEqual(entry[0][2]["price"], "100")
+        self.assertEqual(entry[0][2]["side"], "BUY")
         protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual([c[2]["type"] for c in protects], ["STOP_MARKET", "TAKE_PROFIT_MARKET"])
-        self.assertEqual(protects[1][2]["triggerPrice"], "123")
-        self.assertEqual(entry[0][2]["quantity"], protects[0][2].get("quantity") or entry[0][2]["quantity"])
-        self.assertEqual(self.state["meta"]["ETHUSDT"]["target"], "123")
+        self.assertEqual(protects[1][2]["triggerPrice"], "120")
+        self.assertEqual(self.state["meta"]["ETHUSDT"]["target"], "120")
         self.assertEqual(self.state["meta"]["ETHUSDT"]["stop"], "90")
-        self.assertTrue(any("未確認" in str(kw.get("msg")) for _k, kw in self.logs))
+        self.assertFalse(any(kind == "xiao_risk_over_1pct" for kind, _kw in self.logs))
         self.assertIn("已進場並掛好保護單", text)
+
+    def test_long_and_short_caps_round_conservatively(self):
+        self.assertEqual(lt.xiao_ioc_limit("BUY", "10", "90", "100", "0.01"), lt.Decimal("100"))
+        self.assertEqual(lt.xiao_ioc_limit("BUY", "10", "90", "100", "0.3"), lt.Decimal("99.9"))
+        self.assertEqual(lt.xiao_ioc_limit("SELL", "10", "110", "100", "0.01"), lt.Decimal("100"))
+        self.assertEqual(lt.xiao_ioc_limit("SELL", "10", "110", "100", "0.3"), lt.Decimal("100.2"))
+        text = self.run_open(Args(side="SELL", stop="110", target="80", symbol="ETHUSDT"))
+        entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+        self.assertEqual(entry[0][2]["side"], "SELL")
+        self.assertEqual(entry[0][2]["timeInForce"], "IOC")
+        self.assertEqual(entry[0][2]["price"], "100")
+
+    def test_ioc_unfilled_is_abandoned(self):
+        self.filled = "0"
+        text = self.run_open(Args())
+        self.assertIn("沒成交", text)
+        self.assertTrue(any(kind == "xiao_ioc_unfilled" for kind, _kw in self.logs))
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        self.assertEqual(self.saved, [])
+        self.assertEqual(self.state["meta"], {})
+
+    def test_partial_fill_keeps_filled_qty_and_places_protects(self):
+        self.filled = "4"
+        self.avg = "99"
+        self.run_open(Args())
+        entry = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order"]
+        self.assertEqual(entry[0][2]["quantity"], "10")
+        protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(len(protects), 2)
+        self.assertEqual(self.state["meta"]["ETHUSDT"]["target"], "117")
+
+    def test_estimated_risk_over_one_percent_does_not_order(self):
+        self.info = info()
+        self.info["tick"] = Decimal("1")
+        text = self.run_open(Args(stop="90.5"))
+        self.assertIn("放棄不下單", text)
+        self.assertTrue(any(kind == "xiao_risk_over_1pct" for kind, _kw in self.logs))
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in self.calls))
+        self.assertEqual(self.saved, [])
 
     def test_stop_place_failure_market_closes(self):
         self.fail_stop = True
         with self.assertRaises(SystemExit):
             self.run_open(Args())
         markets = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
-        self.assertEqual(len(markets), 2)
-        self.assertEqual(markets[1][2]["reduceOnly"], "true")
-        self.assertEqual(markets[1][2]["side"], "SELL")
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(markets[0][2]["reduceOnly"], "true")
+        self.assertEqual(markets[0][2]["side"], "SELL")
         protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual(len(protects), 1)
         self.assertNotIn("ETHUSDT", self.state.get("meta") or {})
@@ -145,7 +187,7 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.assertEqual(self.state["meta"], {})
 
     def test_other_setups_stay_limit(self):
-        self.assertEqual(lt.resolve_entry_type("小師弟", "limit"), "market")
+        self.assertEqual(lt.resolve_entry_type("小師弟", "limit"), "ioc")
         self.assertEqual(lt.resolve_entry_type("大師兄", "limit"), "limit")
         self.assertEqual(lt.resolve_entry_type("瘸師弟", "limit"), "limit")
         self.assertEqual(lt.resolve_entry_type("布鹿流", "limit"), "limit")

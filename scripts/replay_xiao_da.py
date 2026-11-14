@@ -208,24 +208,56 @@ def scan_da(sym, bars):
             continue
         seen.add(hit.get("black_t"))
         kind, r = walk_da(bars, i, hit)
-        out.append(dict(kind=kind, r=r, black_t=hit.get("black_t"), t=bars[i]["t"]))
+        close_ms = int(bars[i].get("ct") or (bars[i]["t"] + 4 * 60 * 60 * 1000))
+        out.append(dict(kind=kind, r=r, black_t=hit.get("black_t"), t=bars[i]["t"], ct=close_ms))
     return out
 
 
+def load_btc_daily():
+    """9 月整月加上 10 月、11 月，訊號日前才湊得齊 33 根已收日 K。"""
+    rows = fetch(("https://data.binance.vision/data/futures/um/monthly/klines/"
+                  "BTCUSDT/1d/BTCUSDT-1d-2026-09.zip"))
+    rows.extend(load_interval("BTCUSDT", "1d"))
+    rows.sort(key=lambda r: r["t"])
+    out, seen = [], set()
+    for row in rows:
+        if row["t"] in seen:
+            continue
+        seen.add(row["t"])
+        out.append(row)
+    return out
+
+
+def apply_da_pause(rows, daily):
+    """BTC 日 K 沒有收盤 > MA7 > MA25，或已收日 K 少於 33 根，這筆不進勝敗和 R。"""
+    import live_trader as lt
+    if not daily:
+        return
+    for row in rows:
+        closed = [b for b in daily if int(b.get("ct") or 0) < int(row.get("ct") or 0)]
+        why = lt.da_btc_pause_reason(closed)
+        if why:
+            row["da_paused"] = True
+            row["pause_why"] = why
+            row["kind"] = "paused"
+            row["r"] = 0.0
+
+
 def summarize(rows):
-    traded = [r for r in rows if not r.get("ioc_abandoned")]
+    traded = [r for r in rows if not r.get("ioc_abandoned") and not r.get("da_paused")]
     wins = sum(1 for r in traded if r["kind"] == "win")
     losses = sum(1 for r in traded if r["kind"] == "loss")
     opens = sum(1 for r in traded if r["kind"] == "open")
     total = round(sum(r["r"] for r in traded), 2)
     n = len(rows)
-    n_traded = len(traded)
     closed = wins + losses
     first = round(sum(r["r"] for r in traded if r.get("t", 0) < MID), 2)
     second = round(sum(r["r"] for r in traded if r.get("t", 0) >= MID), 2)
     return dict(episodes=n, wins=wins, losses=losses, open=opens, r=total,
                 win_rate=round(wins / closed, 3) if closed else None,
-                ioc_abandoned=n - n_traded, r_first_15d=first, r_second_15d=second)
+                ioc_abandoned=sum(1 for r in rows if r.get("ioc_abandoned")),
+                da_paused=sum(1 for r in rows if r.get("da_paused")),
+                r_first_15d=first, r_second_15d=second)
 
 
 def main():
@@ -263,6 +295,7 @@ def main():
         loaded = pool.map(lambda sym: (sym, load_interval(sym, "1m")), list(touched))
         for sym, minutes in loaded:
             apply_ioc(touched[sym], minutes)
+    apply_da_pause(da, load_btc_daily())
     summary = dict(
         window="2026-10-14 .. 2026-11-12 UTC",
         source="data.binance.vision",
@@ -273,7 +306,7 @@ def main():
         da=summarize(da),
         da_unique_blacks=len({(r.get("symbol"), r.get("black_t")) for r in da}),
         ioc_price="下單價用 15m 收盤。放棄與否看收盤後 5 分鐘的 1m 最低價是否仍高於收盤 × 1.003。不用訊號那根的高點。成交的 R 仍用 15m 收盤。",
-        note="IOC 0.3% 不變。收盤後 5 分鐘內 1m 最低價仍高於收盤 × 1.003 才算放棄，並從勝、敗、未結和 R 扣掉。沒有 1m 的不放棄。勝率是勝/(勝+敗)。前半是 2026-10-14 到 10-28，後半是 10-29 到 11-12（UTC）。其他幣含 BTC。大師兄：3R 出場 +2.5R，2R 平半後停損 +0.5R，沒平半就停損 -1R。",
+        note="IOC 0.3% 不變。收盤後 5 分鐘內 1m 最低價仍高於收盤 × 1.003 才算放棄，並從勝、敗、未結和 R 扣掉。大師兄另看 BTC 已收日 K：沒有收盤 > MA7 > MA25，或少於 33 根，記 da_paused，同樣不進勝敗和 R。勝率是勝/(勝+敗)。前半是 2026-10-14 到 10-28，後半是 10-29 到 11-12（UTC）。",
     )
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return summary

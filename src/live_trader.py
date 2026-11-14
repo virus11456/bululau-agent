@@ -1007,11 +1007,64 @@ def xiao_target_from_fill(side, avg, stop, tick):
 DA_LIMIT_EXPIRE_4H = 2
 DA_LIMIT_EXPIRE_MS = DA_LIMIT_EXPIRE_4H * 4 * 60 * 60 * 1000
 
+def _closed_daily(rows, now_ms):
+    """布鹿流同一套：有 ct 且 ct >= now 的未收日 K 丟掉。沒有 ct 的留下。"""
+    out = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            bar = row
+        else:
+            bar = {"t": int(row[0]), "c": float(row[4]), "l": float(row[3]), "ct": int(row[6])}
+        ct = bar.get("ct")
+        if now_ms is not None and ct is not None and ct >= now_ms:
+            continue
+        out.append(bar)
+    return out
+
+def da_btc_pause_reason(rows, now_ms=None):
+    """大師兄進場看 BTC 日 K。回傳 None 才可以下單。
+
+    偏空是沒有達到收盤 > MA7 > MA25。均線和「少於 33 根已收日 K 就當資料不足」沿用布鹿流。
+    讀取失敗不進這支：呼叫端比照布鹿流，讀不到仍下單。
+    """
+    from hardfilter import DAILY_FAST, DAILY_MIN_BARS, DAILY_SLOW, ma_at
+    bars = _closed_daily(rows, now_ms)
+    if len(bars) < DAILY_MIN_BARS:
+        return "日K資料不足"
+    closes = [bar["c"] for bar in bars]
+    fast = ma_at(closes, DAILY_FAST)
+    slow = ma_at(closes, DAILY_SLOW)
+    close = closes[-1]
+    if fast is None or slow is None or not (close > fast > slow):
+        return "未達收盤>MA7>MA25"
+    return None
+
+def da_entry_block(symbol):
+    """大師兄要不要因 BTC 日 K 暫停。None 表示下單。限流這輪不下單。其他讀取失敗仍下單。"""
+    from hardfilter import DAILY_KLINE_LIMIT
+    try:
+        raw = req("GET", "/fapi/v1/klines",
+                  {"symbol": "BTCUSDT", "interval": "1d", "limit": DAILY_KLINE_LIMIT})
+    except BinanceError as exc:
+        if exc.status in (418, 429):
+            raise SystemExit("BTC 日K限流，這輪不下單")
+        log("warn", msg="BTC 日K讀不到，大師兄比照布鹿流仍下單", symbol=symbol, err=str(exc))
+        return None
+    except Exception as exc:
+        log("warn", msg="BTC 日K讀不到，大師兄比照布鹿流仍下單", symbol=symbol, err=str(exc))
+        return None
+    return da_btc_pause_reason(raw, int(time.time() * 1000))
+
 def cmd_open(a):
     live = a.live; sym = a.symbol.upper(); side = a.side.upper()
     if getattr(a, "setup", None) == "大師兄":
         if a.entry_type != "limit" or not getattr(a, "target_3r", None):
             raise SystemExit("大師兄要限價，並且要給 --target-3r。沒有 3R 全平價就拒絕開倉。")
+        why = da_entry_block(sym)
+        if why:
+            log("da_paused_btc_daily_bear", symbol=sym, why=why)
+            print("大師兄 BTC 日K偏空，只記錄不下單")
+            return
     a.entry_type = resolve_entry_type(getattr(a, "setup", None), a.entry_type)
     acc = account(); s = day_state(acc); eq = equity_of(acc)
     # 風控閘門

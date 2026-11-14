@@ -20,6 +20,17 @@ sys.path.insert(0, _SRC)
 import live_trader as lt  # noqa: E402
 
 
+def rising_daily(n=40, step=1.0):
+    now = 1_700_000_000_000
+    rows = []
+    px = 100.0
+    for i in range(n):
+        px += step
+        t = now + i * 86_400_000
+        rows.append([t, px - step, px, px - step, px, "0", t + 86_400_000 - 1, "1", 0, 0, 0, "0"])
+    return rows
+
+
 def info():
     return dict(tick=Decimal("0.01"), step=Decimal("0.001"), mstep=Decimal("0.001"),
                 minqty=Decimal("0.001"), maxmqty=Decimal("1000000"), minnot=Decimal("5"),
@@ -78,6 +89,10 @@ class XiaoMarketEntryTest(unittest.TestCase):
             self.calls.append((method, path, dict(params or {})))
             if path == "/fapi/v1/positionSide/dual":
                 return {"dualSidePosition": False}
+            if path == "/fapi/v1/klines":
+                if getattr(self, "btc_error", None):
+                    raise self.btc_error
+                return self.btc_rows if getattr(self, "btc_rows", None) is not None else rising_daily()
             if path == "/fapi/v1/premiumIndex":
                 return {"markPrice": self.mark}
             if path in ("/fapi/v1/order/test", "/fapi/v1/marginType", "/fapi/v1/leverage"):
@@ -219,3 +234,44 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.assertTrue(lt._da_limit_expired({"time": 1}))
         self.assertFalse(lt._da_limit_expired({"time": int(__import__("time").time() * 1000)}))
         self.assertEqual(lt.DA_LIMIT_EXPIRE_4H, 2)
+
+    def test_da_btc_bear_records_and_does_not_order(self):
+        self.btc_rows = rising_daily(step=-1.0)
+        text = self.run_open(Args(live=True, setup="大師兄", entry_type="limit",
+                                  symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("不下單", text)
+        self.assertTrue(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+        self.assertFalse(any(c[0] == "POST" for c in self.calls))
+        self.assertEqual(self.saved, [])
+
+    def test_da_btc_bull_orders(self):
+        text = self.run_open(Args(live=False, setup="大師兄", entry_type="limit",
+                                  symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("2R 半倉", text)
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+        self.assertTrue(any(c[1] == "/fapi/v1/klines" for c in self.calls))
+
+    def test_da_btc_unread_still_orders(self):
+        self.btc_error = lt.BinanceError(500, -1000, "daily down")
+        text = self.run_open(Args(live=False, setup="大師兄", entry_type="limit",
+                                  symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("2R 半倉", text)
+        self.assertTrue(any("仍下單" in str(kw.get("msg")) for _k, kw in self.logs))
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+
+    def test_da_btc_short_history_pauses(self):
+        self.btc_rows = rising_daily(n=10)
+        text = self.run_open(Args(setup="大師兄", entry_type="limit", symbol="BTCUSDT", target_3r="130"))
+        self.assertIn("不下單", text)
+        paused = [kw for kind, kw in self.logs if kind == "da_paused_btc_daily_bear"]
+        self.assertEqual(paused[0]["why"], "日K資料不足")
+        self.assertFalse(any(c[0] == "POST" for c in self.calls))
+
+    def test_xiao_and_kuai_ignore_btc_daily(self):
+        self.run_open(Args(live=False, setup="小師弟"))
+        self.assertFalse(any(c[1] == "/fapi/v1/klines" for c in self.calls))
+        self.calls.clear()
+        self.logs.clear()
+        self.run_open(Args(live=False, setup="瘸師弟", entry_type="limit", symbol="BTCUSDT"))
+        self.assertFalse(any(c[1] == "/fapi/v1/klines" for c in self.calls))
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))

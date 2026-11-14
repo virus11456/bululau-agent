@@ -285,6 +285,64 @@ class CloseTriggerTest(unittest.TestCase):
         self.assertEqual(record["result"], "risk_blocked")
         self.assertEqual(len(self.trader.calls), 1)
 
+    def test_symbol_block_continues_and_account_block_stops(self):
+        def already(args):
+            if args.symbol == "ETHUSDT":
+                raise SystemExit("ETHUSDT 已有倉位（單幣最多 1 份）")
+            print("已進場並掛好保護單")
+
+        self.trader._open = already
+        record = self._run(self._job(hits=[self._hit("ETHUSDT", 36), self._hit("SOLUSDT", 37)]))
+        self.assertEqual([item["kind"] for item in record["actions"]], ["symbol_blocked", "ordered"])
+        self.assertEqual([call.symbol for call in self.trader.calls], ["ETHUSDT", "SOLUSDT"])
+        self.assertNotEqual(self.trader.calls[1].entry_type, "market")
+
+        self.trader.calls.clear()
+        def too_small(args):
+            if args.symbol == "ETHUSDT":
+                raise SystemExit("數量 0.001 低於最小量/最小名目 5（停損太遠或份額太小）")
+            print("小師弟預估風險超過 1%，放棄不下單")
+
+        self.trader._open = too_small
+        job = self._job(hits=[self._hit("ETHUSDT", 41), self._hit("SOLUSDT", 42)])
+        job.seen_path = self.seen + ".qty"
+        record = self._run(job)
+        self.assertEqual([item["kind"] for item in record["actions"]], ["symbol_blocked", "risk_over_1pct"])
+        self.assertEqual(len(self.trader.calls), 2)
+
+        self.trader.calls.clear()
+        def full(args):
+            raise SystemExit("已達同時 5 倉上限")
+
+        self.trader._open = full
+        job = self._job(hits=[self._hit("BTCUSDT", 51), self._hit("SOLUSDT", 52)])
+        job.seen_path = self.seen + ".full"
+        record = self._run(job)
+        self.assertEqual(record["actions"][0]["kind"], "risk_blocked")
+        self.assertEqual(len(self.trader.calls), 1)
+
+        self.trader.calls.clear()
+        def locked(args):
+            raise SystemExit("另一個 live_trader 正在執行（檔案鎖），稍後再試")
+
+        self.trader._open = locked
+        job = self._job(hits=[self._hit("XRPUSDT", 61), self._hit("SOLUSDT", 62)])
+        job.seen_path = self.seen + ".lockmsg"
+        record = self._run(job)
+        self.assertEqual(record["result"], "risk_blocked")
+        self.assertEqual(len(self.trader.calls), 1)
+
+    def test_stop_place_failure_is_not_risk_blocked_and_stops_the_round(self):
+        def failed(args):
+            raise SystemExit("停損失敗已平倉: HTTP 400 code -2021: stop rejected")
+
+        self.trader._open = failed
+        record = self._run(self._job(hits=[self._hit("ETHUSDT", 71), self._hit("SOLUSDT", 72)]))
+        self.assertEqual(record["actions"][0]["kind"], "stop_place_failed")
+        self.assertNotEqual(record["actions"][0]["kind"], "risk_blocked")
+        self.assertEqual(len(self.trader.calls), 1)
+        self.assertNotEqual(self.trader.calls[0].entry_type, "market")
+
     def test_changed_slippage_is_refused_before_any_order(self):
         self.trader.CFG["xiao_slippage_pct"] = 0.01
         record = self._run(self._job())
@@ -351,7 +409,8 @@ class CloseTriggerTest(unittest.TestCase):
 
         def klines(sym, interval, limit=120, end_ms=None):
             calls.append(("klines", sym, interval))
-            return [{"t": self.open_ms, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1, "ct": self.open_ms}]
+            bar = {"t": self.open_ms, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1, "ct": self.open_ms}
+            return [bar] * xiao_close.MIN_15M_BARS
 
         def xiao(bars, symbol="ETHUSDT"):
             calls.append(("xiao", symbol))
@@ -390,6 +449,40 @@ class CloseTriggerTest(unittest.TestCase):
         self.assertEqual([hit["symbol"] for hit in screen["hits"]], ["ETHUSDT"])
         paths = [item[1] for item in calls if item[0] == "get"]
         self.assertTrue(all("klines" not in path for path in paths))
+
+    def test_ninety_nine_bars_do_not_trigger_and_one_hundred_do(self):
+        prefilter_src = open(os.path.join(SRC, "prefilter.py")).read()
+        self.assertIn("len(k) < 100", prefilter_src)
+        self.assertEqual(xiao_close.MIN_15M_BARS, 100)
+
+        def screen_for(count):
+            calls = []
+            eth = {"symbol": "ETHUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "status": "TRADING"}
+            mod = type("M", (), {})()
+            mod.AVOID = set()
+            mod.MIN_QV = 1
+            mod.get = lambda path, params=None: (
+                {"symbols": [eth]} if "exchangeInfo" in path else [{"symbol": "ETHUSDT", "quoteVolume": "20000000"}]
+            )
+            bar = {"t": self.open_ms, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1, "ct": self.open_ms}
+            mod.klines = lambda sym, interval, limit=120, end_ms=None: [bar] * count
+            mod.pmap = lambda fn, items: [fn(item) for item in items]
+            mod.stock_like = lambda meta: False
+
+            def xiao(bars, symbol="ETHUSDT"):
+                calls.append((symbol, len(bars)))
+                return {"setup": "小師弟", "entry": 100, "stop": 90, "target": 120, "low_t": 36}, None
+
+            mod.xiao_shidi = xiao
+            mod.btc_guard = lambda bars: {"blocked": False}
+            return calls, xiao_close.screen_market(mod)
+
+        short_calls, short = screen_for(99)
+        self.assertEqual(short_calls, [])
+        self.assertEqual(short["hits"], [])
+        long_calls, long_screen = screen_for(100)
+        self.assertEqual(long_calls, [("ETHUSDT", 100)])
+        self.assertEqual([hit["symbol"] for hit in long_screen["hits"]], ["ETHUSDT"])
 
     def test_prefilter_path_uses_the_sibling_common(self):
         folder = tempfile.mkdtemp(prefix="xiao-pf-")
@@ -454,8 +547,9 @@ class CloseTriggerTest(unittest.TestCase):
 
 
 class XiaoCloseIocTest(unittest.TestCase):
-    def place(self, mark="100", tick="0.01", stop="90", target="120"):
+    def place(self, mark="100", tick="0.01", stop="90", target="120", fail_stop=False):
         calls = []
+        algo_n = {"n": 0}
 
         def fake_req(method, path, params=None, signed=False, retries=5):
             calls.append((method, path, dict(params or {})))
@@ -472,6 +566,9 @@ class XiaoCloseIocTest(unittest.TestCase):
             if method == "POST" and path == "/fapi/v1/order":
                 return {"orderId": 7, "avgPrice": mark, "executedQty": "1"}
             if method == "POST" and path == "/fapi/v1/algoOrder":
+                algo_n["n"] += 1
+                if fail_stop and algo_n["n"] == 1:
+                    raise lt.BinanceError(400, -2021, "stop rejected")
                 return {"algoId": 30}
             if method == "DELETE":
                 return {}
@@ -512,6 +609,18 @@ class XiaoCloseIocTest(unittest.TestCase):
         self.assertEqual(outcome["kind"], "risk_over_1pct")
         self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/order" for c in calls))
         self.assertFalse(any(c[2].get("type") == "MARKET" for c in calls))
+
+    def test_stop_place_failure_keeps_market_flatten_and_is_not_risk_blocked(self):
+        outcome, calls = self.place(fail_stop=True)
+        self.assertEqual(outcome["kind"], "stop_place_failed")
+        self.assertNotEqual(outcome["kind"], "risk_blocked")
+        entries = [c for c in calls if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("type") == "LIMIT"]
+        flats = [c for c in calls if c[0] == "POST" and c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0][2]["timeInForce"], "IOC")
+        self.assertEqual(len(flats), 1)
+        self.assertEqual(flats[0][2]["reduceOnly"], "true")
+        self.assertEqual(flats[0][2]["side"], "SELL")
 
 
 if __name__ == "__main__":

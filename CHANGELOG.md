@@ -5,6 +5,9 @@
 - 15 分 K 收盤後只跑小師弟篩網，有訊號就呼叫現有的 `cmd_open` 走 IOC。不叫 AI。風控、1%、件數、日損、0.3% 上限都留在 `live_trader`。
 - 和 15 分鐘 routine 共用 `~/quantboy-live/.lock` 與 `signal_seen`。同一筆不會各下一單。`--dry-run` 不寫狀態。交易所或網路錯誤不改掛市價。
 - 價已經超過止盈時維持先掛再撤，不加 `kuai_target_already_hit`。plist 只放範本，這次不部署。
+- 15m 少於 100 根不跑小師弟，和 routine 的 prefilter 一樣。
+- 已有該幣倉位、數量太小、方向不對、取整後超過淨值 1%，只跳過該幣。日損、30% 全平、5 倉、事件窗、雙向、檔案鎖仍停整輪。
+- 成交後停損掛不上仍由 live_trader 市價平倉。觸發器記 `stop_place_failed`，不記成 `risk_blocked`，這一輪不再開下一筆。
 
 ## 2026-11-14（小師弟市價、大師兄篩網）
 

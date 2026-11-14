@@ -27,7 +27,7 @@ launchd 的 `StartCalendarInterval` 只能指定分，不能指定秒。所以�
 1. :00:00.000 這根 15 分 K 收盤，launchd 啟動程式。
 2. 程式睡到收盤後 `--grace` 秒（預設 5），再向幣安要已收盤的 K 線。`klines` 本來就會丟掉還沒收的那根。
 3. 用 BTC 的最後一根開盤時間對齊剛收盤的那 15 分鐘。對不齊就記 `bar_not_ready`，不寫去重、不下單。
-4. 只對這一根跑 `xiao_shidi`。BTC 防護擋下就記 `btc_guard`，同樣不寫去重。
+4. 只對這一根跑 `xiao_shidi`。15m 少於 100 根的幣跳過，和 `prefilter.run` 的 `len(k) < 100` 一樣。BTC 防護擋下就記 `btc_guard`，同樣不寫去重。
 5. 沒有小師弟訊號就記 `no_signal` 結束。這一步不拿鎖。
 
 有訊號而且是 `--live` 時才進入下面的臨界區。掃描本身不拿 `~/quantboy-live/.lock`，避免整輪行情把 60 秒 watch 擋住。
@@ -60,9 +60,11 @@ Mac 上那支 prefilter 沒有 `DATA_DIR`，去重檔的預設目錄是它自己
 
 `live_trader.req` 裡原本的 429／5xx 重試沒有改。那是同一張單的 HTTP 重試，不是失敗後改掛市價。
 
-風控拒絕（日損、5 倉、事件窗、停損方向）是 `cmd_open` 自己的 `SystemExit`。觸發器記 `risk_blocked` 後結束，不換一條路徑再送。
+`cmd_open` 的拒絕分兩種。只屬於該幣的（已有該幣倉位、停損方向不對、數量低於最小量或最小名目、找不到這個幣、取整後風險仍超過淨值 1%）記 `symbol_blocked` 或 `risk_over_1pct`，接著處理下一個幣。帳戶層級的（日損 7%、30% 全平、同時 5 倉、事件窗、雙向持倉、檔案鎖）記 `risk_blocked`，這一輪停下。認不出來的 `SystemExit` 也當帳戶層級，停整輪。
 
-IOC 沒成交、或取整後風險仍超過 1%，沿用 `cmd_open` 現在的放棄，不改掛市價。
+IOC 沒成交沿用 `cmd_open` 現在的放棄，不改掛市價。
+
+成交後停損掛不上，仍是 `live_trader` 立刻市價 `reduceOnly` 平掉這一筆，平倉再失敗就留下錯誤、不再重試。觸發器把這個 `SystemExit` 記成 `stop_place_failed`，不記成 `risk_blocked`。這一輪不再開下一筆，也不把進場改成市價。
 
 ## 價已經超過止盈
 

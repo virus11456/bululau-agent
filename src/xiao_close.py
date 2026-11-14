@@ -21,11 +21,22 @@ from datetime import datetime, timedelta, timezone
 TPE = timezone(timedelta(hours=8))
 INTERVAL_S = 15 * 60
 INTERVAL_MS = INTERVAL_S * 1000
+# prefilter.run 在 len(k) < 100 時不跑小師弟。兩邊用同一個門檻。
+MIN_15M_BARS = 100
 DEFAULT_PREFILTER = "/Users/frank/quantboy-paper/discretionary/prefilter.py"
 DEFAULT_TRADER = os.path.expanduser("~/quantboy-live/live_trader.py")
 DEFAULT_GRACE_S = 5
 DEFAULT_LOCK_WAIT_S = 25
-STOP_KINDS = ("exchange_error", "network_error", "risk_blocked")
+# 這些會停整輪。該幣自己的阻擋（symbol_blocked、risk_over_1pct）不在這裡。
+STOP_KINDS = ("exchange_error", "network_error", "risk_blocked", "stop_place_failed")
+_ACCOUNT_BLOCK = (
+    "當日虧損", "今日停開新倉", "30%", "全平", "禁止開倉", "5 倉",
+    "重大事件", "雙向持倉", "檔案鎖", "正在執行", "已觸發",
+)
+_SYMBOL_BLOCK = (
+    "已有倉位", "單幣最多", "停損/止盈方向錯誤", "低於最小量",
+    "最小名目", "找不到幣種", " 狀態 ",
+)
 
 
 class LockBusy(Exception):
@@ -166,7 +177,7 @@ def screen_market(mod):
     bars = {}
     for sym in syms:
         rows = loaded.get(sym)
-        if not rows:
+        if not rows or len(rows) < MIN_15M_BARS:
             misses += 1
             continue
         bars[sym] = rows[-1].get("t")
@@ -243,6 +254,18 @@ def _clip(text, limit=500):
     return text[:limit]
 
 
+def classify_exit(text):
+    """cmd_open 的 SystemExit。停損掛失敗單獨記。帳戶層級停整輪，該幣的問題只跳過該幣。"""
+    text = str(text or "")
+    if "停損失敗" in text:
+        return "stop_place_failed"
+    if any(piece in text for piece in _ACCOUNT_BLOCK):
+        return "risk_blocked"
+    if any(piece in text for piece in _SYMBOL_BLOCK):
+        return "symbol_blocked"
+    return "risk_blocked"
+
+
 def place_xiao(trader, cand):
     """呼叫 cmd_open 一次。失敗就回傳原因，不再送、也不改成市價。"""
     if not trader_is_xiao_ioc(trader):
@@ -256,7 +279,7 @@ def place_xiao(trader, cand):
         with contextlib.redirect_stdout(buf):
             trader.cmd_open(args)
     except SystemExit as exc:
-        return {"kind": "risk_blocked", "detail": _clip(exc)}
+        return {"kind": classify_exit(exc), "detail": _clip(exc)}
     except Exception as exc:
         if binance_error is not None and isinstance(exc, binance_error):
             return {"kind": "exchange_error", "detail": _clip(exc)}

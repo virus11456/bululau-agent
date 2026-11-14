@@ -1,5 +1,9 @@
 # 變更紀錄
 
+## 2026-11-14（平倉紀錄、watch 心跳、階梯不再空轉）
+
+- `manage` 對 meta 裡已無持倉、也不在待成交的幣記 `position_closed`（含出場價與停損／止盈）並清掉。`watch` 沒有待成交單時不打 API，每小時最多印一行。階梯完全沒成交時，只缺預掛止盈不再每分鐘叫 `manage`。`mark-reduced` 只做手動標記，不自動平一半。
+
 ## 2026-11-13（瘸師弟三檔限價）
 
 - `src/live_trader.py` 的 `open` 多了 `--ladder`。不帶這個參數時仍是單張。總量沿用原本的風險式子，再按 2:3:5 拆開。RR 用加權均價。Mac 上那份檔要手貼，見 `deploy/patches/kuai_ladder_insert.md`。

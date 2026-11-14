@@ -106,13 +106,18 @@ def account():
 def equity_of(acc):
     return float(acc["totalWalletBalance"]) + float(acc["totalUnrealizedProfit"])
 
+# 跨日只換這幾欄。pending、meta、watch_heartbeat 等不能在 00:00 被清掉。
+_DAY_FIELDS = ("day", "day_start_equity", "slice_margin", "halted_new", "killed", "created")
+
 def day_state(acc):
-    """每日 00:00 台北重算份額與日初淨值。"""
+    """每日 00:00 台北重算份額與日初淨值。只重設日欄，其餘原樣留著。"""
     s = load_state(); today = now_tpe().strftime("%Y-%m-%d")
     if s.get("day") != today:
         eq = equity_of(acc)
-        s = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
-                 halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        fresh = dict(day=today, day_start_equity=eq, slice_margin=round(eq / CFG["slices"], 4),
+                     halted_new=False, killed=False, created=now_tpe().isoformat(timespec="seconds"))
+        kept = {k: v for k, v in s.items() if k not in _DAY_FIELDS}
+        s = dict(kept); s.update(fresh)
         save_state(s); log("day_reset", **s)
     return s
 
@@ -637,6 +642,90 @@ def flatten_all(live, reason):
         if live: req("DELETE", "/fapi/v1/algoOrder", {"algoId": o["algoId"]}, signed=True)
         else: print("  [dry-run] 取消 algo", o.get("symbol"), o.get("algoId"))
 
+def _price_gap(vwap, ref):
+    try:
+        ref_d = Decimal(str(ref))
+        if ref_d == 0:
+            return None
+        return abs(vwap - ref_d) / abs(ref_d)
+    except Exception:
+        return None
+
+
+def classify_exit(vwap, meta, order_type):
+    """0.3% 以內對上 meta.stop / meta.target。對不上再看訂單類型。都沒有就是其他。"""
+    meta = meta or {}
+    band = Decimal("0.003")
+    ds = _price_gap(vwap, meta.get("stop"))
+    dt = _price_gap(vwap, meta.get("target"))
+    sl_ok = ds is not None and ds <= band
+    tp_ok = dt is not None and dt <= band
+    if sl_ok and (not tp_ok or ds <= dt):
+        return "stop"
+    if tp_ok:
+        return "tp"
+    kind = str(order_type or "").upper()
+    if "TAKE" in kind:
+        return "tp"
+    if "STOP" in kind:
+        return "stop"
+    return "other"
+
+
+def lookup_close(symbol, meta):
+    """近 24 小時 userTrades 裡最後一串減倉成交的加權均價。查不到就 exit_price=None、reason=unknown。"""
+    unknown = {"exit_price": None, "exit_side": None, "qty": None, "reason": "unknown"}
+    start_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+    try:
+        trades = req("GET", "/fapi/v1/userTrades",
+                     {"symbol": symbol, "startTime": start_ms, "limit": 1000}, signed=True)
+    except Exception:
+        return unknown
+    if not isinstance(trades, list) or not trades:
+        return unknown
+    def _rp(t):
+        try:
+            return float(t.get("realizedPnl") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    reducing = [t for t in trades if _rp(t) != 0]
+    use = reducing or list(trades)
+    try:
+        use.sort(key=lambda t: int(t.get("time") or 0))
+    except (TypeError, ValueError):
+        return unknown
+    side = str(use[-1].get("side") or "")
+    trail = []
+    for t in reversed(use):
+        if str(t.get("side") or "") != side:
+            break
+        trail.append(t)
+    trail.reverse()
+    try:
+        qty = sum((Decimal(str(t.get("qty") or "0")) for t in trail), Decimal(0))
+        notion = sum((Decimal(str(t.get("price") or "0")) * Decimal(str(t.get("qty") or "0")) for t in trail), Decimal(0))
+    except Exception:
+        return unknown
+    if qty <= 0:
+        return unknown
+    vwap = notion / qty
+    order_type = None
+    oid = trail[-1].get("orderId")
+    if oid:
+        try:
+            order = req("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": oid}, signed=True)
+            if isinstance(order, dict):
+                order_type = order.get("origType") or order.get("type") or order.get("orderType")
+        except Exception:
+            order_type = None
+    return {"exit_price": fmt(vwap), "exit_side": side or None, "qty": fmt(qty),
+            "reason": classify_exit(vwap, meta, order_type)}
+
+
+def _exit_label(reason):
+    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知"}.get(reason, reason)
+
+
 def cmd_manage(a):
     live = a.live; acc = account(); s = day_state(acc); dl = daily_loss_pct(acc, s)
     if dl >= CFG["daily_kill"] and not s["killed"]:
@@ -650,6 +739,8 @@ def cmd_manage(a):
     st = load_state()
     # ---- 限價待成交單：成交/部分成交/取消/過期處理 ----
     held_amt = {p["symbol"]: float(p["positionAmt"]) for p in positions(acc)}
+    # 這一輪才從 pending 寫進 meta 的先留著。帳戶快照可能還沒看到成交，不能馬上當已平倉。
+    meta_at_start = set(st.get("meta") or {})
     for sym, pd in list(st.get("pending", {}).items()):
         if pd.get("ladder"):
             done = manage_ladder_pending(sym, pd, held_amt, live)
@@ -686,9 +777,12 @@ def cmd_manage(a):
         has_tp = "TAKE_PROFIT_MARKET" in types or "TAKE_PROFIT" in types
         print(f"{sym} {amt} 停損 {'有' if has_sl else '缺'} 止盈 {'有' if has_tp else '缺'}")
         m = meta.get(sym)
-        # 指定數量的保護單：若限價單已終結，數量需等於實際持倉
+        no_tp = bool(m and m.get("no_tp"))
+        # 指定數量的保護單：若限價單已終結，數量需等於實際持倉。no_tp 的止盈不調整，下面直接撤。
         if sym not in st.get("pending", {}):
             for po in protect_orders(sym, algo, oo):
+                if no_tp and str(po["t"]).startswith("TAKE"):
+                    continue
                 if po["cp"] or po["qty"] is None or Decimal(str(po["qty"])) == Decimal(str(abs(amt))): continue
                 kind = "STOP_MARKET" if po["t"].startswith("STOP") else "TAKE_PROFIT_MARKET"
                 print(f"  調整 {kind} 數量 {po['qty']} → {abs(amt)}")
@@ -697,16 +791,54 @@ def cmd_manage(a):
                     cancel_protect(sym, po, live)   # 先掛新再撤舊，避免空窗
                 except Exception as e:
                     log("error", msg="調整保護單數量失敗", symbol=sym, err=str(e))
+        if no_tp:
+            for po in protect_orders(sym, algo, oo):
+                if not str(po["t"]).startswith("TAKE"):
+                    continue
+                print("no_tp_cancel {0}".format(sym))
+                log("no_tp_cancel", symbol=sym, id=po.get("id"))
+                try:
+                    cancel_protect(sym, po, live)
+                except Exception as e:
+                    log("error", msg="撤止盈失敗", symbol=sym, err=str(e))
+            has_tp = False
         if not has_sl:
             if not m: log("error", msg="缺停損且無紀錄停損價，市價平倉", symbol=sym); market_close(sym, amt, live, "no_stop_no_meta"); continue
+            # reduced 之後 meta.stop 已是成本價，缺停損就補掛在這個價，不是原來的結構停損。
             try: place_protect(sym, close_side, "STOP_MARKET", m["stop"], live)
             except Exception as e:
                 log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
-        if not has_tp and m:
+        if not has_tp and m and not no_tp:
             try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
             except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
-    # 已無持倉的幣種：清掉孤兒保護單
+    # 已無持倉的幣種：先把 meta 裡已平的記下來，再清孤兒保護單（清理本身不改）。
     held = {p["symbol"] for p in positions(acc)}
+    closed_note = False
+    for sym in list(st.get("meta") or {}):
+        if sym not in meta_at_start or sym in held or sym in st.get("pending", {}):
+            continue
+        m = st["meta"].get(sym) or {}
+        pnl = None
+        try:
+            start_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+            rows = req("GET", "/fapi/v1/income",
+                       {"symbol": sym, "incomeType": "REALIZED_PNL", "startTime": start_ms, "limit": 1000},
+                       signed=True)
+            if isinstance(rows, list):
+                pnl = sum(float(r.get("income") or 0) for r in rows)
+        except Exception:
+            pnl = None
+        closed = lookup_close(sym, m)
+        log("position_closed", symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+            exit_price=closed["exit_price"], exit_side=closed["exit_side"], qty=closed["qty"],
+            reason=closed["reason"], pnl=pnl)
+        px = "null" if closed["exit_price"] is None else closed["exit_price"]
+        py = "null" if pnl is None else pnl
+        print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label(closed["reason"]), py))
+        st["meta"].pop(sym, None)
+        closed_note = True
+    if closed_note and live:
+        save_state(st)
     for o in algo:
         if o.get("symbol") not in held and o.get("symbol") not in st.get("pending", {}):
             print("孤兒條件單", o.get("symbol"), o.get("algoId"))
@@ -718,16 +850,34 @@ def cmd_manage(a):
     print(f"當日虧損 {dl*100:.2f}%  持倉 {len(held)}")
 
 def cmd_watch(a):
-    """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫；
+    """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
     有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。"""
     st = load_state(); pend = st.get("pending", {})
-    if not pend: return
+    if not pend:
+        now = now_tpe()
+        last = st.get("watch_heartbeat")
+        due = True
+        if last:
+            try:
+                prev = datetime.fromisoformat(last)
+                if prev.tzinfo is None:
+                    prev = prev.replace(tzinfo=TPE)
+                due = (now - prev).total_seconds() >= 3600
+            except (TypeError, ValueError):
+                due = True
+        if due:
+            print("[watch] 無待成交限價單 {0}".format(now.strftime("%H:%M")))
+            st["watch_heartbeat"] = now.isoformat(timespec="seconds")
+            save_state(st)
+        return
     need = False
     for sym, pd in pend.items():
         if pd.get("ladder"):
             types = {po["t"] for po in protect_orders(sym)}
             has_sl = any(str(t).startswith("STOP") for t in types)
             has_tp = any(str(t).startswith("TAKE") for t in types)
+            total_exec = 0.0
+            any_done = False
             for item in pd.get("orders") or []:
                 if not item.get("orderId"):
                     continue
@@ -735,12 +885,21 @@ def cmd_watch(a):
                     o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": item["orderId"]}, signed=True, retries=2)
                 except BinanceError as e:
                     log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
-                executed = float(o.get("executedQty") or 0)
-                resting = o["status"] in ("NEW", "PARTIALLY_FILLED")
-                if (not resting) or executed > 0 or not has_sl or not has_tp:
-                    log("watch_trigger", symbol=sym, status=o["status"], executed=o.get("executedQty"), ladder=True)
-                    need = True
-                    break
+                total_exec += float(o.get("executedQty") or 0)
+                if o["status"] not in ("NEW", "PARTIALLY_FILLED"):
+                    any_done = True
+            prev = pd.get("last_exec")
+            try:
+                prev_f = float(prev) if prev is not None else None
+            except (TypeError, ValueError):
+                prev_f = None
+            changed = prev_f is None or abs(total_exec - prev_f) > 1e-9
+            pd["last_exec"] = total_exec
+            save_state(st)
+            # 完全沒成交時，只缺預掛止盈不叫 manage。有成交才看缺單或數量變化；沒有停損仍要叫。
+            if any_done or (total_exec > 0 and ((not has_sl or not has_tp) or changed)) or (not has_sl):
+                log("watch_trigger", symbol=sym, executed=total_exec, ladder=True, has_sl=has_sl, has_tp=has_tp)
+                need = True
             continue
         if not pd.get("orderId"): continue
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True, retries=2)
@@ -751,6 +910,47 @@ def cmd_watch(a):
             if o["status"] not in ("NEW", "PARTIALLY_FILLED") or not any(t.startswith("TAKE") for t in types) or not any(t.startswith("STOP") for t in types):
                 log("watch_trigger", symbol=sym, status=o["status"], executed=o.get("executedQty"), filled=filled); need = True
     if need: cmd_manage(a)
+
+def cmd_mark_reduced(a):
+    """手動標記已減倉。不掛單、不撤單、不自動平一半。布鹿流同時標記不再補掛止盈。"""
+    live = a.live
+    sym = a.symbol.upper()
+    st = load_state()
+    meta = st.setdefault("meta", {})
+    cur = dict(meta.get(sym) or {})
+    if cur.get("reduced"):
+        raise SystemExit("已減過倉，不重複標記")
+    rows = req("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
+    if isinstance(rows, dict):
+        rows = [rows]
+    pos = None
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("symbol") not in (None, sym):
+            continue
+        try:
+            amt = float(row.get("positionAmt") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amt != 0:
+            pos = row
+            break
+    if not pos or pos.get("entryPrice") in (None, ""):
+        raise SystemExit("沒有持倉，不能標記減倉")
+    info = sym_info(sym)
+    entry = fmt(rnd(Decimal(str(pos["entryPrice"])), info["tick"]))
+    new = dict(cur)
+    new["reduced"] = True
+    new["stop"] = entry
+    if new.get("setup") == "布鹿流":
+        new["no_tp"] = True
+    print("mark-reduced {0} stop={1} reduced=true no_tp={2}".format(sym, entry, bool(new.get("no_tp"))))
+    log("mark_reduced", symbol=sym, stop=entry, setup=new.get("setup"), no_tp=bool(new.get("no_tp")), live=live)
+    if not live:
+        return
+    meta[sym] = new
+    st["meta"] = meta
+    save_state(st)
+
 
 def cmd_flatten(a):
     log("flatten", live=a.live); flatten_all(a.live, "manual_flatten"); print("完成" if a.live else "dry-run 完成")
@@ -765,6 +965,7 @@ def main():
     o.add_argument("--leverage", type=int); o.add_argument("--portion", type=float, default=1.0, choices=[0.25, 0.5, 1.0]); o.add_argument("--live", action="store_true")
     for n in ("manage", "flatten", "watch"):
         x = sub.add_parser(n); x.add_argument("--live", action="store_true")
+    mr = sub.add_parser("mark-reduced"); mr.add_argument("--symbol", required=True); mr.add_argument("--live", action="store_true")
     a = ap.parse_args()
     if a.cmd == "open": a.side = {"long": "BUY", "short": "SELL"}.get(a.side.lower(), a.side.upper())
     with Lock():
@@ -773,7 +974,8 @@ def main():
             if a.cmd == "open" and getattr(a, "ladder", None):
                 open_ladder(a)
             else:
-                {"status": cmd_status, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch, "flatten": cmd_flatten}[a.cmd](a)
+                {"status": cmd_status, "open": cmd_open, "manage": cmd_manage, "watch": cmd_watch,
+                 "flatten": cmd_flatten, "mark-reduced": cmd_mark_reduced}[a.cmd](a)
         except BinanceError as e: log("error", cmd=a.cmd, err=str(e)); raise SystemExit(f"幣安錯誤: {e}")
 
 if __name__ == "__main__": main()

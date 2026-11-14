@@ -48,7 +48,12 @@ class TargetHitTest(unittest.TestCase):
                 raise lt.BinanceError(500, -1000, "order down")
             return dict(self.orders[params["orderId"]])
         if path == "/fapi/v2/positionRisk":
-            return [{"symbol": "PIEVERSEUSDT", "positionAmt": self.amt, "markPrice": self.mark}]
+            self.risk_retries.append(retries)
+            if getattr(self, "fill_after_cancel", False) and any(c[0] == "DELETE" for c in self.calls):
+                amt = "2"
+            else:
+                amt = self.amt
+            return [{"symbol": "PIEVERSEUSDT", "positionAmt": amt, "markPrice": self.mark}]
         if path == "/fapi/v1/openAlgoOrders":
             if self.fail_algo:
                 raise lt.BinanceError(500, -1000, "algo down")
@@ -61,24 +66,29 @@ class TargetHitTest(unittest.TestCase):
         if path == "/fapi/v1/openOrders":
             return []
         if method == "DELETE":
+            if getattr(self, "cancel_missing", False) and path == "/fapi/v1/order":
+                raise lt.BinanceError(400, -2011, "unknown order")
             return {}
         raise AssertionError((method, path, params))
 
-    def watch(self, live):
+    def watch(self, live, fresh=False):
         def load():
             return json.loads(json.dumps(self.store))
 
         def save(state):
             self.store.clear()
             self.store.update(state)
+            self.saved.append(json.loads(json.dumps(state)))
 
         self.managed = []
+        self.saved = []
+        self.risk_retries = []
         buf = io.StringIO()
         with patch.object(lt, "req", self.fake_req), \
                 patch.object(lt, "log", side_effect=lambda kind, **kw: self.logs.append((kind, kw))), \
                 patch.object(lt, "load_state", side_effect=load), \
                 patch.object(lt, "save_state", side_effect=save), \
-                patch.object(lt, "_user_stream_fresh", return_value=False), \
+                patch.object(lt, "_user_stream_fresh", return_value=fresh), \
                 patch.object(lt, "cmd_manage", side_effect=lambda a: self.managed.append(1)):
             with redirect_stdout(buf):
                 lt.cmd_watch(type("A", (), {"live": live})())
@@ -97,15 +107,41 @@ class TargetHitTest(unittest.TestCase):
                             and kw.get("mark") == "1.823" and kw.get("target") == TARGET
                             for kind, kw in self.logs))
         self.assertIn("未成交但標記價 1.823 已到止盈 1.8003", text)
+        self.assertEqual(self.risk_retries, [2, 2])
         self.assertEqual(self.managed, [])
 
-    def test_pieverse_dry_run_cancels_without_delete(self):
+    def test_pieverse_dry_run_does_not_write_state(self):
         text = self.watch(False)
         self.assertFalse(any(c[0] == "DELETE" for c in self.calls))
-        self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
+        self.assertIn("PIEVERSEUSDT", self.store["pending"])
+        self.assertEqual(self.saved, [])
         self.assertIn("[dry-run] 取消進場單", text)
         self.assertIn("[dry-run] 取消保護單", text)
         self.assertTrue(any(kind == "target_hit_before_fill" for kind, _kw in self.logs))
+
+    def test_fresh_user_stream_still_cancels_unfilled_target(self):
+        text = self.watch(True, fresh=True)
+        self.assertIn("未成交但標記價 1.823 已到止盈 1.8003", text)
+        self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
+        self.assertEqual(self.managed, [])
+
+    def test_fill_during_cancel_keeps_stop_and_calls_manage(self):
+        self.cancel_missing = True
+        self.fill_after_cancel = True
+        self.watch(True)
+        self.assertFalse(any(c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
+        self.assertIn("PIEVERSEUSDT", self.store["pending"])
+        self.assertEqual(self.managed, [1])
+        self.assertFalse(any(kind == "target_hit_before_fill" for kind, _kw in self.logs))
+        self.assertTrue(any("保留停損" in str(kw.get("msg")) for _k, kw in self.logs))
+
+    def test_already_cancelled_orders_are_not_target_hits(self):
+        for row in self.orders.values():
+            row["status"] = "CANCELED"
+        self.watch(True)
+        self.assertFalse(any(c[1] == "/fapi/v2/positionRisk" for c in self.calls))
+        self.assertFalse(any(kind == "target_hit_before_fill" for kind, _kw in self.logs))
+        self.assertIn("PIEVERSEUSDT", self.store["pending"])
 
     def test_partial_fill_is_not_cancelled(self):
         self.orders[1] = {"orderId": 1, "status": "FILLED", "executedQty": "2", "price": LEVELS[0]}

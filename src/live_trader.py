@@ -294,39 +294,28 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
     if not orders:
         return False
     filled = Decimal(0)
+    resting = False
     for order in orders:
         if not isinstance(order, dict) or not order.get("orderId"):
             return False
-        if str(order.get("status") or "") not in ("NEW", "CANCELED", "EXPIRED", "REJECTED"):
+        status = str(order.get("status") or "")
+        if status in ("NEW", "PARTIALLY_FILLED"):
+            resting = True
+        elif status not in ("CANCELED", "EXPIRED", "REJECTED"):
             return False
         filled += _filled_qty(order)
-    if filled > 0:
+    if filled > 0 or not resting:
+        # 已經被撤掉、沒有還掛著的限價單，不是這次價先到止盈。
         return False
     try:
-        rows = req("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
+        mark, amt = _read_position_mark(sym)
     except BinanceError as e:
         log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
         return False
     except Exception as e:
         log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
         return False
-    if isinstance(rows, dict):
-        rows = [rows]
-    mark = None
-    amt = Decimal(0)
-    seen = False
-    for row in rows or []:
-        if not isinstance(row, dict) or row.get("symbol") not in (None, sym):
-            continue
-        seen = True
-        try:
-            amt += Decimal(str(row.get("positionAmt") or "0"))
-            if row.get("markPrice") not in (None, ""):
-                mark = Decimal(str(row["markPrice"]))
-        except Exception:
-            log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym)
-            return False
-    if not seen or mark is None:
+    if mark is None:
         log("warn", msg="沒有標記價，價到止盈也不撤", symbol=sym)
         return False
     if amt != 0:
@@ -348,6 +337,8 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
         log("warn", msg="條件單讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
         return False
     for order in orders:
+        if str(order.get("status") or "") not in ("NEW", "PARTIALLY_FILLED"):
+            continue
         try:
             cancel_entry_order(sym, order.get("orderId"), live)
         except BinanceError as e:
@@ -357,6 +348,17 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
         except Exception as e:
             log("error", msg="價到止盈但撤限價失敗，保護單不動", symbol=sym, err=str(e))
             return False
+    try:
+        _mark2, amt2 = _read_position_mark(sym)
+    except BinanceError as e:
+        log("warn", msg="撤單後持倉讀取失敗，保留停損", symbol=sym, err=str(e))
+        return False
+    except Exception as e:
+        log("warn", msg="撤單後持倉讀取失敗，保留停損", symbol=sym, err=str(e))
+        return False
+    if amt2 != 0:
+        log("warn", msg="撤進場單時已有持倉，保留停損，交給 manage", symbol=sym, pos=str(amt2))
+        return "filled"
     for po in protect_orders(sym, algo, oo):
         try:
             cancel_protect(sym, po, live)
@@ -367,6 +369,25 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
         target=str(pd.get("target")), mark=fmt(mark), live=live)
     print("{0} 未成交但標記價 {1} 已到止盈 {2}，整筆撤單".format(sym, fmt(mark), pd.get("target")))
     return True
+
+def _read_position_mark(sym):
+    """回傳 (mark, positionAmt)。失敗就往上丟。重試 2 次，跟 watch 查單一樣。"""
+    rows = req("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True, retries=2)
+    if isinstance(rows, dict):
+        rows = [rows]
+    mark = None
+    amt = Decimal(0)
+    seen = False
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("symbol") not in (None, sym):
+            continue
+        seen = True
+        amt += Decimal(str(row.get("positionAmt") or "0"))
+        if row.get("markPrice") not in (None, ""):
+            mark = Decimal(str(row["markPrice"]))
+    if not seen:
+        return None, amt
+    return mark, amt
 
 def place_protect(symbol, close_side, otype, trigger, live, qty=None):
     """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
@@ -1405,10 +1426,12 @@ def _user_stream_fresh():
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
     有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。
-    使用者資料流的心跳還新的時候，這支不打 API，當備援。沒有那個檔就照舊輪詢。"""
-    if _user_stream_fresh():
-        return
+    使用者資料流的心跳還新時，成交仍由資料流叫 manage；零成交但價先到止盈這件事
+    資料流不會看到，所以心跳新鮮時仍要做 target_hit 檢查。沒有那個檔就照舊輪詢。"""
+    fresh = _user_stream_fresh()
     st = load_state(); pend = st.get("pending", {})
+    if fresh and not pend:
+        return
     if not pend:
         now = now_tpe()
         last = st.get("watch_heartbeat")
@@ -1455,12 +1478,18 @@ def cmd_watch(a):
             expected = [item for item in (pd.get("orders") or []) if item.get("orderId")]
             if (not fetch_failed) and len(fetched) == len(expected) and total_exec == 0:
                 hit = cancel_unfilled_if_target_hit(sym, pd, fetched, a.live)
-                if hit:
-                    pending = st.get("pending") or {}
-                    pending.pop(sym, None)
-                    st["pending"] = pending
-                    save_state(st)
+                if hit == "filled":
+                    need = True
                     continue
+                if hit:
+                    if a.live:
+                        pending = st.get("pending") or {}
+                        pending.pop(sym, None)
+                        st["pending"] = pending
+                        save_state(st)
+                    continue
+            if fresh:
+                continue
             prev = pd.get("last_exec")
             try:
                 prev_f = float(prev) if prev is not None else None
@@ -1488,12 +1517,19 @@ def cmd_watch(a):
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True, retries=2)
         except BinanceError as e: log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
         if float(o.get("executedQty") or 0) == 0 and o.get("status") in ("NEW", "CANCELED", "EXPIRED", "REJECTED"):
-            if cancel_unfilled_if_target_hit(sym, pd, [o], a.live):
-                pending = st.get("pending") or {}
-                pending.pop(sym, None)
-                st["pending"] = pending
-                save_state(st)
+            hit = cancel_unfilled_if_target_hit(sym, pd, [o], a.live)
+            if hit == "filled":
+                need = True
                 continue
+            if hit:
+                if a.live:
+                    pending = st.get("pending") or {}
+                    pending.pop(sym, None)
+                    st["pending"] = pending
+                    save_state(st)
+                continue
+        if fresh:
+            continue
         if o["status"] not in ("NEW", "PARTIALLY_FILLED") or float(o.get("executedQty") or 0) > 0:
             types = {po["t"] for po in protect_orders(sym)}
             filled = float(o.get("executedQty") or 0) > 0

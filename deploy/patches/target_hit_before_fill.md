@@ -6,7 +6,9 @@ Mac 的 `~/quantboy-live/live_trader.py` 不要整份覆蓋，也不要改 `_key
 
 `cmd_watch` 在 60 秒輪詢裡，某筆完全沒有成交（每張 `executedQty` 是 0、持倉是 0），而且標記價已到計畫止盈，就撤掉這筆全部限價單，以及它的停損和止盈條件單。log 的 `kind` 和 `event` 都是 `target_hit_before_fill`，然後把這個幣從 `pending` 拿掉。
 
-做多是標記價 ≥ 止盈，做空是標記價 ≤ 止盈。價格用 `GET /fapi/v2/positionRisk` 的 `markPrice`，因為保護單本來就是 `MARK_PRICE`。同一筆回應裡也有 `positionAmt`，所以不必再查最新價。只有訂單已經顯示完全沒成交時才打這支；部分成交不打。
+做多是標記價 ≥ 止盈，做空是標記價 ≤ 止盈。價格用 `GET /fapi/v2/positionRisk` 的 `markPrice`，重試 2 次。撤完進場單再讀一次持倉；若已經不是 0，停損留著並交給 manage，不記 `target_hit_before_fill`。限價單本來就是已撤狀態時，也不記這個事件。
+
+dry-run 只印會撤什麼，不寫 `pending`。使用者資料流心跳還新時，watch 仍做這個檢查；成交補單仍交給資料流。
 
 任一張限價單、positionRisk，或條件單讀取失敗，這一輪什麼都不撤。
 

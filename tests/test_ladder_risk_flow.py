@@ -305,7 +305,8 @@ class UserStreamTest(unittest.TestCase):
 
         with open(path, "w") as handle:
             handle.write(str(time.time()))
-        with patch.object(lt, "req", fake_req):
+        with patch.object(lt, "req", fake_req), \
+                patch.object(lt, "load_state", return_value={"pending": {}}):
             lt.cmd_watch(type("A", (), {"live": True})())
         self.assertEqual(calls, [])
 

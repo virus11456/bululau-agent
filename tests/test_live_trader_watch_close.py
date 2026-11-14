@@ -229,6 +229,7 @@ class LadderWatchTest(unittest.TestCase):
 
 class MarkReducedTest(unittest.TestCase):
     def test_manage_cancels_tp_and_replaces_stop_at_cost(self):
+        lt.STOP_READBACK_SLEEP_S = 0
         state = {"pending": {}, "meta": {"XUSDT": {
             "setup": "布鹿流", "stop": "90", "target": "120",
         }}}
@@ -244,19 +245,26 @@ class MarkReducedTest(unittest.TestCase):
             state.update(json.loads(json.dumps(s)))
             saved.append(json.loads(json.dumps(s)))
 
+        posted = []
+
         def fake_req(method, path, params=None, signed=False, retries=5):
             calls.append((method, path, dict(params or {})))
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "XUSDT", "positionAmt": "4", "entryPrice": "100.239"}]
             if path == "/fapi/v1/openAlgoOrders":
-                # 有止盈、沒有停損。
-                if any(c[1] == "/fapi/v1/algoOrder" and c[0] == "DELETE" for c in calls):
-                    return []
-                return [{"symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 8,
-                         "quantity": "10", "closePosition": "false", "triggerPrice": "120"}]
+                # 有止盈、沒有停損。撤掉止盈之後仍要看得到剛掛上的停損。
+                # 這次呼叫自己也在 calls 裡，不能把「正在讀」算成已撤。
+                prior = calls[:-1]
+                base = [] if any(c[1] == "/fapi/v1/algoOrder" and c[0] == "DELETE" for c in prior) else [
+                    {"symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 8,
+                     "quantity": "10", "closePosition": "false", "triggerPrice": "120"}]
+                return base + list(posted)
             if path == "/fapi/v1/openOrders":
                 return []
             if method == "POST" and path == "/fapi/v1/algoOrder":
+                posted.append({"symbol": (params or {}).get("symbol"), "orderType": (params or {}).get("type"),
+                               "algoId": 20, "algoStatus": "NEW", "quantity": (params or {}).get("quantity"),
+                               "triggerPrice": (params or {}).get("triggerPrice"), "closePosition": "false"})
                 return {"algoId": 20}
             if method == "DELETE":
                 return {}
@@ -292,14 +300,19 @@ class MarkReducedTest(unittest.TestCase):
         logs.clear()
         state["meta"]["XUSDT"]["stop"] = "100.23"
 
+        posted_qty = []
+
         def fake_req_qty(method, path, params=None, signed=False, retries=5):
             calls.append((method, path, dict(params or {})))
             if path == "/fapi/v1/openAlgoOrders":
                 return [{"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9,
-                         "quantity": "10", "closePosition": "false", "triggerPrice": "100.23"}]
+                         "quantity": "10", "closePosition": "false", "triggerPrice": "100.23"}] + list(posted_qty)
             if path == "/fapi/v1/openOrders":
                 return []
             if method == "POST" and path == "/fapi/v1/algoOrder":
+                posted_qty.append({"symbol": (params or {}).get("symbol"), "orderType": (params or {}).get("type"),
+                                   "algoId": 21, "algoStatus": "NEW", "quantity": (params or {}).get("quantity"),
+                                   "triggerPrice": (params or {}).get("triggerPrice"), "closePosition": "false"})
                 return {"algoId": 21}
             if method == "DELETE":
                 return {}
@@ -677,12 +690,19 @@ class SingleOrderUnchangedTest(unittest.TestCase):
         def run(mod):
             calls, logs = [], []
 
+            posted = []
+
             def fake_req(method, path, params=None, signed=False, retries=5):
                 calls.append((method, path, dict(params or {})))
-                if path in ("/fapi/v1/openAlgoOrders", "/fapi/v1/openOrders"):
+                if path == "/fapi/v1/openAlgoOrders":
+                    return list(posted)
+                if path == "/fapi/v1/openOrders":
                     return []
                 if method == "POST" and path == "/fapi/v1/algoOrder":
-                    return {"algoId": len(calls)}
+                    algo_id = len(calls)
+                    posted.append({"symbol": (params or {}).get("symbol"), "orderType": (params or {}).get("type"),
+                                   "algoId": algo_id, "algoStatus": "NEW"})
+                    return {"algoId": algo_id}
                 raise AssertionError((method, path))
 
             buf = io.StringIO()
@@ -711,9 +731,11 @@ class SingleOrderUnchangedTest(unittest.TestCase):
         old_calls, old_out, old_logs = run(old)
         new_calls, new_out, new_logs = run(lt)
         # O5 多了依幣種與定期全量的讀取；下單內容（方向、觸發價、數量、closePosition）不變。
+        # 停損回查多一次讀取、一行「已掛上」和 stop_readback，不另下一張單。
         self.assertEqual(posts(new_calls), posts(old_calls))
-        self.assertEqual(new_out, old_out)
-        self.assertEqual(slim(new_logs), slim(old_logs))
+        self.assertEqual(new_out.replace("停損已掛上\n", ""), old_out)
+        self.assertTrue(any(kind == "stop_readback" for kind, _kw in slim(new_logs)))
+        self.assertEqual([item for item in slim(new_logs) if item[0] != "stop_readback"], slim(old_logs))
 
 
 if __name__ == "__main__":

@@ -97,6 +97,8 @@ class SplitAndRrTest(unittest.TestCase):
 class OpenPathTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
+        self.algos = []
+        lt.STOP_READBACK_SLEEP_S = 0
 
     def fake_req(self, method, path, params=None, signed=False, retries=5):
         self.calls.append((method, path, dict(params or {})))
@@ -109,7 +111,11 @@ class OpenPathTest(unittest.TestCase):
         if method == "POST" and path == "/fapi/v1/order":
             return {"orderId": len(self.calls), "avgPrice": "0", "executedQty": "0"}
         if method == "POST" and path == "/fapi/v1/algoOrder":
-            return {"algoId": len(self.calls)}
+            algo_id = len(self.calls)
+            self.algos = getattr(self, "algos", [])
+            self.algos.append({"algoId": algo_id, "symbol": (params or {}).get("symbol"),
+                               "algoStatus": "NEW", "orderType": (params or {}).get("type")})
+            return {"algoId": algo_id}
         if method == "DELETE":
             return {}
         if method == "GET" and path == "/fapi/v1/order":
@@ -117,7 +123,7 @@ class OpenPathTest(unittest.TestCase):
         if path == "/fapi/v1/openOrders":
             return []
         if path == "/fapi/v1/openAlgoOrders":
-            return []
+            return list(getattr(self, "algos", []))
         raise AssertionError((method, path, params))
 
     def patches(self, sym=None):

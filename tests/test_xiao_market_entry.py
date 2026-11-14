@@ -73,6 +73,8 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.filled = "10"
         self.mark = "100"
         self.info = info()
+        self.algos = []
+        lt.STOP_READBACK_SLEEP_S = 0
 
     def run_open(self, args):
         def load():
@@ -99,7 +101,9 @@ class XiaoMarketEntryTest(unittest.TestCase):
                 return {}
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": args.symbol, "positionAmt": "10", "markPrice": "100"}]
-            if path in ("/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders", "/fapi/v1/userTrades", "/fapi/v1/income"):
+            if path == "/fapi/v1/openAlgoOrders":
+                return list(self.algos)
+            if path in ("/fapi/v1/openOrders", "/fapi/v1/userTrades", "/fapi/v1/income"):
                 return []
             if method == "POST" and path == "/fapi/v1/order":
                 return {"orderId": 7, "avgPrice": self.avg, "executedQty": self.filled}
@@ -107,7 +111,10 @@ class XiaoMarketEntryTest(unittest.TestCase):
                 algo_n["n"] += 1
                 if self.fail_stop and algo_n["n"] == 1:
                     raise lt.BinanceError(400, -2021, "stop rejected")
-                return {"algoId": 30 + algo_n["n"]}
+                algo_id = 30 + algo_n["n"]
+                self.algos.append({"algoId": algo_id, "symbol": (params or {}).get("symbol"),
+                                   "algoStatus": "NEW", "orderType": (params or {}).get("type")})
+                return {"algoId": algo_id}
             if method == "DELETE":
                 return {}
             raise AssertionError((method, path, params))

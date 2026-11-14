@@ -38,6 +38,10 @@ Mac 實盤 routine 帶的是 `--prefilter /Users/frank/quantboy-paper/discretion
 
 大師兄的 `target` 是 2R 平 50%，不是整倉。`target_passed_at_fill` 只拿 `target_3r`（3R 餘倉全出）比較。標記價過了 2R、還沒到 3R，就只平一半並把 `scaled_2r` 寫進 meta，之後只補 3R，不再掛 2R，也不再市價平半。沒有 `target_3r` 時，不用 2R 去全平，也不把 2R 掛成 `closePosition` 止盈。
 
+手動減倉如果讓持倉落到計畫數量的 75% 以內（也就是減掉 25% 以上），會被當成已經平過 2R，之後不再掛 2R 半倉。狀態檔遺失時，沒有留下的基準數量，下一輪會用當下持倉重算。
+
+4H 要抓 `DA_4H_FETCH = 120` 根。篩網至少要 80 根已收 K，`klines` 會丟掉還沒收盤的那根；抓 80 會剩 79，實盤永遠是「4H 資料不足」。
+
 ## 未確認
 
 見 `src/prefilter.py` 的 `XIAO_UNCONFIRMED` 和 `DA_SHIXIONG_UNCONFIRMED`。不要把那些句子改成新的擋單數字。

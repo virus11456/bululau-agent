@@ -269,6 +269,26 @@ class XiaoScreenTest(unittest.TestCase):
         v[71]["c"] = black["o"] + 1
         miss, why = prefilter.da_shixiong(v, "BTCUSDT")
         self.assertIsNone(miss, why)
+        self.assertEqual(prefilter.DA_4H_FETCH, 120)
+        self.assertGreater(prefilter.DA_4H_FETCH, prefilter.DA_MA_SLOW + prefilter.DA_REBOUND_MIN + 10)
+        import inspect
+        self.assertIn("DA_4H_FETCH", inspect.getsource(prefilter.run))
+
+    def test_open_4h_bar_dropped_still_signals(self):
+        closed = self._da_bars()
+        now = 10_000_000
+        for i, item in enumerate(closed):
+            item["ct"] = now - (len(closed) - i) * 1000
+        forming = dict(closed[-1])
+        forming["t"] = closed[-1]["t"] + 1
+        forming["ct"] = now
+        kept = [k for k in closed + [forming] if k["ct"] < now]
+        self.assertEqual(len(kept), len(closed))
+        hit, why = prefilter.da_shixiong(kept, "BTCUSDT")
+        self.assertIsNotNone(hit, why)
+        short, why = prefilter.da_shixiong(kept[:79], "BTCUSDT")
+        self.assertIsNone(short)
+        self.assertEqual(why, "4H 資料不足")
         import inspect
         self.assertIn('setup="funding_rate"', inspect.getsource(prefilter.funding))
 

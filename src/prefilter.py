@@ -235,6 +235,8 @@ DA_RECOVER = 0.50
 DA_RETEST_BAND = 0.03
 # 限價單掛著超過幾根 4H 就撤。預設 2 根，可調。
 DA_LIMIT_EXPIRE_4H = 2
+# 已收 4H 至少要 80 根才夠 MA60 和回看。klines 會丟掉還沒收盤的那根，抓 80 會剩 79，永遠資料不足。
+DA_4H_FETCH = 120
 DA_SHIXIONG_UNCONFIRMED = [
     "限價單超過幾根 4H 就撤。2 根是預設、可調。",
     "前低下方再留多少未確認。停損取前低與 BTC/ETH 3%、小幣 10% 的較低者。",
@@ -396,6 +398,7 @@ def run(args):
         if qv < MIN_QV and s != args.symbol: skipped["illiquid"] += 1; continue
         uni.append((s, qv))
     if args.limit: uni = sorted(uni, key=lambda x: -x[1])[:args.limit]
+    # klines 會丟掉未收盤的那根。15m 抓 120、用到 100；1H 抓 100、用到 70；日 K 抓 40、用到 25。濾掉一根後都還夠。
     k15 = dict(zip([u[0] for u in uni], pmap(lambda u: _safe(klines, u[0], "15m", 120, end), uni)))
     btc = k15.get("BTCUSDT") or klines("BTCUSDT", "15m", 120, end)
     guard = btc_guard(btc); btc24 = chg(btc, 96); btc4 = chg(btc, 16)
@@ -439,7 +442,7 @@ def run(args):
         for r in res:
             (near if "fail" in r else cands).append(r)
     # 大師兄不限 stage2 強勢幣。每輪用已收 4H，同一根長黑只出一次。
-    k4map = dict(zip([u[0] for u in uni], pmap(lambda u: _safe(klines, u[0], "4h", 80, end), uni)))
+    k4map = dict(zip([u[0] for u in uni], pmap(lambda u: _safe(klines, u[0], "4h", DA_4H_FETCH, end), uni)))
     rs_by = {s: dict(rs24=round(chg(k15[s], 96) - btc24, 2), rs4h=round(chg(k15[s], 16) - btc4, 2),
                      big=qv >= BIG_QV, qv_m=round(qv / 1e6, 1))
              for s, qv in uni if k15.get(s) and len(k15[s]) >= 100}

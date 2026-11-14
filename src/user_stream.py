@@ -23,6 +23,7 @@ WS_HOST = "fstream.binance.com"
 # 連線可以等 20 秒。連上之後的 recv 用這個，避免閒置 20 秒就被當成斷線。
 IDLE_RECV_S = 180
 MANAGE_COALESCE_S = 2.5
+MANAGE_RETRY_MAX = 3
 BACKOFF_MAX_S = 60
 # run_loop 寫入，connect_fstream 的 recv 逾時讀它，這樣合併視窗到了會自己醒。
 _manage_due = {"at": None, "now": None}
@@ -82,7 +83,10 @@ def _api_request(method, path):
             except (TypeError, ValueError):
                 retry = 0
         if e.code in (418, 429):
-            raise StreamRateLimit(e.code, retry)
+            import live_trader
+            wait = retry or (60 if e.code == 418 else 1)
+            live_trader.write_ratelimit(e.code, time.time() + wait)
+            raise StreamRateLimit(e.code, wait)
         raise
     return json.loads(body.decode())
 
@@ -142,10 +146,11 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
     backoff = 1
     due = None
     queued = None
+    manage_tries = 0
     _manage_due["now"] = now
 
     def fire():
-        nonlocal due, queued
+        nonlocal due, queued, manage_tries
         raw = queued
         try:
             on_manage(raw if isinstance(raw, dict) else None)
@@ -154,9 +159,16 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
             _manage_due["at"] = due
             return
         except Exception as e:
-            _log_stream("user_stream_manage", err=type(e).__name__)
+            manage_tries += 1
+            _log_stream("user_stream_manage", err=type(e).__name__, attempt=manage_tries)
+            if manage_tries < MANAGE_RETRY_MAX:
+                delay = min(BACKOFF_MAX_S, 2 ** manage_tries)
+                due = current() + delay
+                _manage_due["at"] = due
+                return
         due = None
         queued = None
+        manage_tries = 0
         _manage_due["at"] = None
 
     def consider(raw):
@@ -170,14 +182,36 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
         if due is not None and cur >= due:
             fire()
 
+    def honor_shared_limit():
+        """共用退避檔還有效就先睡，這段時間不連線、不申請 listenKey。418 睡完就停。"""
+        import live_trader
+        gate = live_trader.read_ratelimit()
+        if not gate:
+            return False
+        status, until = gate
+        remain = until - time.time()
+        if remain <= 0:
+            return False
+        _log_stream("user_stream_backoff", status=status, wait=round(remain, 3))
+        sleep(remain)
+        return status == 418
+
     while not stop():
         try:
+            if honor_shared_limit():
+                return
             sock = connect()
             touch()
+            last_frame = current()
             for raw in sock.messages():
                 backoff = 1
-                touch()
                 cur = current()
+                if raw is None:
+                    if cur - last_frame >= 2 * IDLE_RECV_S:
+                        raise ConnectionError("idle")
+                else:
+                    last_frame = cur
+                    touch()
                 if cur - last_ka >= keepalive_every:
                     keepalive()
                     last_ka = cur
@@ -191,12 +225,14 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
             raise ConnectionError("stream ended")
         except StreamRateLimit as e:
             _manage_due["at"] = None
+            import live_trader
+            wait = e.retry_after or (60 if e.status == 418 else backoff)
+            live_trader.write_ratelimit(e.status, time.time() + wait)
             if e.status == 418:
-                _log_stream("user_stream_stop", status=418)
+                _log_stream("user_stream_stop", status=418, wait=wait)
+                sleep(wait)
                 return
-            wait = e.retry_after or backoff
             _log_stream("user_stream_backoff", status=e.status, wait=wait)
-            sleep(wait)
             backoff = min(max(backoff * 2, 2), BACKOFF_MAX_S)
         except Exception as e:
             _manage_due["at"] = None
@@ -261,8 +297,10 @@ def iter_ws_messages(sock):
             raise ConnectionError("ws close")
         if opcode == 0x9:
             sock.sendall(_client_frame(0xA, payload))
+            yield ("frame",)
             continue
         if opcode == 0xA:
+            yield ("frame",)
             continue
         if opcode == 0x1:
             yield json.loads(payload.decode())

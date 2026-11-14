@@ -128,6 +128,21 @@ class LadderExpireTest(unittest.TestCase):
         self.assertTrue(any(k == "ladder_expire" and kw.get("cancel") == "stop" for k, kw in logs))
         self.assertFalse(any(c[0] == "POST" for c in calls))
 
+    def test_zero_fills_also_cancels_take_profit(self):
+        orders = self._orders({
+            1: {"status": "NEW", "executedQty": "0", "origQty": "10"},
+        })
+        protects = [
+            _algo("STOP_MARKET", 9, "10", "90"),
+            _algo("TAKE_PROFIT_MARKET", 8, "10", "120"),
+        ]
+        done, calls, logs = self.drive(orders, 0, 3, protects)
+        self.assertEqual(done, "drop")
+        algo_ids = [c[2].get("algoId") for c in calls if c[0] == "DELETE" and c[1] == "/fapi/v1/algoOrder"]
+        self.assertEqual(sorted(algo_ids), [8, 9])
+        self.assertTrue(any(kw.get("cancel") == "tp" for _k, kw in logs))
+        self.assertTrue(any(kw.get("cancel") == "stop" for _k, kw in logs))
+
     def test_partial_fill_cancels_only_open_entries(self):
         orders = self._orders({
             1: {"status": "FILLED", "executedQty": "4", "origQty": "4"},
@@ -240,6 +255,11 @@ class LadderExpireTest(unittest.TestCase):
 
 
 class UserStreamTest(unittest.TestCase):
+    def setUp(self):
+        path = lt._ratelimit_path()
+        if os.path.exists(path):
+            os.remove(path)
+
     def test_fill_event_triggers_manage_and_reconnects(self):
         managed = []
         connects = {"n": 0}
@@ -408,10 +428,13 @@ class UserStreamTest(unittest.TestCase):
 
         with patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
             user_stream.run_loop(limited, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
-        self.assertEqual(sleeps, [])
-        self.assertEqual(logs, [("user_stream_stop", {"status": 418})])
+        self.assertEqual(sleeps, [30])
+        self.assertEqual(logs, [("user_stream_stop", {"status": 418, "wait": 30})])
 
         sleeps.clear()
+        path = lt._ratelimit_path()
+        if os.path.exists(path):
+            os.remove(path)
         hit = {"n": 0}
 
         def once_429():
@@ -426,7 +449,8 @@ class UserStreamTest(unittest.TestCase):
 
         with patch.object(lt, "log"):
             user_stream.run_loop(once_429, lambda: hit["n"] >= 2, lambda _m: None, sleeps.append, lambda: None, lambda: None)
-        self.assertEqual(sleeps, [9])
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 9, delta=0.05)
 
     def test_fill_burst_is_one_manage(self):
         clock = {"t": 1000.0}
@@ -524,6 +548,144 @@ class UserStreamTest(unittest.TestCase):
                 patch.object(lt, "save_state"):
             lt.cmd_watch(type("A", (), {"live": True})())
         self.assertEqual(calls, [("GET", "/fapi/v1/order")])
+
+    def test_idle_timeout_does_not_refresh_heartbeat(self):
+        touches = {"n": 0}
+        connects = {"n": 0}
+
+        class Sock(object):
+            def messages(self):
+                yield None
+                yield ("frame",)
+                yield {"e": "noop"}
+
+        def connect():
+            connects["n"] += 1
+            return Sock()
+
+        user_stream.run_loop(
+            connect, lambda: connects["n"] >= 1 and touches["n"] >= 3,
+            lambda _m: None, lambda _s: None, lambda: touches.__setitem__("n", touches["n"] + 1),
+            lambda: None)
+        # 連上一次，加上收到 pong／資料各一次。閒置逾時那次不加。
+        self.assertEqual(touches["n"], 3)
+        self.assertEqual(connects["n"], 1)
+
+    def test_shared_418_sleeps_without_connecting(self):
+        start = 1000000.0
+        lt.write_ratelimit(418, start + 80)
+        connects = {"n": 0}
+        sleeps = []
+        clock = {"t": start}
+
+        def connect():
+            connects["n"] += 1
+            raise AssertionError("418 期間不能連線")
+
+        def snooze(sec):
+            sleeps.append(sec)
+            clock["t"] += float(sec)
+
+        with patch.object(user_stream.time, "time", lambda: clock["t"]), \
+                patch.object(lt, "log"):
+            user_stream.run_loop(connect, lambda: False, lambda _m: None, snooze, lambda: None, lambda: None)
+        self.assertEqual(connects["n"], 0)
+        self.assertTrue(sleeps and sleeps[0] > 70)
+
+    def test_418_from_connect_writes_backoff_and_stops(self):
+        connects = {"n": 0}
+        sleeps = []
+
+        def connect():
+            connects["n"] += 1
+            raise user_stream.StreamRateLimit(418, 30)
+
+        with patch.object(lt, "log"):
+            user_stream.run_loop(connect, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(connects["n"], 1)
+        self.assertEqual(sleeps, [30])
+        status, _until = lt.read_ratelimit()
+        self.assertEqual(status, 418)
+
+    def test_manage_failure_retries_with_backoff_then_stops(self):
+        clock = {"t": 1000.0}
+        calls = {"n": 0}
+        connects = {"n": 0}
+
+        class Sock(object):
+            def messages(self):
+                yield {"e": "ACCOUNT_UPDATE"}
+                clock["t"] = 1004.0
+                yield None
+                clock["t"] = 1008.0
+                yield None
+                clock["t"] = 1020.0
+                yield None
+
+        def connect():
+            connects["n"] += 1
+            return Sock()
+
+        def on_manage(_msg):
+            calls["n"] += 1
+            raise RuntimeError("manage down")
+
+        user_stream.run_loop(
+            connect, lambda: calls["n"] >= user_stream.MANAGE_RETRY_MAX,
+            on_manage, lambda _s: None, lambda: None, lambda: None, now=lambda: clock["t"])
+        self.assertEqual(calls["n"], user_stream.MANAGE_RETRY_MAX)
+        self.assertEqual(connects["n"], 1)
+
+    def test_one_fill_does_not_repeat_but_expiry_does(self):
+        both = [
+            {"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9, "quantity": "1",
+             "closePosition": "false", "triggerPrice": "1"},
+            {"symbol": "XUSDT", "orderType": "TAKE_PROFIT_MARKET", "algoId": 8, "quantity": "1",
+             "closePosition": "false", "triggerPrice": "2"},
+        ]
+        orders = {
+            1: {"orderId": 1, "status": "FILLED", "executedQty": "2"},
+            2: {"orderId": 2, "status": "NEW", "executedQty": "0"},
+        }
+        store = {"pending": {"XUSDT": {
+            "ladder": True,
+            "orders": [{"orderId": 1}, {"orderId": 2}],
+            "placed_at": datetime.now(lt.TPE).isoformat(timespec="seconds"),
+        }}}
+        managed = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            if path == "/fapi/v1/openAlgoOrders":
+                return list(both)
+            if path == "/fapi/v1/openOrders":
+                return []
+            if method == "GET" and path == "/fapi/v1/order":
+                return dict(orders[params["orderId"]])
+            raise AssertionError((method, path))
+
+        def load():
+            return json.loads(json.dumps(store))
+
+        def save(s):
+            store.clear()
+            store.update(s)
+
+        def watch():
+            with patch.object(lt, "req", fake_req), \
+                    patch.object(lt, "log"), \
+                    patch.object(lt, "_user_stream_fresh", return_value=False), \
+                    patch.object(lt, "load_state", side_effect=load), \
+                    patch.object(lt, "save_state", side_effect=save), \
+                    patch.object(lt, "cmd_manage", side_effect=lambda a: managed.append(1)):
+                lt.cmd_watch(type("A", (), {"live": True})())
+
+        watch()
+        watch()
+        self.assertEqual(managed, [1])
+        store["pending"]["XUSDT"]["placed_at"] = (
+            datetime.now(lt.TPE) - timedelta(hours=3)).isoformat(timespec="seconds")
+        watch()
+        self.assertEqual(managed, [1, 1])
 
 
 if __name__ == "__main__":

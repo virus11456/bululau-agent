@@ -458,7 +458,7 @@ def expire_unfilled_ladder(sym, pd, rows, held_amt, live, now_ms=None):
     """超過 2 小時仍未成交的進場單撤掉。已成交的倉與它的停損止盈不動。
 
     任何一張進場單撤不掉，或撤完再查仍有成交，都不撤預掛停損，pending 也留著。
-    停損只在每一張的 executedQty 重新查過、確認是 0、而且沒有持倉時才撤。
+    停損和止盈只在每一張的 executedQty 重新查過、確認是 0、而且沒有持倉時才撤。
     回傳 drop / partial / None。
     """
     anchor = ladder_anchor_ms(pd, rows)
@@ -517,13 +517,18 @@ def expire_unfilled_ladder(sym, pd, rows, held_amt, live, now_ms=None):
     if unconfirmed or not live:
         return None
     for po in protect_orders(sym):
-        if not str(po["t"]).startswith("STOP"):
+        kind = str(po["t"])
+        if kind.startswith("STOP"):
+            which = "stop"
+        elif kind.startswith("TAKE"):
+            which = "tp"
+        else:
             continue
-        log("ladder_expire", symbol=sym, cancel="stop", id=po.get("id"))
+        log("ladder_expire", symbol=sym, cancel=which, id=po.get("id"))
         try:
             cancel_protect(sym, po, live)
         except Exception as e:
-            log("error", msg="逾時撤預掛停損失敗", symbol=sym, err=str(e))
+            log("error", msg="逾時撤預掛保護單失敗", symbol=sym, err=str(e))
     return "drop"
 
 

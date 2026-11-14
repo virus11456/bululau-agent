@@ -25,7 +25,7 @@
 
 `cmd_watch` 的階梯分支在決定要不要叫 manage 時，若掛出已超過 2 小時且還有 NEW 或 PARTIALLY_FILLED，也要叫 manage。單張限價的那個 `if not pd.get("orderId")` 之後不要改，單張仍不自動撤。
 
-完全沒成交：先撤進場單。任何一張撤單失敗（不是 -2011）就停，不撤停損，pending 留著。撤完要再查每一張 `executedQty`。確認全是 0、沒有持倉、也沒有還掛著的檔，才撤預掛停損。再查看到成交，或還有 NEW／PARTIALLY_FILLED，停損不動。有成交：只撤還沒成交的進場單，不停損、不止盈、也不平倉。
+完全沒成交：先撤進場單。任何一張撤單失敗（不是 -2011）就停，不撤停損、也不撤止盈，pending 留著。撤完要再查每一張 `executedQty`。確認全是 0、沒有持倉、也沒有還掛著的檔，才把預掛停損和止盈一起撤。再查看到成交，或還有 NEW／PARTIALLY_FILLED，停損和止盈都不動。有成交：只撤還沒成交的進場單，不停損、不止盈、也不平倉。
 
 ## O8：使用者資料流
 
@@ -49,7 +49,19 @@ def _user_stream_fresh():
 
 資料流呼叫 `manage` 時要拿 `live_trader.Lock()` 這把非阻塞鎖（`manage_under_lock`）。拿不到就晚一秒再試，不能讓 `SystemExit` 把程序殺掉，也不能在沒鎖的時候讀寫 `state.json`。成交事件先合併約 2.5 秒，只跑一次 manage。
 
-連上 websocket 之後要把 recv 逾時改成 180 秒。閒置逾時只送遮罩過的 ping，不重連、不重拿 listenKey。重連要指數退避。HTTP 429 照 Retry-After 等待。HTTP 418 停止，不要再打 listenKey。客戶端的 ping／pong 必須加遮罩。
+連上 websocket 之後要把 recv 逾時改成 180 秒。閒置逾時只送遮罩過的 ping，不更新心跳；心跳只在收到資料或 pong 時更新。超過兩個逾時週期都沒收到幀才重連。重連要指數退避。HTTP 429／418 寫進 `~/quantboy-live/.ratelimit_until`（跟 manage 同一份）。檔案時間還沒到就先睡，不要連線。418 睡完後程序正常結束。manage 失敗最多再試 2 次（一共 3 次），中間退避。客戶端的 ping／pong 必須加遮罩。
+
+plist 的 KeepAlive 不要寫 `true`。改成只在非正常結束時重啟，並加 60 秒節流：
+
+```xml
+<key>KeepAlive</key>
+<dict>
+    <key>SuccessfulExit</key>
+    <false/>
+</dict>
+<key>ThrottleInterval</key>
+<integer>60</integer>
+```
 
 launchd 用新的 `deploy/com.quantboy.userstream.plist`（Label 是 `com.quantboy.userstream`）。不要改既有的 `com.quantboy.livewatch`。plist 裡寫的是 `REPLACE_USER`，沒有寫死使用者名稱。這個 PR 還沒審過之前，不要 bootstrap。
 

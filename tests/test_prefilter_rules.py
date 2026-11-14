@@ -250,6 +250,7 @@ class XiaoScreenTest(unittest.TestCase):
             self.assertEqual(len(first), 1)
             self.assertEqual(len(second), 1)
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".lock"))
 
     def test_da_retest_only_and_one_black(self):
         bars = self._da_bars()

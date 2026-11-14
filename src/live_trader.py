@@ -1006,12 +1006,76 @@ def xiao_target_from_fill(side, avg, stop, tick):
 # 大師兄限價超過幾根 4H 就撤剩餘進場單。預設 2 根，可調。
 DA_LIMIT_EXPIRE_4H = 2
 DA_LIMIT_EXPIRE_MS = DA_LIMIT_EXPIRE_4H * 4 * 60 * 60 * 1000
+# 與 src/hardfilter.py 的布鹿流日 K 相同。Mac 的 live_trader 沒有 hardfilter，不能 import。
+DAILY_FAST = 7
+DAILY_SLOW = 25
+DAILY_MIN_BARS = 33
+DAILY_KLINE_LIMIT = 60
+
+def ma_at(closes, n, back=0):
+    """簡單平均。back=0 是最後 n 根。與 hardfilter.ma_at 相同。"""
+    end = len(closes) - back
+    if end < n:
+        return None
+    return sum(closes[end - n:end]) / n
+
+def _closed_daily(rows, now_ms):
+    """布鹿流同一套：有 ct 且 ct >= now 的未收日 K 丟掉。沒有 ct 的留下。"""
+    out = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            bar = row
+        else:
+            bar = {"t": int(row[0]), "c": float(row[4]), "l": float(row[3]), "ct": int(row[6])}
+        ct = bar.get("ct")
+        if now_ms is not None and ct is not None and ct >= now_ms:
+            continue
+        out.append(bar)
+    return out
+
+def da_btc_pause_reason(rows, now_ms=None):
+    """大師兄進場看 BTC 日 K。回傳 None 才可以下單。
+
+    偏空是沒有達到收盤 > MA7 > MA25。均線和 33 根門檻寫在本檔，數值和布鹿流相同。
+    讀取失敗不進這支：呼叫端比照布鹿流，讀不到仍下單。
+    """
+    bars = _closed_daily(rows, now_ms)
+    if len(bars) < DAILY_MIN_BARS:
+        return "日K資料不足"
+    closes = [bar["c"] for bar in bars]
+    fast = ma_at(closes, DAILY_FAST)
+    slow = ma_at(closes, DAILY_SLOW)
+    close = closes[-1]
+    if fast is None or slow is None or not (close > fast > slow):
+        return "未達收盤>MA7>MA25"
+    return None
+
+def da_entry_block(symbol):
+    """大師兄要不要因 BTC 日 K 暫停。None 表示下單。限流這輪不下單。其他讀取失敗仍下單。"""
+    try:
+        raw = req("GET", "/fapi/v1/klines",
+                  {"symbol": "BTCUSDT", "interval": "1d", "limit": DAILY_KLINE_LIMIT})
+        return da_btc_pause_reason(raw, int(time.time() * 1000))
+    except BinanceError as exc:
+        if exc.status in (418, 429):
+            raise SystemExit("BTC 日K限流，這輪不下單")
+        log("warn", msg="BTC 日K讀不到，大師兄比照布鹿流仍下單", symbol=symbol, err=str(exc))
+        return None
+    except Exception as exc:
+        log("warn", msg="BTC 日K讀不到，大師兄比照布鹿流仍下單", symbol=symbol, err=str(exc))
+        return None
 
 def cmd_open(a):
     live = a.live; sym = a.symbol.upper(); side = a.side.upper()
     if getattr(a, "setup", None) == "大師兄":
         if a.entry_type != "limit" or not getattr(a, "target_3r", None):
             raise SystemExit("大師兄要限價，並且要給 --target-3r。沒有 3R 全平價就拒絕開倉。")
+        why = da_entry_block(sym)
+        if why:
+            log("da_paused_btc_daily_bear", symbol=sym, side=side, entry=a.price,
+                stop=a.stop, target=a.target, target_3r=a.target_3r, why=why)
+            print("大師兄 BTC 日K偏空，只記錄不下單")
+            return
     a.entry_type = resolve_entry_type(getattr(a, "setup", None), a.entry_type)
     acc = account(); s = day_state(acc); eq = equity_of(acc)
     # 風控閘門

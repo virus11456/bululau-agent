@@ -427,7 +427,9 @@ class UserStreamTest(unittest.TestCase):
             raise user_stream.StreamRateLimit(418, 30)
 
         with patch.object(lt, "log", side_effect=lambda kind, **kw: logs.append((kind, kw))):
-            user_stream.run_loop(limited, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+            with self.assertRaises(SystemExit) as caught:
+                user_stream.run_loop(limited, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(caught.exception.code, 1)
         self.assertEqual(sleeps, [30])
         self.assertEqual(logs, [("user_stream_stop", {"status": 418, "wait": 30})])
 
@@ -588,7 +590,9 @@ class UserStreamTest(unittest.TestCase):
 
         with patch.object(user_stream.time, "time", lambda: clock["t"]), \
                 patch.object(lt, "log"):
-            user_stream.run_loop(connect, lambda: False, lambda _m: None, snooze, lambda: None, lambda: None)
+            with self.assertRaises(SystemExit) as caught:
+                user_stream.run_loop(connect, lambda: False, lambda _m: None, snooze, lambda: None, lambda: None)
+        self.assertEqual(caught.exception.code, 1)
         self.assertEqual(connects["n"], 0)
         self.assertTrue(sleeps and sleeps[0] > 70)
 
@@ -601,7 +605,9 @@ class UserStreamTest(unittest.TestCase):
             raise user_stream.StreamRateLimit(418, 30)
 
         with patch.object(lt, "log"):
-            user_stream.run_loop(connect, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+            with self.assertRaises(SystemExit) as caught:
+                user_stream.run_loop(connect, lambda: False, lambda _m: None, sleeps.append, lambda: None, lambda: None)
+        self.assertEqual(caught.exception.code, 1)
         self.assertEqual(connects["n"], 1)
         self.assertEqual(sleeps, [30])
         status, _until = lt.read_ratelimit()

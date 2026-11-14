@@ -59,10 +59,15 @@ def read_ratelimit():
     return status, until
 
 def write_ratelimit(status, until):
+    """只在新的到期時間更晚時覆寫。較短的新退避不能把已經更長的擋掉。"""
+    until = float(until)
+    current = read_ratelimit()
+    if current is not None and current[1] >= until:
+        return
     path = _ratelimit_path()
     tmp = path + ".tmp"
     with open(tmp, "w") as handle:
-        handle.write("{0} {1}\n".format(int(status), float(until)))
+        handle.write("{0} {1}\n".format(int(status), until))
     os.replace(tmp, path)
 
 def _note_weight(headers):
@@ -598,9 +603,15 @@ def manage_ladder_pending(sym, pd, held_amt, live):
             log("error", msg="調整階梯保護單數量失敗", symbol=sym, err=str(e))
         return False
     if resting and filled > 0 and amt == 0:
-        # 快照是 0。保護單兩張都還在：可能只是成交還沒反映，這輪不撤。
-        # 停損或止盈已經不在：視為已經平倉，撤掉剩下的進場單。
-        protects = protect_orders(sym)
+        # 快照是 0。保護單讀不到就不能判斷是還沒反映、還是已經平倉，這輪不動。
+        try:
+            algo_rows = open_algo(sym, fail_closed=True)
+            order_rows = open_orders(sym) or []
+        except BinanceError as e:
+            log("warn", msg="階梯保護單讀取失敗，持倉為 0 但有成交，這輪不動", symbol=sym, err=str(e))
+            print("{0} 階梯保護單讀取失敗，這輪不動".format(sym))
+            return False
+        protects = protect_orders(sym, algo_rows, order_rows)
         has_sl = any(str(po["t"]).startswith("STOP") for po in protects)
         has_tp = any(str(po["t"]).startswith("TAKE") for po in protects)
         if has_sl and has_tp:

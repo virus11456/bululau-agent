@@ -312,6 +312,28 @@ class ManageLadderTest(unittest.TestCase):
         with patch.object(lt, "req", fake_req), patch.object(lt, "log"):
             self.assertFalse(lt.manage_ladder_pending("PIEVERSEUSDT", pd, {}, False))
 
+    def test_flat_snapshot_with_fills_and_unread_orders_does_nothing(self):
+        calls = []
+
+        def fake_req(method, path, params=None, signed=False, retries=5):
+            calls.append((method, path))
+            if method == "GET" and path == "/fapi/v1/order":
+                oid = params["orderId"]
+                if oid == 1:
+                    return {"orderId": 1, "status": "FILLED", "executedQty": "2", "origQty": "2"}
+                return {"orderId": oid, "status": "NEW", "executedQty": "0", "origQty": "3"}
+            if path == "/fapi/v1/openAlgoOrders":
+                raise lt.BinanceError(500, -1000, "algo down")
+            if method == "DELETE" or method == "POST":
+                raise AssertionError("讀不到保護單時不能撤單或下單")
+            raise AssertionError((method, path))
+
+        pd = {"ladder": True, "orders": [{"orderId": 1}, {"orderId": 2}]}
+        with patch.object(lt, "req", fake_req), patch.object(lt, "log"):
+            done = lt.manage_ladder_pending("XUSDT", pd, {}, True)
+        self.assertFalse(done)
+        self.assertFalse(any(m == "DELETE" for m, _p in calls))
+
 
 if __name__ == "__main__":
     unittest.main()

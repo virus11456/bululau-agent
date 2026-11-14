@@ -183,7 +183,7 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
             fire()
 
     def honor_shared_limit():
-        """共用退避檔還有效就先睡，這段時間不連線、不申請 listenKey。418 睡完就停。"""
+        """共用退避檔還有效就先睡，這段時間不連線、不申請 listenKey。418 睡完以非 0 結束。"""
         import live_trader
         gate = live_trader.read_ratelimit()
         if not gate:
@@ -199,7 +199,7 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
     while not stop():
         try:
             if honor_shared_limit():
-                return
+                raise SystemExit(1)
             sock = connect()
             touch()
             last_frame = current()
@@ -231,7 +231,7 @@ def run_loop(connect, stop, on_manage, sleep, touch, keepalive, keepalive_every=
             if e.status == 418:
                 _log_stream("user_stream_stop", status=418, wait=wait)
                 sleep(wait)
-                return
+                raise SystemExit(1)
             _log_stream("user_stream_backoff", status=e.status, wait=wait)
             backoff = min(max(backoff * 2, 2), BACKOFF_MAX_S)
         except Exception as e:

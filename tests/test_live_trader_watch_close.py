@@ -156,6 +156,8 @@ class LadderWatchTest(unittest.TestCase):
             return list(self.algos)
         if path == "/fapi/v1/openOrders":
             return []
+        if path == "/fapi/v2/positionRisk":
+            return [{"symbol": "XUSDT", "positionAmt": "0", "markPrice": "0.01"}]
         if method == "GET" and path == "/fapi/v1/order":
             return dict(self.orders[params["orderId"]])
         raise AssertionError((method, path, params))

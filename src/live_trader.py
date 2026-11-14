@@ -278,6 +278,117 @@ def cancel_symbol_orphans(sym, live):
             except BinanceError as e:
                 log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
 
+def price_reached_target(side, mark, target):
+    """做多是標記價 ≥ 止盈，做空是標記價 ≤ 止盈。"""
+    side = str(side or "BUY").upper()
+    if side in ("SELL", "SHORT"):
+        return mark <= target
+    return mark >= target
+
+def cancel_unfilled_if_target_hit(sym, pd, orders, live):
+    """完全未成交且標記價已到計畫止盈，就撤掉全部限價單和停損、止盈。
+
+    讀取失敗、持倉不是 0、或任一檔已有成交，都不撤。回傳 True 表示 pending 該移除。
+    標記價來自 positionRisk 的 markPrice，和保護單的 MARK_PRICE 同一套，不另查最新價。
+    """
+    if not orders:
+        return False
+    filled = Decimal(0)
+    resting = False
+    for order in orders:
+        if not isinstance(order, dict) or not order.get("orderId"):
+            return False
+        status = str(order.get("status") or "")
+        if status in ("NEW", "PARTIALLY_FILLED"):
+            resting = True
+        elif status not in ("CANCELED", "EXPIRED", "REJECTED"):
+            return False
+        filled += _filled_qty(order)
+    if filled > 0 or not resting:
+        # 已經被撤掉、沒有還掛著的限價單，不是這次價先到止盈。
+        return False
+    try:
+        mark, amt = _read_position_mark(sym)
+    except BinanceError as e:
+        log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        return False
+    except Exception as e:
+        log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        return False
+    if mark is None:
+        log("warn", msg="沒有標記價，價到止盈也不撤", symbol=sym)
+        return False
+    if amt != 0:
+        return False
+    try:
+        target = Decimal(str(pd.get("target")))
+    except Exception:
+        return False
+    side = pd.get("side") or "BUY"
+    if not price_reached_target(side, mark, target):
+        return False
+    try:
+        algo = open_algo(sym, fail_closed=True)
+        oo = open_orders(sym) or []
+    except BinanceError as e:
+        log("warn", msg="條件單讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        return False
+    except Exception as e:
+        log("warn", msg="條件單讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        return False
+    for order in orders:
+        if str(order.get("status") or "") not in ("NEW", "PARTIALLY_FILLED"):
+            continue
+        try:
+            cancel_entry_order(sym, order.get("orderId"), live)
+        except BinanceError as e:
+            if e.code != -2011:
+                log("error", msg="價到止盈但撤限價失敗，保護單不動", symbol=sym, err=str(e))
+                return False
+        except Exception as e:
+            log("error", msg="價到止盈但撤限價失敗，保護單不動", symbol=sym, err=str(e))
+            return False
+    try:
+        _mark2, amt2 = _read_position_mark(sym)
+    except BinanceError as e:
+        log("warn", msg="撤單後持倉讀取失敗，保留停損", symbol=sym, err=str(e))
+        return False
+    except Exception as e:
+        log("warn", msg="撤單後持倉讀取失敗，保留停損", symbol=sym, err=str(e))
+        return False
+    if amt2 != 0:
+        log("warn", msg="撤進場單時已有持倉，保留停損，交給 manage", symbol=sym, pos=str(amt2))
+        return "filled"
+    for po in protect_orders(sym, algo, oo):
+        try:
+            cancel_protect(sym, po, live)
+        except Exception as e:
+            log("error", msg="價到止盈但撤保護單失敗", symbol=sym, err=str(e))
+            return False
+    log("target_hit_before_fill", event="target_hit_before_fill", symbol=sym, side=str(side).upper(),
+        target=str(pd.get("target")), mark=fmt(mark), live=live)
+    print("{0} 未成交但標記價 {1} 已到止盈 {2}，整筆撤單".format(sym, fmt(mark), pd.get("target")))
+    return True
+
+def _read_position_mark(sym):
+    """回傳 (mark, positionAmt)。失敗就往上丟。重試 2 次，跟 watch 查單一樣。"""
+    rows = req("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True, retries=2)
+    if isinstance(rows, dict):
+        rows = [rows]
+    mark = None
+    amt = Decimal(0)
+    seen = False
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("symbol") not in (None, sym):
+            continue
+        seen = True
+        amt += Decimal(str(row.get("positionAmt") or "0"))
+        if row.get("markPrice") not in (None, ""):
+            mark = Decimal(str(row["markPrice"]))
+    if not seen:
+        return None, amt
+    return mark, amt
+
 def place_protect(symbol, close_side, otype, trigger, live, qty=None):
     """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
     size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
@@ -722,7 +833,7 @@ def open_ladder(a):
         for order in orders:
             print("  [dry-run] POST /fapi/v1/order", order)
         place_protect(sym, close_side, "STOP_MARKET", stop_p, False, qty=fmt(qty))
-        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False, qty=fmt(qty))
+        print("  [dry-run] 止盈不預掛，成交後由 watch/manage 補")
         return plan
     try:
         req("POST", "/fapi/v1/marginType", dict(symbol=sym, marginType="ISOLATED"), signed=True)
@@ -760,21 +871,12 @@ def open_ladder(a):
             if p["symbol"] == sym:
                 market_close(sym, float(p["positionAmt"]), True, "ladder_stop_place_failed")
         raise SystemExit("預掛停損失敗，階梯進場單已撤銷: {0}".format(e))
-    try:
-        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True, qty=fmt(qty))
-    except BinanceError as e:
-        if e.code == -2021:
-            log("info", msg="止盈價在現價錯邊，暫不預掛；成交後由 watch/manage 立即補掛", symbol=sym, target=tp_p)
-            print("  止盈暫不預掛（會立即觸發），成交後 watch 會在 1 分鐘內補掛")
-        else:
-            log("error", msg="階梯預掛止盈失敗（停損已在）", err=str(e))
-    except Exception as e:
-        log("error", msg="階梯預掛止盈失敗（停損已在）", err=str(e))
+    # 止盈不在成交前預掛。closePosition 止盈在空倉時被觸發會失效；成交後由 manage 補掛。
     st = load_state()
     st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, qty=fmt(qty), side=side,
                                               ladder=True, orders=placed, placed_at=now_tpe().isoformat(timespec="seconds"))
     save_state(st)
-    print("三檔限價已掛，停損/止盈已同步預掛（reduceOnly 合計數量）", [x["orderId"] for x in placed])
+    print("三檔限價已掛，停損已預掛；止盈等成交後補", [x["orderId"] for x in placed])
     return plan
 # --- kuai ladder (paste end) ---
 
@@ -896,7 +998,7 @@ def cmd_open(a):
     if not live:
         print(f"  [dry-run] 設定 {sym} ISOLATED、槓桿 {lev}x"); print("  [dry-run] POST /fapi/v1/order", order)
         place_protect(sym, close_side, "STOP_MARKET", stop_p, False)
-        place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, False); return
+        print("  [dry-run] 止盈不預掛，成交後由 watch/manage 補"); return
     try: req("POST", "/fapi/v1/marginType", dict(symbol=sym, marginType="ISOLATED"), signed=True)
     except BinanceError as e:
         if e.code != -4046: raise   # -4046 = 已是逐倉
@@ -915,16 +1017,10 @@ def cmd_open(a):
             for p in positions(acc2):
                 if p["symbol"] == sym: market_close(sym, float(p["positionAmt"]), True, "limit_stop_place_failed")
             raise SystemExit(f"預掛停損失敗，進場單已撤銷: {e}")
-        try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", tp_p, True, qty=fmt(qty))
-        except BinanceError as e:
-            if e.code == -2021:
-                log("info", msg="止盈價在現價錯邊，暫不預掛；成交後由 watch/manage 立即補掛", symbol=sym, target=tp_p)
-                print("  止盈暫不預掛（會立即觸發），成交後 watch 會在 1 分鐘內補掛")
-            else: log("error", msg="限價預掛止盈失敗（停損已在）", err=str(e))
-        except Exception as e: log("error", msg="限價預掛止盈失敗（停損已在）", err=str(e))
+        # 限價成交前不預掛止盈。停損仍預掛：reduceOnly 空倉不會開出反向倉，成交當下就有保護。
         st = load_state(); st.setdefault("pending", {})[sym] = dict(stop=stop_p, target=tp_p, setup=a.setup, orderId=oid,
                                                                      qty=fmt(qty), side=side); save_state(st)
-        print("限價單已掛，停損/止盈已同步預掛（reduceOnly 指定數量）", oid); return
+        print("限價單已掛，停損已預掛；止盈等成交後補", oid); return
     try:
         place_protect(sym, close_side, "STOP_MARKET", stop_p, True)
     except Exception as e:
@@ -1122,7 +1218,119 @@ def lookup_close(symbol, meta):
 
 
 def _exit_label(reason):
-    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知", "manual": "手動"}.get(reason, reason)
+    return {"stop": "停損", "tp": "止盈", "other": "其他", "unknown": "未知", "manual": "手動",
+            "target_passed_at_fill": "價已過止盈"}.get(reason, reason)
+
+def _mark_past_target(sym, entry_side, target):
+    """標記價已到或越過計畫止盈就回 True。讀不到就回 None，讓呼叫端改試掛單。"""
+    if target in (None, ""):
+        return None
+    try:
+        mark, _amt = _read_position_mark(sym)
+    except Exception:
+        return None
+    if mark is None:
+        return None
+    try:
+        tgt = Decimal(str(target))
+    except Exception:
+        return None
+    return price_reached_target(entry_side, mark, tgt)
+
+def _cancel_resting_entries(sym, st, live):
+    """撤掉這個幣還掛著的限價進場單。停損、止盈留給後面的孤兒清理。"""
+    pd = (st.get("pending") or {}).get(sym) or {}
+    ids = []
+    if pd.get("ladder"):
+        for item in pd.get("orders") or []:
+            if item.get("orderId"):
+                ids.append(item["orderId"])
+    elif pd.get("orderId"):
+        ids.append(pd["orderId"])
+    try:
+        oo = open_orders(sym) or []
+    except Exception as e:
+        log("warn", msg="價已過止盈，進場單讀取失敗", symbol=sym, err=str(e))
+        oo = []
+    for order in oo:
+        if not isinstance(order, dict) or order.get("symbol") not in (None, sym):
+            continue
+        if order.get("type") != "LIMIT":
+            continue
+        if str(order.get("status") or "NEW") not in ("NEW", "PARTIALLY_FILLED"):
+            continue
+        if order.get("orderId"):
+            ids.append(order["orderId"])
+    seen = set()
+    for oid in ids:
+        if oid in seen:
+            continue
+        seen.add(oid)
+        try:
+            cancel_entry_order(sym, oid, live)
+        except BinanceError as e:
+            if e.code != -2011:
+                log("error", msg="價已過止盈但撤進場單失敗", symbol=sym, err=str(e), orderId=oid)
+        except Exception as e:
+            log("error", msg="價已過止盈但撤進場單失敗", symbol=sym, err=str(e), orderId=oid)
+
+def _record_target_passed_close(sym, st, live):
+    """平倉成功後沿用既有的出場紀錄，原因固定為 target_passed_at_fill。"""
+    m = {}
+    if sym in (st.get("meta") or {}):
+        m = st["meta"].get(sym) or {}
+    elif sym in (st.get("pending") or {}):
+        m = st["pending"].get(sym) or {}
+    closed = lookup_close(sym, m)
+    pnl = None
+    try:
+        start_ms = int(time.time() * 1000) - 24 * 60 * 60 * 1000
+        rows = req("GET", "/fapi/v1/income",
+                   {"symbol": sym, "incomeType": "REALIZED_PNL", "startTime": start_ms, "limit": 1000},
+                   signed=True)
+        if isinstance(rows, list):
+            pnl = sum(float(r.get("income") or 0) for r in rows)
+    except Exception:
+        pnl = None
+    pnl_text, pnl_raw = (None, None) if pnl is None else format_pnl(pnl)
+    fields = dict(symbol=sym, setup=m.get("setup"), stop=m.get("stop"), target=m.get("target"),
+                  exit_price=closed.get("exit_price"), exit_side=closed.get("exit_side"), qty=closed.get("qty"),
+                  reason="target_passed_at_fill", pnl=pnl_text)
+    if closed.get("exit_price_raw") is not None:
+        fields["exit_price_raw"] = closed["exit_price_raw"]
+    if pnl_raw is not None:
+        fields["pnl_raw"] = pnl_raw
+    log("position_closed", **fields)
+    log("target_passed_at_fill", event="target_passed_at_fill", symbol=sym, reason="target_passed_at_fill")
+    px = "null" if closed.get("exit_price") is None else closed["exit_price"]
+    py = "null" if pnl_text is None else pnl_text
+    print("{0} 已平倉 出場價 {1} 觸發={2} 已實現 {3}".format(sym, px, _exit_label("target_passed_at_fill"), py))
+    if isinstance(st.get("meta"), dict):
+        st["meta"].pop(sym, None)
+    if isinstance(st.get("pending"), dict):
+        st["pending"].pop(sym, None)
+    if live:
+        save_state(st)
+
+def close_because_target_passed(sym, amt, st, live):
+    """補掛止盈時價格已經越過止盈：市價 reduceOnly 平掉整個持倉。
+
+    dry-run 只印「會市價平倉」，不下單、不寫狀態。
+    市價平倉失敗就保留停損，記一筆失敗，這一輪不再重試。
+    平成之後撤掉剩下的進場單和條件單，並記 position_closed。
+    """
+    if not live:
+        print("會市價平倉")
+        return
+    try:
+        market_close(sym, amt, True, "target_passed_at_fill")
+    except Exception as e:
+        log("error", msg="價已過止盈但市價平倉失敗，保留停損", symbol=sym, err=str(e),
+            reason="target_passed_at_fill")
+        return
+    _cancel_resting_entries(sym, st, True)
+    cancel_symbol_orphans(sym, True)
+    _record_target_passed_close(sym, st, True)
 
 def meta_from_pending(old, pd):
     """階梯或限價轉成持倉時，已標記的減倉、成本停損、no_tp 不能被蓋掉。"""
@@ -1247,8 +1455,22 @@ def cmd_manage(a):
             except Exception as e:
                 log("error", msg="補掛停損失敗，市價平倉", symbol=sym, err=str(e)); market_close(sym, amt, live, "restop_failed"); continue
         if not has_tp and m and not no_tp:
-            try: place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
-            except Exception as e: log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+            # 限價成交前不預掛止盈。成交後缺止盈才補。
+            # 價格已經越過止盈（標記價，或補掛收到 -2021）就市價平倉，不重試掛止盈。
+            # 其他失敗仍只記 log，下一輪再試。no_tp 仍只給減倉標記用。
+            entry_side = "BUY" if amt > 0 else "SELL"
+            if _mark_past_target(sym, entry_side, m.get("target")):
+                close_because_target_passed(sym, amt, st, live)
+                continue
+            try:
+                place_protect(sym, close_side, "TAKE_PROFIT_MARKET", m["target"], live)
+            except BinanceError as e:
+                if e.code == -2021:
+                    close_because_target_passed(sym, amt, st, live)
+                else:
+                    log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
+            except Exception as e:
+                log("error", msg="補掛止盈失敗", symbol=sym, err=str(e))
     # 已無持倉的幣種：先把 meta 裡已平的記下來，再清孤兒保護單（清理本身不改）。
     held = {p["symbol"] for p in positions(acc)}
     closed_note = False
@@ -1329,10 +1551,12 @@ def _user_stream_fresh():
 def cmd_watch(a):
     """輕量成交偵測（launchd 每 60 秒）：無待成交限價單 → 零 API 呼叫，每小時最多印一行；
     有成交（含部分成交）且缺止盈/停損 → 立即跑一次 manage 補掛與調整數量。
-    使用者資料流的心跳還新的時候，這支不打 API，當備援。沒有那個檔就照舊輪詢。"""
-    if _user_stream_fresh():
-        return
+    使用者資料流的心跳還新時，成交仍由資料流叫 manage；零成交但價先到止盈這件事
+    資料流不會看到，所以心跳新鮮時仍要做 target_hit 檢查。沒有那個檔就照舊輪詢。"""
+    fresh = _user_stream_fresh()
     st = load_state(); pend = st.get("pending", {})
+    if fresh and not pend:
+        return
     if not pend:
         now = now_tpe()
         last = st.get("watch_heartbeat")
@@ -1354,7 +1578,7 @@ def cmd_watch(a):
             save_state(st)
         return
     need = False
-    for sym, pd in pend.items():
+    for sym, pd in list(pend.items()):
         if pd.get("ladder"):
             types = {po["t"] for po in protect_orders(sym)}
             has_sl = any(str(t).startswith("STOP") for t in types)
@@ -1362,17 +1586,35 @@ def cmd_watch(a):
             total_exec = 0.0
             done_n = 0
             fetched = []
+            fetch_failed = False
             for item in pd.get("orders") or []:
                 if not item.get("orderId"):
                     continue
                 try:
                     o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": item["orderId"]}, signed=True, retries=2)
                 except BinanceError as e:
-                    log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
+                    log("warn", msg="watch 查單失敗", symbol=sym, err=str(e))
+                    fetch_failed = True
+                    continue
                 fetched.append(o)
                 total_exec += float(o.get("executedQty") or 0)
                 if o["status"] not in ("NEW", "PARTIALLY_FILLED"):
                     done_n += 1
+            expected = [item for item in (pd.get("orders") or []) if item.get("orderId")]
+            if (not fetch_failed) and len(fetched) == len(expected) and total_exec == 0:
+                hit = cancel_unfilled_if_target_hit(sym, pd, fetched, a.live)
+                if hit == "filled":
+                    need = True
+                    continue
+                if hit:
+                    if a.live:
+                        pending = st.get("pending") or {}
+                        pending.pop(sym, None)
+                        st["pending"] = pending
+                        save_state(st)
+                    continue
+            if fresh:
+                continue
             prev = pd.get("last_exec")
             try:
                 prev_f = float(prev) if prev is not None else None
@@ -1399,6 +1641,20 @@ def cmd_watch(a):
         if not pd.get("orderId"): continue
         try: o = req("GET", "/fapi/v1/order", {"symbol": sym, "orderId": pd["orderId"]}, signed=True, retries=2)
         except BinanceError as e: log("warn", msg="watch 查單失敗", symbol=sym, err=str(e)); continue
+        if float(o.get("executedQty") or 0) == 0 and o.get("status") in ("NEW", "CANCELED", "EXPIRED", "REJECTED"):
+            hit = cancel_unfilled_if_target_hit(sym, pd, [o], a.live)
+            if hit == "filled":
+                need = True
+                continue
+            if hit:
+                if a.live:
+                    pending = st.get("pending") or {}
+                    pending.pop(sym, None)
+                    st["pending"] = pending
+                    save_state(st)
+                continue
+        if fresh:
+            continue
         if o["status"] not in ("NEW", "PARTIALLY_FILLED") or float(o.get("executedQty") or 0) > 0:
             types = {po["t"] for po in protect_orders(sym)}
             filled = float(o.get("executedQty") or 0) > 0

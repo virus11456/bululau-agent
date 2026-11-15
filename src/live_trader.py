@@ -422,18 +422,18 @@ def cancel_symbol_orphans(sym, live):
             except BinanceError as e:
                 log("error", msg="撤孤兒條件單失敗", symbol=sym, err=str(e))
 
-def price_reached_target(side, mark, target):
-    """做多是標記價 ≥ 止盈，做空是標記價 ≤ 止盈。"""
+def price_reached_target(side, price, target):
+    """做多是價 ≥ 止盈，做空是價 ≤ 止盈。價用呼叫端給的最新價。"""
     side = str(side or "BUY").upper()
     if side in ("SELL", "SHORT"):
-        return mark <= target
-    return mark >= target
+        return price <= target
+    return price >= target
 
 def cancel_unfilled_if_target_hit(sym, pd, orders, live):
-    """完全未成交且標記價已到計畫止盈，就撤掉全部限價單和停損、止盈。
+    """完全未成交且最新價已到計畫止盈，就撤掉全部限價單和停損、止盈。
 
     讀取失敗、持倉不是 0、或任一檔已有成交，都不撤。回傳 True 表示 pending 該移除。
-    標記價來自 positionRisk 的 markPrice，和保護單的 MARK_PRICE 同一套，不另查最新價。
+    比較用公開的最新成交價，和保護單的 CONTRACT_PRICE 同一套。持倉仍讀 positionRisk。
     """
     if not orders:
         return False
@@ -452,15 +452,16 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
         # 已經被撤掉、沒有還掛著的限價單，不是這次價先到止盈。
         return False
     try:
-        mark, amt = _read_position_mark(sym)
+        _mark, amt = _read_position_mark(sym)
+        last = _read_last_price(sym)
     except BinanceError as e:
-        log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        log("warn", msg="最新價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
         return False
     except Exception as e:
-        log("warn", msg="標記價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
+        log("warn", msg="最新價讀取失敗，價到止盈也不撤", symbol=sym, err=str(e))
         return False
-    if mark is None:
-        log("warn", msg="沒有標記價，價到止盈也不撤", symbol=sym)
+    if last is None:
+        log("warn", msg="沒有最新價，價到止盈也不撤", symbol=sym)
         return False
     if amt != 0:
         return False
@@ -469,7 +470,7 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
     except Exception:
         return False
     side = pd.get("side") or "BUY"
-    if not price_reached_target(side, mark, target):
+    if not price_reached_target(side, last, target):
         return False
     try:
         algo = open_algo(sym, fail_closed=True)
@@ -510,8 +511,8 @@ def cancel_unfilled_if_target_hit(sym, pd, orders, live):
             log("error", msg="價到止盈但撤保護單失敗", symbol=sym, err=str(e))
             return False
     log("target_hit_before_fill", event="target_hit_before_fill", symbol=sym, side=str(side).upper(),
-        target=str(pd.get("target")), mark=fmt(mark), live=live)
-    print("{0} 未成交但標記價 {1} 已到止盈 {2}，整筆撤單".format(sym, fmt(mark), pd.get("target")))
+        target=str(pd.get("target")), last=fmt(last), live=live)
+    print("{0} 未成交但最新價 {1} 已到止盈 {2}，整筆撤單".format(sym, fmt(last), pd.get("target")))
     return True
 
 def _read_position_mark(sym):
@@ -533,6 +534,15 @@ def _read_position_mark(sym):
         return None, amt
     return mark, amt
 
+def _read_last_price(sym):
+    """USDT-M 最新成交價。保護單 workingType 用 CONTRACT_PRICE，價到止盈也用這一價。"""
+    row = req("GET", "/fapi/v1/ticker/price", {"symbol": sym}, retries=2)
+    if not isinstance(row, dict) or row.get("price") in (None, ""):
+        return None
+    return Decimal(str(row["price"]))
+
+# 停損、止盈的觸發價種類。使用者 2026-11-16 改為合約最新價。
+PROTECT_WORKING_TYPE = "CONTRACT_PRICE"
 # 停損送出後隔這麼久再讀條件單。測試把它改成 0。
 STOP_READBACK_SLEEP_S = 1.5
 
@@ -540,7 +550,7 @@ def _post_protect(symbol, close_side, otype, trigger, qty):
     """送出一張條件單。回傳交易所回應。"""
     size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
     algo = dict(algoType="CONDITIONAL", symbol=symbol, side=close_side, type=otype, triggerPrice=trigger,
-                workingType="MARK_PRICE", priceProtect="TRUE", **size)
+                workingType=PROTECT_WORKING_TYPE, priceProtect="TRUE", **size)
     try:
         r = req("POST", "/fapi/v1/algoOrder", algo, signed=True)
     except BinanceError as e:
@@ -548,7 +558,7 @@ def _post_protect(symbol, close_side, otype, trigger, qty):
         if e.code in (-2021, -2022, -4120, -1102, -1111, -4014, -4164) or e.status != 404: raise
         log("warn", msg="algoOrder 端點不存在，改用舊端點", err=str(e))
         legacy = dict(symbol=symbol, side=close_side, type=otype, stopPrice=trigger,
-                      workingType="MARK_PRICE", priceProtect="TRUE", **size)
+                      workingType=PROTECT_WORKING_TYPE, priceProtect="TRUE", **size)
         r = req("POST", "/fapi/v1/order", legacy, signed=True)
     log("protect_placed", symbol=symbol, type=otype, trigger=trigger, qty=qty, resp=r)
     return r
@@ -613,7 +623,7 @@ def place_protect(symbol, close_side, otype, trigger, live, qty=None):
     """qty=None → closePosition（需已有倉位）；qty 有值 → 指定數量 + reduceOnly（可在成交前預掛）。"""
     size = dict(closePosition="true") if qty is None else dict(quantity=qty, reduceOnly="true")
     algo = dict(algoType="CONDITIONAL", symbol=symbol, side=close_side, type=otype, triggerPrice=trigger,
-                workingType="MARK_PRICE", priceProtect="TRUE", **size)
+                workingType=PROTECT_WORKING_TYPE, priceProtect="TRUE", **size)
     if not live:
         print("  [dry-run] POST /fapi/v1/algoOrder", algo)
         if str(otype).startswith("STOP"):
@@ -1677,20 +1687,23 @@ def _exit_label(reason):
             "target_passed_at_fill": "價已過止盈"}.get(reason, reason)
 
 def _mark_past_target(sym, entry_side, target):
-    """標記價已到或越過計畫止盈就回 True。讀不到就回 None，讓呼叫端改試掛單。"""
+    """最新價已到或越過計畫止盈就回 True。讀不到就回 None，讓呼叫端改試掛單。
+
+    和未成交撤單同一套價：保護單改看合約最新價，這裡不能再拿標記價決定要不要市價平。
+    """
     if target in (None, ""):
         return None
     try:
-        mark, _amt = _read_position_mark(sym)
+        last = _read_last_price(sym)
     except Exception:
         return None
-    if mark is None:
+    if last is None:
         return None
     try:
         tgt = Decimal(str(target))
     except Exception:
         return None
-    return price_reached_target(entry_side, mark, tgt)
+    return price_reached_target(entry_side, last, tgt)
 
 def _cancel_resting_entries(sym, st, live):
     """撤掉這個幣還掛著的限價進場單。停損、止盈留給後面的孤兒清理。"""

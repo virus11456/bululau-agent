@@ -1,4 +1,4 @@
-"""未成交但標記價已到止盈就整筆撤。不連網、不讀金鑰。"""
+"""未成交但最新價已到止盈就整筆撤。不連網、不讀金鑰。"""
 import io
 import json
 import os
@@ -36,6 +36,7 @@ class TargetHitTest(unittest.TestCase):
             3: {"orderId": 3, "status": "NEW", "executedQty": "0", "price": LEVELS[2]},
         }
         self.mark = "1.823"
+        self.last = None
         self.amt = "0"
         self.fail_order = None
         self.fail_algo = False
@@ -54,6 +55,8 @@ class TargetHitTest(unittest.TestCase):
             else:
                 amt = self.amt
             return [{"symbol": "PIEVERSEUSDT", "positionAmt": amt, "markPrice": self.mark}]
+        if path == "/fapi/v1/ticker/price":
+            return {"symbol": params.get("symbol"), "price": self.last or self.mark}
         if path == "/fapi/v1/openAlgoOrders":
             if self.fail_algo:
                 raise lt.BinanceError(500, -1000, "algo down")
@@ -104,11 +107,31 @@ class TargetHitTest(unittest.TestCase):
         self.assertEqual(deleted_algos, [11, 12])
         self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
         self.assertTrue(any(kind == "target_hit_before_fill" and kw.get("event") == "target_hit_before_fill"
-                            and kw.get("mark") == "1.823" and kw.get("target") == TARGET
+                            and kw.get("last") == "1.823" and kw.get("target") == TARGET
                             for kind, kw in self.logs))
-        self.assertIn("未成交但標記價 1.823 已到止盈 1.8003", text)
+        self.assertIn("未成交但最新價 1.823 已到止盈 1.8003", text)
+        self.assertTrue(any(c[1] == "/fapi/v1/ticker/price" for c in self.calls))
         self.assertEqual(self.risk_retries, [2, 2])
         self.assertEqual(self.managed, [])
+
+    def test_last_price_not_mark_decides_the_cancel(self):
+        self.mark = "1.7000"
+        self.last = "1.823"
+        text = self.watch(True)
+        self.assertIn("未成交但最新價 1.823 已到止盈 1.8003", text)
+        self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
+        self.store = {"pending": {"PIEVERSEUSDT": {
+            "ladder": True, "side": "BUY", "target": TARGET, "stop": "1.6000", "setup": "瘸師弟",
+            "orders": [{"orderId": 1}, {"orderId": 2}, {"orderId": 3}],
+        }}}
+        self.calls.clear()
+        self.logs.clear()
+        self.mark = "1.900"
+        self.last = "1.7000"
+        text = self.watch(True)
+        self.assertNotIn("已到止盈", text)
+        self.assertIn("PIEVERSEUSDT", self.store["pending"])
+        self.assertFalse(any(kind == "target_hit_before_fill" for kind, _kw in self.logs))
 
     def test_pieverse_dry_run_does_not_write_state(self):
         text = self.watch(False)
@@ -121,7 +144,7 @@ class TargetHitTest(unittest.TestCase):
 
     def test_fresh_user_stream_still_cancels_unfilled_target(self):
         text = self.watch(True, fresh=True)
-        self.assertIn("未成交但標記價 1.823 已到止盈 1.8003", text)
+        self.assertIn("未成交但最新價 1.823 已到止盈 1.8003", text)
         self.assertNotIn("PIEVERSEUSDT", self.store.get("pending") or {})
         self.assertEqual(self.managed, [])
 
@@ -202,6 +225,8 @@ class TargetPassedAtFillTest(unittest.TestCase):
             self.calls.append((method, path, dict(params or {})))
             if path == "/fapi/v2/positionRisk":
                 return [{"symbol": "XUSDT", "positionAmt": self.amt, "markPrice": self.mark}]
+            if path == "/fapi/v1/ticker/price":
+                return {"symbol": "XUSDT", "price": getattr(self, "last", None) or self.mark}
             if path == "/fapi/v1/openAlgoOrders":
                 rows = [{"symbol": "XUSDT", "orderType": "STOP_MARKET", "algoId": 9,
                          "quantity": self.amt.lstrip("-"), "closePosition": "false", "triggerPrice": "90"}]
@@ -345,6 +370,8 @@ class TargetPassedAtFillTest(unittest.TestCase):
         posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual(posted[0][2]["type"], "TAKE_PROFIT_MARKET")
         self.assertEqual(posted[0][2]["triggerPrice"], "120")
+        self.assertEqual(posted[0][2]["workingType"], "CONTRACT_PRICE")
+        self.assertEqual(posted[0][2]["priceProtect"], "TRUE")
         self.calls.clear()
         self.logs.clear()
         self.amt = "-2"
@@ -354,6 +381,28 @@ class TargetPassedAtFillTest(unittest.TestCase):
         self.assertEqual(self._market_orders(), [])
         posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual(posted[0][2]["triggerPrice"], "120")
+        self.assertEqual(posted[0][2]["workingType"], "CONTRACT_PRICE")
+
+    def test_last_price_not_mark_decides_the_flatten(self):
+        self.mark = "100"
+        self.last = "120"
+        self.manage(True)
+        self.assertEqual(len(self._market_orders()), 1)
+        self.assertFalse(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                             and c[2].get("type") == "TAKE_PROFIT_MARKET" for c in self.calls))
+        self.calls.clear()
+        self.logs.clear()
+        self.state = {"pending": {}, "meta": {"XUSDT": {
+            "setup": "瘸師弟", "stop": "90", "target": "120", "side": "BUY",
+        }}}
+        self.mark = "130"
+        self.last = "119"
+        self.manage(True)
+        self.assertEqual(self._market_orders(), [])
+        posted = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"
+                  and c[2].get("type") == "TAKE_PROFIT_MARKET"]
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0][2]["workingType"], "CONTRACT_PRICE")
 
     def test_minus_4130_does_not_flatten(self):
         self.tp_error = lt.BinanceError(400, -4130, "close position rejected")

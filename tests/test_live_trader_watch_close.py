@@ -744,7 +744,19 @@ class SingleOrderUnchangedTest(unittest.TestCase):
         new_calls, new_out, new_logs = run(lt)
         # O5 多了依幣種與定期全量的讀取；下單內容（方向、觸發價、數量、closePosition）不變。
         # 停損回查多一次讀取、一行「已掛上」和 stop_readback，不另下一張單。
-        self.assertEqual(posts(new_calls), posts(old_calls))
+        def without_working(rows):
+            out = []
+            for method, path, params in rows:
+                params = dict(params)
+                params.pop("workingType", None)
+                out.append((method, path, params))
+            return out
+
+        self.assertEqual(without_working(posts(new_calls)), without_working(posts(old_calls)))
+        for _method, _path, params in posts(new_calls):
+            if params.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"):
+                self.assertEqual(params.get("workingType"), "CONTRACT_PRICE")
+                self.assertEqual(params.get("priceProtect"), "TRUE")
         self.assertEqual(new_out.replace("停損已掛上\n", ""), old_out)
         self.assertTrue(any(kind == "stop_readback" for kind, _kw in slim(new_logs)))
         self.assertEqual([item for item in slim(new_logs) if item[0] != "stop_readback"], slim(old_logs))

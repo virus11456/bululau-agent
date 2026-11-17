@@ -50,6 +50,7 @@ description: >-
 - 實盤暫停，改跑紙上。自 2026-11-16 17:25（台北）起。未經使用者本人同意，不得恢復實盤。
 - 閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。不要再對實盤帳戶下 `open --live`。
 - 進場記在 `~/quantboy-livepaper/paper.py` 的紙上帳本。它只打幣安公開 K 線，不碰金鑰、不下單。起始資金 1294.76U。1R 是當下紙上淨值的 1%；portion 0.25 再乘 0.25。手續費用 taker 0.05%，進場、出場各算一次。限價三檔權重 2:3:5，2 小時撤未成交檔。同一根 K 線兩邊都碰到，算停損。布鹿流到 1.5R 平一半，剩餘停損移到保本。子指令是 `add`、`update`、`move-stop`、`status`、`btc`。
+- 記限價單（瘸師弟、大師兄等）之前，先用公開 K 線或 ticker 看現價。現價已經大於或等於止盈價，或訊號之後的最高價已經過止盈，就不記。`decision_log` 記 `reject`，reason 是 `[紙上] target_hit_before_fill`。同一根訊號已經記過或已經撤過，不再記一次。這是把帳本既有的「未成交前已過止盈就撤」提前到記單前，不改策略。操盤手 2026-11-17 晚間寫進紙上 routine 步驟 3。
 - `btc` 用下面第 5.2 節的 BTC 日 K 30/45/60 規則維護布鹿流暫停旗標。
 - 倉庫裡的對照備份是 [backups/mac/quantboy-livepaper/paper.py](../backups/mac/quantboy-livepaper/paper.py)，說明在 [README](../backups/mac/quantboy-livepaper/README.md)。sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`。這是備份，不是部署來源。
 

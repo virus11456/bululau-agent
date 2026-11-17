@@ -379,10 +379,10 @@ class TargetPassedAtFillTest(unittest.TestCase):
         self.assertEqual(posted[1][2]["closePosition"], "true")
         self.assertFalse(any(kind == "target_passed_at_fill" for kind, _kw in self.logs))
         self.calls.clear()
-        asked = []
-        with patch.object(lt, "da_entry_block", side_effect=lambda sym: asked.append(sym) or "偏空"):
-            self.manage(True)
-        self.assertEqual(asked, [])
+        self.logs.clear()
+        self.manage(True)
+        self.assertFalse(any(kind == "da_paused_btc_daily_bear" for kind, _kw in self.logs))
+        self.assertFalse(any(c[1] == "/fapi/v1/klines" for c in self.calls))
         self.assertTrue(any(c[0] == "POST" and c[1] == "/fapi/v1/algoOrder" for c in self.calls))
         self.calls.clear()
         self.mark = "130"

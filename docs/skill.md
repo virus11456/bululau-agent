@@ -51,7 +51,7 @@ description: >-
 - 閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。不要再對實盤帳戶下 `open --live`。
 - 進場記在 `~/quantboy-livepaper/paper.py` 的紙上帳本。它只打幣安公開 K 線，不碰金鑰、不下單。起始資金 1294.76U。1R 是當下紙上淨值的 1%；portion 0.25 再乘 0.25。手續費用 taker 0.05%，進場、出場各算一次。限價三檔權重 2:3:5，2 小時撤未成交檔。同一根 K 線兩邊都碰到，算停損。布鹿流到 1.5R 平一半，剩餘停損移到保本。子指令是 `add`、`update`、`move-stop`、`status`、`btc`。
 - `btc` 用下面第 5.2 節的 BTC 日 K 30/45/60 規則維護布鹿流暫停旗標。
-- 倉庫裡的對照備份說明在 [backups/mac/quantboy-livepaper/README.md](../backups/mac/quantboy-livepaper/README.md)。這次提供的 gzip 內容解不開，`paper.py` 沒有放進倉庫；不要拿一份對不上 sha1 的檔充數。
+- 倉庫裡的對照備份是 [backups/mac/quantboy-livepaper/paper.py](../backups/mac/quantboy-livepaper/paper.py)，說明在 [README](../backups/mac/quantboy-livepaper/README.md)。sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`。這是備份，不是部署來源。
 
 ## 3. 指令速查
 所有指令都在 `cd ~/quantboy-live` 之後執行。不加 `--live` 一律是 dry-run。

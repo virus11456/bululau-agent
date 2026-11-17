@@ -12,7 +12,7 @@
 |---|---|---|
 | 新機會掃描 | 每 15 分鐘一次。排程 `CRON_TZ=Asia/Taipei */15 * * * *`，彈性 ±3 分鐘 | 2026-11-11 19:09（台北）由每 30 分鐘改來，見 [issue #11](https://github.com/virus11456/bululau-agent/issues/11) |
 | Routine | `automation-1793375356389`（布神式實盤交易） | 11/7 19:44 讀回；11/11 19:09 只改間隔 |
-| 每輪做什麼 | 2026-11-16 17:25（台北）起實盤暫停，不對實盤帳戶下單。閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。進場記到 `~/quantboy-livepaper/paper.py` 的紙上帳本（只打幣安公開 K 線）。未經使用者本人同意不得恢復實盤。細節見 [skill.md](skill.md) 第 2.4 節 | 使用者 2026-11-16 17:25；紙上帳本說明見 [backups/mac/quantboy-livepaper/README.md](../backups/mac/quantboy-livepaper/README.md) |
+| 每輪做什麼 | 2026-11-16 17:25（台北）起實盤暫停，不對實盤帳戶下單。閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。進場記到 `~/quantboy-livepaper/paper.py` 的紙上帳本（只打幣安公開 K 線）。記限價單前先用公開行情看是否已過止盈，過了就不記。未經使用者本人同意不得恢復實盤。細節見 [skill.md](skill.md) 第 2.4 節與下面「紙上記錄」 | 使用者 2026-11-16 17:25；記單前檢查是操盤手 2026-11-17 晚間改的紙上 routine 步驟 3 |
 | 機械 watch | Mac 上每 60 秒跑 `watch --live`，成交後補掛停損止盈。沒有關掉 | 11/7 19:44 與 11/10 10:03 核對 |
 | 資料與下單 | 幣安資料與實盤執行留在 Mac。不要改由 box 打幣安 | 既有交接；本輪未重測 box 的 HTTP 451 |
 | 未驗證的掃描副本 | autoscan 獨立副本未通過驗證前，不得作實盤下單依據，也不得讓它自動開單 | 已核 prompt |
@@ -107,6 +107,8 @@ python3 src/live_trader.py open \
 ## 紙上記錄
 
 紙上記錄用資料目錄裡的檔。本倉庫的程式目前不讀這些檔，也不會因此下單。
+
+記限價單（瘸師弟、大師兄等）到 `~/quantboy-livepaper/paper.py` 之前，先用公開 K 線或 ticker 看現價。現價已經大於或等於止盈價，或訊號之後的最高價已經過止盈，就不記。`decision_log` 記 `reject`，reason 是 `[紙上] target_hit_before_fill`。同一根訊號已經記過或已經撤過，也不再記一次。只打公開端點，不碰金鑰、不下單。這不是新的進出場規則，只是把帳本裡既有的「未成交前已過止盈就撤」（`paper.py` 的 `target_hit_before_fill`）提前到記單前。來源：操盤手 2026-11-17 晚間，紙上 routine `automation-1793375356389` 步驟 3。依使用者「以後我更新的都要及時更新上去」同步進 repo。
 
 `cooldowns.json`：停損出場後，同幣要等進場週期的 3 根 K。
 

@@ -1,5 +1,12 @@
 # 變更紀錄
 
+## 2026-11-17（文件：大師兄恢復、布鹿流 BTC 日K、實盤改紙上）
+
+- 只改文件。沒有改 `src/`，沒有改測試，沒有部署。
+- 使用者 2026-11-17 11:39（台北）：大師兄恢復，取消 #46 的 BTC 日 K 偏空暫停（`da_paused_btc_daily_bear`）。程式移除在另一個 PR，尚未部署。
+- 布鹿流 BTC 趨勢關卡改為已收日 K 的 30/45/60：收盤 > MA30 > MA45 > MA60 算轉多，收盤 < MA30 < MA45 < MA60 算轉空，兩者都不是就維持上一個狀態。轉空不開單，轉多才恢復。取代 11/14 起只寫在 routine 裡的「收盤 > MA7 > MA25」。暫停只記 decision_log `skip_other`，理由 `bulu_paused_btc_daily_bear`，並附若下單的進場、停損、止盈和 RR。瘸師弟、小師弟照常。`bulu_daily_trend`（#34）不變。目前由 routine 執行，尚未寫進程式。提案在 [docs/bulu_btc_trend_gate_proposal.md](docs/bulu_btc_trend_gate_proposal.md)。
+- 2026-11-16 17:25（台北）起實盤暫停，改跑紙上。`gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。帳本是 `~/quantboy-livepaper/paper.py`。未經使用者本人同意不得恢復實盤。
+
 ## 2026-11-14（小師弟收盤觸發）
 
 - 15 分 K 收盤後只跑小師弟篩網，有訊號就呼叫現有的 `cmd_open` 走 IOC。不叫 AI。風控、1%、件數、日損、0.3% 上限都留在 `live_trader`。

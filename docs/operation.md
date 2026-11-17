@@ -12,7 +12,7 @@
 |---|---|---|
 | 新機會掃描 | 每 15 分鐘一次。排程 `CRON_TZ=Asia/Taipei */15 * * * *`，彈性 ±3 分鐘 | 2026-11-11 19:09（台北）由每 30 分鐘改來，見 [issue #11](https://github.com/virus11456/bululau-agent/issues/11) |
 | Routine | `automation-1793375356389`（布神式實盤交易） | 11/7 19:44 讀回；11/11 19:09 只改間隔 |
-| 每輪做什麼 | 先跑 `python3 ~/quantboy-gate/gate.py`。第一行 `QUIET` 就結束。`WAKE` 才讀 `full_prompt.md`，用閘門附上的 manage／status／prefilter，再依定稿審核；dry-run 後才 `open --live`，再 `manage` 確認保護單 | main 的 `src/gate.py`；Mac `gate_log.jsonl` 自 11/10 起有列 |
+| 每輪做什麼 | 2026-11-16 17:25（台北）起實盤暫停，不對實盤帳戶下單。閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。進場記到 `~/quantboy-livepaper/paper.py` 的紙上帳本（只打幣安公開 K 線）。未經使用者本人同意不得恢復實盤。細節見 [skill.md](skill.md) 第 2.4 節 | 使用者 2026-11-16 17:25；紙上帳本說明見 [backups/mac/quantboy-livepaper/README.md](../backups/mac/quantboy-livepaper/README.md) |
 | 機械 watch | Mac 上每 60 秒跑 `watch --live`，成交後補掛停損止盈。沒有關掉 | 11/7 19:44 與 11/10 10:03 核對 |
 | 資料與下單 | 幣安資料與實盤執行留在 Mac。不要改由 box 打幣安 | 既有交接；本輪未重測 box 的 HTTP 451 |
 | 未驗證的掃描副本 | autoscan 獨立副本未通過驗證前，不得作實盤下單依據，也不得讓它自動開單 | 已核 prompt |

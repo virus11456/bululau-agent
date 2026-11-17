@@ -2,6 +2,16 @@
 
 這是布神四種型態（布鹿流、大師兄、小師弟、瘸師弟）的策略與執行器骨架，只做多。策略條文以 2026-11-06 22:23（台北時間）的定稿為準，寫在 [docs/strategy.md](docs/strategy.md)。現行實盤怎麼跑，寫在 [docs/operation.md](docs/operation.md)。
 
+## 目前狀態（2026-11-17）
+
+實盤自 2026-11-16 17:25（台北）起暫停，改跑紙上。閘門是 `gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。進場記在 `~/quantboy-livepaper/paper.py`（只打幣安公開 K 線，不碰金鑰、不下單）。未經使用者本人同意不得恢復實盤。
+
+大師兄恢復：取消 #46 的 BTC 日 K 偏空暫停（`da_paused_btc_daily_bear`）。程式移除在另一個 PR，尚未部署。
+
+布鹿流另有一條 BTC 日 K 趨勢關卡（使用者 2026-11-17 11:39）：已收日 K 收盤 > MA30 > MA45 > MA60 算轉多，收盤 < MA30 < MA45 < MA60 算轉空，兩者都不是就維持上一個狀態。轉空不開布鹿流，轉多才恢復。這取代 routine 裡 11/14 起的「收盤 > MA7 > MA25」。暫停只記 decision_log 的 `skip_other`，理由 `bulu_paused_btc_daily_bear`，並附若下單的進場、停損、止盈和 RR。瘸師弟、小師弟照常。該幣自己的 `bulu_daily_trend`（#34）不變。目前由 routine 執行，尚未寫進程式。
+
+全文在 [docs/skill.md](docs/skill.md) 第 2.4 節與第 5.2 節。提案（尚未決定）在 [docs/bulu_btc_trend_gate_proposal.md](docs/bulu_btc_trend_gate_proposal.md)。紙上帳本的備份說明在 [backups/mac/quantboy-livepaper/README.md](backups/mac/quantboy-livepaper/README.md)。
+
 **策略定稿仍是 11-06 那份；實盤已在跑，但不是本倉庫自動下單。** 2026-11-07 00:47（台北）使用者要求接手實盤後，由 Mac mini 上的原執行器與「布神式實盤交易」routine 執行，並保留 60 秒機械 watch。掃描在 2026-11-11 19:09 起是每 15 分鐘（`*/15`，彈性 ±3）；11/7 19:44 到那時是每 30 分鐘。11/8 06:02 曾因幣安 401 暫停，11/10 10:03 已恢復。本倉庫不存放帳戶餘額。11-06 文件裡那套「固定程式掃完全市場再交給監控程式」尚未全部作為現行實盤路徑部署。空倉省 token 用的是 main 上的 `src/gate.py`，Mac 已在跑。[PR #3](https://github.com/virus11456/bululau-agent/pull/3) 於 2026-11-12 12:21（台北）關閉、未合併，不是現行實盤。
 
 合約可以虧掉全部保證金。這不是投資建議。

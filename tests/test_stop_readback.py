@@ -134,6 +134,8 @@ class StopReadbackTest(unittest.TestCase):
         self.assertTrue(reads[0]["ok"])
         self.assertEqual(reads[0]["symbol"], "BTCUSDT")
         self.assertEqual(reads[0]["algoId"], 41)
+        self.assertTrue(all(c[2].get("workingType") == "CONTRACT_PRICE" and c[2].get("priceProtect") == "TRUE"
+                            for c in self._stops()))
 
     def test_missing_then_replace_succeeds(self):
         self.live = True

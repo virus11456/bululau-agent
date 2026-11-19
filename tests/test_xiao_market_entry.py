@@ -146,6 +146,8 @@ class XiaoMarketEntryTest(unittest.TestCase):
         self.assertEqual(entry[0][2]["side"], "BUY")
         protects = [c for c in self.calls if c[0] == "POST" and c[1] == "/fapi/v1/algoOrder"]
         self.assertEqual([c[2]["type"] for c in protects], ["STOP_MARKET", "TAKE_PROFIT_MARKET"])
+        self.assertTrue(all(c[2]["workingType"] == "CONTRACT_PRICE" and c[2]["priceProtect"] == "TRUE"
+                            for c in protects))
         self.assertEqual(protects[1][2]["triggerPrice"], "120")
         self.assertEqual(self.state["meta"]["ETHUSDT"]["target"], "120")
         self.assertEqual(self.state["meta"]["ETHUSDT"]["stop"], "90")

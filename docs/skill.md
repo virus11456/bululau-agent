@@ -51,6 +51,7 @@ description: >-
 - 閘門改跑 `python3 ~/quantboy-gate/gate.py --no-manage --state-dir ~/quantboy-livepaper/gate`。不要再對實盤帳戶下 `open --live`。
 - 進場記在 `~/quantboy-livepaper/paper.py` 的紙上帳本。它只打幣安公開 K 線，不碰金鑰、不下單。起始資金 1294.76U。1R 是當下紙上淨值的 1%；portion 0.25 再乘 0.25。手續費用 taker 0.05%，進場、出場各算一次。限價三檔權重 2:3:5，2 小時撤未成交檔。同一根 K 線兩邊都碰到，算停損。布鹿流到 1.5R 平一半，剩餘停損移到保本。子指令是 `add`、`update`、`move-stop`、`status`、`btc`。
 - 記限價單（瘸師弟、大師兄等）之前，先用公開 K 線或 ticker 看現價。現價已經大於或等於止盈價，或訊號之後的最高價已經過止盈，就不記。`decision_log` 記 `reject`，reason 是 `[紙上] target_hit_before_fill`。同一根訊號已經記過或已經撤過，不再記一次。這是把帳本既有的「未成交前已過止盈就撤」提前到記單前，不改策略。操盤手 2026-11-17 晚間寫進紙上 routine 步驟 3。
+- 瘸師弟（2026-11-23 22:02 台北。我們加的規則。布神沒有講。使用者原話：「還是要記，讓紙上停損去處理」）：記紙上之前價格已經破停損，仍用原本三檔限價、停損、止盈記進 `paper.py`。不用 `stop_hit_before_record` 跳過。止盈在記單前已經到了，沿用既有的 `target_hit_before_fill` 拒絕，不記；停損同時已經破掉，也一樣不記。`add` 不因現價已破停損而拒絕。`update` 只看開盤時間大於等於記單時間、而且已經收完的 1 分 K。記錄前的破價不會被拿來成交或停損。之後的 1 分 K 若仍打到停損，三檔在那一根成交，同一根就以停損價平倉。之後的 K 沒再碰到三檔，就維持未成交，滿 2 小時撤。紙上 routine `automation-1793375356389` 已由操盤手改過。本倉庫沒有該提示詞的逐字新稿。
 - `btc` 用下面第 5.2 節的 BTC 日 K 30/45/60 規則維護布鹿流暫停旗標。
 - 倉庫裡的對照備份是 [backups/mac/quantboy-livepaper/paper.py](../backups/mac/quantboy-livepaper/paper.py)，說明在 [README](../backups/mac/quantboy-livepaper/README.md)。sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`。這是備份，不是部署來源。
 

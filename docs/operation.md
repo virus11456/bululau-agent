@@ -112,7 +112,7 @@ python3 src/live_trader.py open \
 
 瘸師弟記紙上（2026-11-23 22:02 台北。我們加的規則。布神沒有講。使用者原話：「還是要記，讓紙上停損去處理」）：記進 `~/quantboy-livepaper/paper.py` 之前，價格已經跌破停損（做多）或漲破停損（做空），仍用原本的三檔限價、停損、止盈記下去。不用 `stop_hit_before_record` 跳過。成交與停損交給這支帳本的 `update`。止盈在記單前已經到了，沿用既有的 `target_hit_before_fill` 拒絕，不記；停損同時已經破掉，也一樣不記。紙上 routine `automation-1793375356389` 已由操盤手改成這個做法。本倉庫沒有該提示詞的逐字新稿。
 
-帳本對這筆的實際做法（對照備份 [backups/mac/quantboy-livepaper/paper.py](../backups/mac/quantboy-livepaper/paper.py)，sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`）：`add` 不看現價是否已破停損，限價單先記成 `pending`。`update` 的 `step` 只讀開盤時間大於等於 `created_ms`、而且已經收完的 1 分 K。開盤早於記單時間的 K 不讀；記單若不是剛好落在某根 1 分 K 的開盤，當下那根也不讀。這些 K 不拿來成交，也不拿來停損。之後若有 1 分 K 的範圍仍打到停損，三檔在那一根先成交，同一根接著以停損價平倉。之後的 1 分 K 沒再碰到三檔，單子維持未成交，滿 2 小時撤掉。記錄前那一次破價不會另外觸發停損。
+帳本對這筆的實際做法（對照備份 [backups/mac/quantboy-livepaper/paper.py](../backups/mac/quantboy-livepaper/paper.py)，sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`）：`add` 不看現價是否已破停損，也不看是否已到止盈，限價單先記成 `pending`。記單前的 `target_hit_before_fill` 拒絕在紙上 routine，不在 `add`。帳本自己的 `target_hit_before_fill` 是記下去之後、尚未成交的 1 分 K 打到止盈才撤。`update` 的 `step` 只讀開盤時間大於等於 `created_ms`、而且已經收完的 1 分 K。開盤早於記單時間的 K 不讀；記單若不是剛好落在某根 1 分 K 的開盤，當下那根也不讀。這些 K 不拿來成交，也不拿來停損。之後若有 1 分 K 的範圍仍打到停損，三檔在那一根先成交，同一根接著以停損價平倉。之後的 1 分 K 沒再碰到三檔，單子維持未成交，滿 2 小時撤掉。記錄前那一次破價不會另外觸發停損。
 
 `cooldowns.json`：停損出場後，同幣要等進場週期的 3 根 K。
 

@@ -5,7 +5,7 @@
 - 只改文件。沒有改 `paper.py`、`src/`、測試或備份，沒有部署，沒有動實盤。
 - 2026-11-23 22:02（台北）使用者：「還是要記，讓紙上停損去處理」。我們加的規則，布神沒有講。瘸師弟在記進 `~/quantboy-livepaper/paper.py` 之前價格已經破停損，仍記原本的三檔限價、停損、止盈。不用 `stop_hit_before_record` 跳過。止盈在記單前已經到了，沿用既有的 `target_hit_before_fill` 拒絕，不記；停損同時已經破掉，也一樣不記。
 - 紙上 routine `automation-1793375356389` 已由操盤手改過。本倉庫沒有該提示詞的逐字新稿。
-- 對照 `backups/mac/quantboy-livepaper/paper.py`（sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`）：`add` 不看現價是否已破停損。`update` 的 `step` 只讀開盤時間大於等於 `created_ms`、而且已經收完的 1 分 K。記錄前的破價不會成交，也不會停損。之後的 1 分 K 若範圍仍打到停損，三檔先在那一根成交，同一根接著以停損價平倉。之後沒再碰到三檔，就維持未成交，滿 2 小時撤。因此這次不改 `paper.py`。
+- 對照 `backups/mac/quantboy-livepaper/paper.py`（sha1 `68ad5c113c6e744a4cd8f05f79136c96d9e0240a`）：`add` 不看現價是否已破停損，也不看是否已到止盈。記單前的 `target_hit_before_fill` 拒絕在紙上 routine。帳本自己的 `target_hit_before_fill` 是記下去之後、尚未成交的 1 分 K 打到止盈才撤。`update` 的 `step` 只讀開盤時間大於等於 `created_ms`、而且已經收完的 1 分 K。記錄前的破價不會成交，也不會停損。之後的 1 分 K 若範圍仍打到停損，三檔先在那一根成交，同一根接著以停損價平倉。之後沒再碰到三檔，就維持未成交，滿 2 小時撤。因此這次不改 `paper.py`。
 
 ## 2026-11-17（文件：紙上記限價單前先看是否已過止盈）
 

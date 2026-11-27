@@ -1,5 +1,12 @@
 # 變更紀錄
 
+## 2026-11-27（備份：每日新聞／總經日程腳本 newsfeed）
+
+- 只新增備份與說明：`backups/mac/quantboy-paper/newsfeed/newsfeed.py`、`backups/mac/quantboy-paper/newsfeed/README.md`。沒有改 `src/`、`tests/`、`scripts/`、`deploy/`，沒有部署。
+- 使用者 2026-11-27 20:28（台北）經新聞搜集boy 轉達：同意把腳本放進 repo 開 PR，尚未同意合併。
+- 內容是 Mac `~/quantboy-paper/newsfeed/newsfeed.py` v2.3（2026-11-27 07:38 台北部署，Mac sha1 `ee4dcbc8fda67de9662925adc1cbb375fdd7c8e3`）。repo 檔只把 User-Agent 裡的聯絡信箱遮蔽，sha1 `4c0da927b41a3eb6ae76535cf7c62897093e00aa`。不含 `out/`、日誌、ETF 持倉資料、`.env`、金鑰或 token。
+- v2.3 變更：日曆改官方 BLS／BEA／Fed／DOL、窗改 14 天、移除 ForexFactory 預期值與前值；新增近 8 天已公布實際值（FRED）；ETF 修正 iShares 日期對齊並新增 ETHA、ETHW、BITB 新頁面、ARKB（21Shares）；Grayscale、Fidelity、ISM 數值、代幣解鎖仍未取得，原因見 README。
+
 ## 2026-11-26（文件：開倉、平倉、未成交撤單直接寫進布神式交易紀錄）
 
 - 只改文件。沒有改 `src/`、`tests/`、`scripts/`、`backups/`，沒有部署，沒有合併。
